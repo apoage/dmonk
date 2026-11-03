@@ -1,0 +1,13 @@
+# dmonk proof package: core Lean 4 only (no Mathlib, no Batteries).
+# `lake build` compiles model.lean and smoke.lean; both also compile standalone
+# with `lean model.lean` since they import nothing beyond Init.
+name = "dmonkproof"
+defaultTargets = ["Model", "Smoke"]
+
+[[lean_lib]]
+name = "Model"
+roots = ["model"]
+
+[[lean_lib]]
+name = "Smoke"
+roots = ["smoke"]

@@ -37,4 +37,5 @@ def pack (Kb i r : Nat) : Nat := (i * Kb + r) * 32
 
 theorem t7_smoke_pack_injective (i1 r1 i2 r2 : Nat)
     (h1 : i1 < 8) (h2 : r1 < 64) (h3 : i2 < 8) (h4 : r2 < 64)
-    (he : pack 64 i1 r1 = pack 64 i2 r2) : i1 = i2 ∧ r1 = r2 := by omega
+    (he : pack 64 i1 r1 = pack 64 i2 r2) : i1 = i2 ∧ r1 = r2 := by
+  unfold pack at he; omega
