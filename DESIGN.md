@@ -1,5 +1,22 @@
 # DESIGN — execution layer for quantized-LLM decode matmul (one die, 8 cores)
 
+> **SILICON UPDATE (post-round-2, measured)**: three of this document's
+> hypotheses are now SETTLED by measurement, and they change the ranking:
+> (1) **f16×i8 does not exist at the raw matrix level** (errata #13) — the
+> realized route is R3 (i8×i8→i32, per-token-quantized A), which has since
+> **run at 137.8 GB/s aggregate m=1, fp64-verified 20/20** (gate met);
+> (2) **per-call n caps at 16** and k=64 is anomalous — the (16,256,64)
+> tile of §1.1 is impossible; the working loop is 16-chunk (16,16,128)
+> sequences at 15 ns/call issue (12.5% occupancy);
+> (3) the L0B geometry family G1a/G1b/G1c/G2 of §3.1 is superseded by the
+> measured fragment [16 N × 32 K] column-major, byte n·32+k (HW-MAP).
+> The model.lean theorems remain TRUE AS STATED — they were conditionals
+> over these hypotheses; what changed is which hypotheses the silicon
+> selected. A round-3 re-ranking under the measured facts (including the
+> 26.5 GB/s/core serial loader rate and the overlap question it opens) is
+> the natural next exercise; PROBLEM-2/3/4 sessions should read HW-MAP
+> first and treat this document's ranking as pre-measurement history.
+
 Scope: `y[m,n] = s[n] · Σ_k x[m,k]·W[k,n]`, m ∈ 1..64, K = N ∈ {2048..8192},
 W8 (i8 + per-channel s[n]) primary, W4 (i4 + per-group offset/scale) secondary.
 Everything below derives from HW-MAP.md / ISA.md. Status tags: **M** = measured
