@@ -51,6 +51,8 @@ Elementwise/tensor ops on 128-lane reels: Mul/Muls/Add/Adds/And/Duplicate,
 casts (i8→f16, i16→f16, f32↔f16). **≤1024 lanes per call** (errata #3);
 sustained ~40 f16 lanes/cycle/core. Dedicated dequant instruction:
 i4 (interleaved packing) + per-group offset/scale → f16, rate UNMEASURED.
+Transcendentals (exp etc., e.g. for softmax): availability and rate
+**UNMEASURED** — treat as an open quantity with both branches.
 
 ## Sync
 

@@ -46,6 +46,7 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
 | DDR → vector SRAM | 173–177 GB/s **aggregate** | full streaming rate |
 | DDR → S1 (plain copies, pre-packed layout) | **180 GB/s aggregate** (≈22.5/core) | DRAM-roof-bound; per-core slabs, 64 MiB working set |
 | Vector SRAM → S1 (plain fill, 48–64 KB tiles) | **250–255 GB/s/core** | plateau; ≤32 KB tiles masked by a ~91 µs launch+queue floor |
+| Grouped quant-GEMM, vendor op (MoE decode shape: 8 groups, 1 token/group, K=N=4096, i8 weights) | **24.6 GB/s** effective weight read, relerr 0 | measured — the floor any custom MoE kernel must beat by ~5× |
 | S1 → L0A/L0B (loader) | **UNMEASURED** | the big open number; matrix unit needs ≥69 GB/s/core of B to stay fed |
 | DDR → L0 direct load instructions | exist in ISA | **UNMEASURED on silicon** (may be a silent no-op — see errata) |
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
@@ -73,6 +74,11 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
     per-tile control overhead grows **quadratically with K** (≈60 ns·(K/64)²)
     while its own input leg runs 180 GB/s. The library control path is the
     wall, not the memory system. Hand-rolled pipelines are the only route.
+11. Multi-die serving (measured): a serving runtime may place consecutive
+    layers on different dies (**layer-split works**, +2% decode at 2 dies —
+    dies alternate, no concurrent streaming); **tensor-split of a single op
+    across dies is unsupported** for this workload class (runtime fault).
+    All cross-die exchanges bounce through the host.
 
 ## Verified layout geometry (for matrix-operand packs)
 
