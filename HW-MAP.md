@@ -36,8 +36,8 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
 | DDR (shared/die) | 86 GB usable/die (LPDDR) | 173.8 GB/s measured |
 | S1 (core SRAM, staging) | ~1 MB | PRIOR (a 256 KB resident strip + working tiles fit) |
 | Vector SRAM (US) | ~256 KB/core | ≥208 KB evidenced by working allocations |
-| L0A / L0B (matrix operand memories) | ≥ 32–64 KB each | PRIOR (library tiling evidence); exact UNMEASURED |
-| L0C (matrix accumulator) | ≥ 64 KB (holds 16×1024 f32) | PRIOR (tiling evidence); exact UNMEASURED |
+| L0A / L0B (matrix operand memories) | **64 KB each** | measured (raw-MMA probes) |
+| L0C (matrix accumulator) | **256 KB** (whole 16×1024 f32 slab resident) | measured |
 
 ## Measured data-movement rates (per core unless stated)
 
@@ -47,8 +47,11 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
 | DDR → S1 (plain copies, pre-packed layout) | **180 GB/s aggregate** (≈22.5/core) | DRAM-roof-bound; per-core slabs, 64 MiB working set |
 | Vector SRAM → S1 (plain fill, 48–64 KB tiles) | **250–255 GB/s/core** | plateau; ≤32 KB tiles masked by a ~91 µs launch+queue floor |
 | Grouped quant-GEMM, vendor op (MoE decode shape: 8 groups, 1 token/group, K=N=4096, i8 weights) | **24.6 GB/s** effective weight read, relerr 0 | measured — the floor any custom MoE kernel must beat by ~5× |
-| S1 → L0A/L0B (loader) | **UNMEASURED** | the big open number; matrix unit needs ≥69 GB/s/core of B to stay fed |
+| S1 → L0A/L0B (loader) | **26.5 GB/s/core under strict-serial barriers** | measured — below the matrix unit's 69 GB/s/core B demand: overlap/ping-pong is the known follow-up (full kernel still hit 137.8 GB/s aggregate, see below) |
 | DDR → L0 direct load instructions | exist in ISA | **UNMEASURED on silicon** (may be a silent no-op — see errata) |
+| MMA issue cost | **15 ns/call at (m,n,k)=(16,16,128)** | measured — 4096 calls/core = 61 µs vs 487 µs stream = 12.5% occupancy |
+| Full W8 decode kernel (i8×i8 route, per-token-quantized A) | **137.8 GB/s aggregate at m=1, m=16 identical** | measured, fp64-verified 20/20 (relerr 4.8e-4) — the gate (120) is met at 115% |
+| Vector i4→f16 unpack (5-pass) | **~5.3 GB/s/core = 42 aggregate int4-effective** | measured — there is NO i4→f16 hardware path on this part (see errata #12); vector dequant for W4 is dead vs 120 |
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 
 ## Silicon errata (all verified live — treat as hard constraints)
@@ -79,12 +82,39 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
     dies alternate, no concurrent streaming); **tensor-split of a single op
     across dies is unsupported** for this workload class (runtime fault).
     All cross-die exchanges bounce through the host.
+12. **No i4→f16 conversion path exists anywhere on this part** (measured):
+    the dedicated dequant instruction's gate covers only i8 inputs here; the
+    vector cast table has only the quantize direction; the dequantizing copy
+    modes are compiled-out no-ops; there is no u8 bitwise And. All i4
+    unpacking is multi-pass vector work (~10 lane-equivalents per i4 byte,
+    ≈83% of the lane wall → ~42 GB/s aggregate ceiling). W4 ≥120 therefore
+    requires an **i4×i4→i32 matrix route** (dtype tuple present in the
+    matrix calibration table, unverified on silicon) or W4 is not viable.
+13. **f16×i8→f32 does NOT exist at the raw matrix level** — the library
+    accepted it once but the hardware calibration table has no such tuple;
+    the realized W8 route is **i8×i8→i32 with per-token-quantized A**
+    (activation scale folded into the epilogue). Assumptions of an f16×i8
+    route are library-level artifacts, not silicon.
+14. **Choreography landmines (raw pipelines)**: two consecutive producer
+    flags without an intervening wait hang ~50% of runs; some cross-engine
+    flag pairs are unwired; queue-based staging into L1 shows
+    nondeterministic ordering (the likely root of an entire class of
+    "never stabilizes" verifications) — use raw buffer staging + full
+    barriers. m=64 hangs when L0C is filled to exactly its 256 KB capacity.
 
 ## Verified layout geometry (for matrix-operand packs)
 
-Fragment layout for a [rows K, cols N] operand, silicon-verified positional:
-**F = [N/16][K][16]** — outermost by 16-column groups, then K rows, innermost
-16-element run. For i8 operands each innermost run is a 32 B block; block
-(i, r) of a [Kb, 256] tile sits at byte offset **(i·Kb + r)·32**. Host-side
+**SETTLED BY MEASUREMENT (raw-MMA probes):** the i8 L0B fragment is
+**[16 N-columns × 32 K-rows], column-major** — element (k, n) of a fragment
+sits at byte **n·32 + k**; fragments are laid out n-c-major across the tile.
+This supersedes the G1a/G1b/G1c/G2 hypothesis family (DESIGN.md §3.1): none
+of the four matched exactly; the probes settled the real one. Host-side
 pre-packing to this order is free (weights are static); in-kernel transform
 copies are the ~7 GB/s software path — never use them on a hot path.
+
+**MMA shape constraints (measured):** per-call **n caps at 16** — n=256
+silently computes only columns 0–15 (the (16,256,64) design tile is
+impossible; the working loop is a 16-chunk (16,16,128) sequence). k=32 and
+k=128 are correct; **k=64 is deterministically wrong** (open anomaly,
+cause not isolated). The align/init flags in the MMA parameter struct are
+ignored on this part.
