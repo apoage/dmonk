@@ -1,0 +1,235 @@
+# PROOF-COVERAGE-4 — ledger of every quantitative claim in DESIGN-4.md
+
+How to read a row: **Claim** quotes or paraphrases the DESIGN-4.md statement (section numbers refer to the
+corrected document); **Proof** names the theorem(s) in `proof/fleet.lean` that fix the number; **fleet.py** names
+the label in `proof/fleet.py` that prints it; **Status** is one of PROVED (follows arithmetically from the
+constants table; "∀ x" marks a universally quantified result over the unmeasured or assumed quantity x — both
+bracket endpoints are then proved as well), INPUT (a HW-MAP measurement or erratum used as given), D2 (a
+DESIGN-2 theorem used as an input), DEFINITION (true by construction of the cost model or a structural choice
+with no number in it), EMPIRICAL — Hx (settled only by the named host experiment of DESIGN-4.md §8, or by
+PROBLEM-3's E-gather / E-exp; no theorem claims it), or ASSUMPTION — Hx (explicitly labelled A in the design and
+carried as a hypothesis variable of the theorems that use it: "PROVED given the assumption").
+
+Units in the proof file: bytes (KiB/MiB/GiB binary, GB decimal); rates in tenths of GB/s (1746 = 174.6);
+time in ns (floored), quoted µs round-half-up (`usR`) or hundredths of ms floored (`ms2`, the convention of the
+§3.2 table); tokens and tokens/s in thousandths (`tpsCard tok T = tok·10⁹/(4·T)`); percentages in tenths
+(`pct`) or hundredths (`pctH`); ratios in tenths, floored (`x10`, the convention behind "7.7×", "2.4×");
+acceptance α and τ(α, k) in thousandths; the host-bounce latency λ, the runtime overhead `ort`, the A-fraction
+penalty `pen` (tenths of a percent) and the KV read rate G are explicit arguments of the model.
+
+## Build status
+
+| Item | Result |
+|---|---|
+| Toolchain | Lean 4.35.0 (`leanprover/lean4:v4.35.0` in `proof/lean-toolchain`, elan), Lake 5.0.0 |
+| `lean proof/fleet.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 7 s (no imports beyond Init; Mathlib/Batteries not used) |
+| `cd proof && lake build` | **succeeds** (targets `Model`, `Smoke`, `Moe`, `Fleet` = fleet.lean, added to `lakefile.toml`) |
+| Theorems in fleet.lean | **124** (`grep -c '^theorem'`), of which 5 are the load-bearing umbrellas under PROMPT-4P's names: `T_mem_feas_dense_1M`, `T_min_dies`, `T_spec_moe_loss`, `T_pipelining`, `T_whatif` (plus `T_mem_feas_dense_4k`, `T_mem_feas_kv_int8`, `T_Lmax`, `T_serial`, `T_spec_dense` under their own names) |
+| `axiom` / `sorry` / `native_decide` declared or used | 0 / 0 / 0; 94 theorems depend on no axiom at all, 30 (the `omega` / `simp` / `Nat.div_le_div_left` proofs and the umbrellas built on them) on the standard `propext` / `Quot.sound` / `Classical.choice` that core tactics emit (`#print axioms` over every theorem) |
+| `decide +kernel` | 10 (the 256-order exchange theorems, the 1001-case α thresholds, τ < 4 ∀ α — the elaborator's recursion limit, not the kernel's, is what they exceed) |
+| Leaf closers used | `decide`, `omega`, `rfl`, `simp` / `simp only` with core lemmas (`List.sum_cons`, `Nat.add_mul`, `Nat.succ_mul`, `Nat.mul_one`, `Nat.div_one`), `exact` / `apply` of core lemmas (`Nat.le_div_iff_mul_le`, `Nat.div_lt_iff_lt_mul`, `Nat.div_le_iff_le_mul_add_pred`, `Nat.div_le_div_left`, `Nat.div_le_div_right`, `Nat.mul_le_mul_left`, `Nat.le_add_right`, `Nat.add_le_add`, `Nat.le_max_left/right`, `Nat.zero_le`); structure: `unfold`, `rw`, `intro`, `constructor`, `refine`, `induction` |
+| `python3 -I proof/fleet.py` | runs on Python ≥ 3.8, no dependencies; every number in the text has a label; the labels that moved in round 2 are `[F9-*-lambda]`, `[F7-*-identity]`, `[F5-*-tsplit]`, `[F5-*-pipe-balance]`, `[F6-moe-*-t4]`, `[F6-moe-mechanism]`, `[F6-dense-breakeven]`, `[F2-order]`, `[F2-order-classes]`, `[F1-ort-threshold]`, `[F1-*-min-dies]`, `[F0-moe-experts]`, `[F8-H7]`, `[F9-mem]`, `[F9-launch-fuse]` — no previously printed number changed |
+| Measured namespace | 20 plain definitions, each with the HW-MAP row it comes from, plus the two DESIGN-2 kernel inputs (`tSlabSer` = moe.lean `T_piece_expert`, `tSlabPP` from moe.lean `T1_pp`) and the DESIGN-2 generator means; none states a DESIGN-4.md conclusion |
+
+## Corrections forced by formalization (round 1 → round 2)
+
+| # | Where | Round 1 said | Now | Caught by |
+|---|---|---|---|---|
+| 1 | §2.2 T8, §4.2, §9, row 14 | "the bounce reaches a fraction x of the step iff λ ≥ (x·T_step − Σbw)/16: 10 % needs λ ≥ 14.8 ms (dense) / 835 µs (MoE); 50 % needs 73.8 ms / 4.18 ms" | the step itself contains the 16 λ: λ ≥ (x·T_rest − (1−x)·Σbw)/(16(1−x)) — **16.4 ms / 918 µs for 10 %, 147.5 ms / 8.27 ms for 50 %**, as an iff over every λ; at the quoted 4.18 ms the MoE bounce is 33.6 % of the step, at 835 µs 9.2 % | T_bounce_threshold_dense, T_bounce_threshold_moe, T_bounce_round1 |
+| 2 | §7 scaling arithmetic, row 34 | "4 × (stage-1 step) + 12λ + T_head = 2362.8 ms against the direct 2362.31; the 0.5 ms residual is the chain ends counted four times" | 4 × stage-1 already carries 12 of the 16 latencies; the exact identity is **4 × stage-1 + T_head + 2·T_launch + 4λ + (3 hops at 13.9 − 1 at 27.3 + logits) = 2362.32 ms** (dense) and 133.85 (MoE), no residual; T_step = Σ blocks + λ | T_rollout_identity, T_pipelining_decomposition |
+| 3 | §8 H8, §9 | "overhead > 3.85 GiB → the dense 1M KV-int8 layout no longer fits" | it fits iff the per-die overhead ≤ 3 804 224 512 B = **3.80 GB = 3.54 GiB** (2.147 GB + the 1.657 GB margin; "3.85" added GB to GiB) | T_mem_feas_kv_int8 (∀ overhead), T_mem_feas_kv_int8_cells |
+| 4 | §6.3 T12, §9, row 33 | "break-even τ ≥ 3.258, i.e. α ≥ 0.87; Zipf(1.5): τ ≥ 2.332, α ≥ 0.65" | exact criterion τ·T₁ ≥ 1000·T₄: uniform **α ≥ 0.865** (0.864 loses at 1.865, 0.865 gains at 1.868), Zipf(1.5) **α ≥ 0.647** (0.646 ties at 1.867 in thousandths while losing by 0.01 % exactly), Zipf(1.0) α ≥ 0.747 (new row); proved in both directions for every α ≤ 1 | T_spec_moe_loss_exact, T_spec_moe_loss_tps, T_spec_moe_tie |
+| 5 | §6.3 table, T12, §9 | dense spec gain "2.4×" (also 1.8× / 3.3×) | the ratio τ·T₁/T₄ is **2.475×** (1.832× / 3.361×); "2.4" was the floored tenths of a ratio of two floored tokens/s cells; the gain holds for every α ≥ 0.024 | T_spec_dense, T_spec_dense_all_alpha, T_spec_dense_breakeven |
+| 6 | §1.1, §2.2 T7, row 12 | "Σbw is the same for every chain order; the only order-dependent terms are the logits source and the id sink; the chosen order is optimal by 8 µs and otherwise free" | the first die receives no activation and the last sends none, so the hop sum is 4·(h₀+h₁+g₀+g₁) − h(first) − g(last): four classes **41 107 / 42 277 / 48 792 / 49 962 ns** by (first, last) die type; the chosen (d1, d0) order is the minimum by 1.2 µs over (d0, d0) and 7.7–8.9 µs over the d1-last orders — proved over all 70 orders | T_order_formula, T_order_optimal, T_order_d1_d0 … T_order_d0_d1, T_order_chosen |
+| 7 | §1.1, §5 | MoE 4/3-layer imbalance "costs 12.5 % at Π = 8" | with lm_head and the bounce halves in the blocks the loss against a balanced 8-way split of the same work is **10.3 %** (max block 18.64 ms vs 16.72 mean; 53.657 vs 59.810 fleet tokens/s); 12.5 % is the pure 4-vs-3.5 figure | T_pipelining_balance |
+| 8 | §2.3, §10 | Π = 8 trunk share "8 × 128 KiB per 18.6 ms block (MoE) = 0.2 %" | the logits card carries 537 600 B per bounce: **0.84 %** of the trunk (dense 0.06 %) — still no queueing | T_pipelining_trunk |
+| 9 | §5, row 28 | "398.52 ms = 273.85 + 11.53 + 65.70 + 45.93" (sums to 397.01); "43.02 = 11.61 + 2.69 + 18.01 + 10.32" | the decomposition omitted the lm_head/8 term: **+ 1.50 ms** (dense) / **+ 0.37 ms** (MoE); the totals and the 5.9× / 3.1× were right | T_tsplit |
+| 10 | §0, §10 | "no other unknown moves any cell by more than 1.3×" | true at 32k (largest 1.32×, the G branch on MoE); at 1M the G branch moves the MoE cell **2.7×** (0.312 → 0.114, already in §9) | T_single_measurement, T_fallbacks |
+| 11 | §1.2 | "the 12.0 GB of expert slabs per layer" | 256 × 3 × 4096² = 12 GiB = **12.9 GB** | T0_expert_slabs_units |
+| 12 | §1.3 | "the new token's K/V (8 KiB per layer at t = 1)" | kv_tok = 2 × 8 × 128 × 2 B = **4 KiB** per token-layer (K and V together; 16 per-core streams of 256 B) | T0_kv_write |
+| 13 | §2.3 | "per token (dense r=1) 98 KiB, 128 KiB, 128 KiB and 597 KiB" | 98 308 B = **96 KiB** (98.3 KB) | T_trunk_bytes |
+| 14 | §9 | "keep f16 K and int8 V (386.4 GB of KV …)" | 120 × 3072 B × 2²⁰ = **386.5 GB** (short by 104.1) | T_mem_room |
+| 15 | §9 | "6 → 4 launches per dense layer saves 21.9 ms per token" | 240 × 91 µs = **21.84 ms** | T_fallbacks |
+| 16 | row 39 | "3.1 % vs 1.5 % → ≤ 0.4 % per layer, not modelled" | 27.4 % of the layer's bytes × 1.6 % = **0.44 %**; now modelled as the explicit hypothesis `pen` ≤ 0.5 % on every dense cell; the headline 0.105 survives any penalty ≤ 0.8 % and breaks at 0.9 % (0.104); spec 0.262 → 0.260 at 0.5 % | T_afrac_size, T_afrac_headline, T_afrac_edge, T_serial_dense_afrac |
+| 17 | §9 | host-paged KV prefix "0.048 tokens/s/card" | 0.0479: 0.048 rounded, 0.047 under the floor convention of every other tokens/s cell | T_fallbacks |
+| 18 | fleet.py (no text change) | `[F8-H7]` printed "3 s" (integer division) for a 3.50 s load | 3.5 s (2.3 s if both links of a card were independent, H2) | T_ladder_rest |
+
+Not corrections but tightenings found while proving: (a) under layer-split the compute time is the same for
+every partition list of the 120 layers (T_serial_partition), and tokens/s ≤ R_gemm/bytes holds for any extra
+cost (T_ceiling: 0.453 fleet-wide in floored thousandths, "0.454" is the rounded real ratio); (b) the dense
+0.105 cell holds for every λ in the 10–500 µs bracket, not only at its three points (T_step_lambda_bracket);
+(c) the KV-int8 fit depends on the overhead monotonically, so H8 can only shrink L_max (T_Lmax_monotone);
+(d) the spec-decode verify batch on dense is a gain for every α ≥ 0.024 (T_spec_dense_all_alpha); (e) the
+MoE loss has a draft-independent floor: T₄ ≥ 4·E₁ + (T₁ − E₁) makes every τ < 2.852 a loss (T_spec_moe_mechanism).
+
+**Load-bearing verdicts.** `T_min_dies` survives formalization unchanged and in a stronger form than round 1
+stated it: 4 dies cannot hold either shape under ANY assignment of layers to dies (some die carries ≥ 30 dense /
+≥ 7 MoE layers = 95.6 / 90.5 GB of int8 before KV or overhead; the totals 386.7 / 363.0 GB exceed 4 × 86 = 344),
+with full int8 residency as the hypothesis (the host-streaming escape is costed and rejected in §9); 5 dies hold
+both at 4k (24 / 6 layers per die; dense L_max 52 693 on 5 dies). `T_spec_moe_loss` survives unchanged in
+substance — the verify batch multiplies the active-expert bytes (D(4) = 4·D(1)), 1.451 < 1.867 at α = 0.7, a
+loss for every α ≤ 0.864 under uniform routing — with its threshold sharpened from "α ≥ 0.87" to α ≥ 0.865
+(and Zipf(1.5) from "0.65" to 0.647, both directions proved for every α).
+
+## The 39-row ledger (DESIGN-4.md Appendix A)
+
+| # | Claim | Proof | fleet.py | Status |
+|---|---|---|---|---|
+| 1 | dense resident int8 = 120 · 3 187 671 040 + 2 · 2 101 346 304 = 386 723 217 408 B = 386.7 GB (int4 source 193.3); streamed per token 384.6 GB | T0_dense_bytes | [F0-dense] | PROVED |
+| 2 | MoE resident int8 = 28 · 12 926 844 928 + 2 · 525 336 576 = 363 002 331 136 B = 363.0 GB (181.5); 12 GiB = 12.9 GB of expert slabs per layer; streamed per token 12.9 GB | T0_moe_bytes, T0_expert_slabs_units | [F0-moe] [F0-moe-experts] | PROVED |
+| 3 | KV per token 491 520 B (dense) / 114 688 (MoE); at 2²⁰ tokens 515.3 / 120.2 GB; kv_tok = 4 KiB; fleet 688 GB | T0_kv, T0_kv_write | [F0-kv1M] | PROVED |
+| 4 | per-die totals at 4k: dense 52.3 / 51.4 / 50.2 / 52.3 GB, MoE 54.5 / 41.0 / 53.9 / 42.7 — all ≤ 86 GB (weights 49.9 / 49.0 / 47.8; 52.2 / 38.7 / 51.7 / 40.5; ws + rt 2.2) | T_mem_feas_dense_4k, T_mem_feas_moe_4k | [F10-mem-dense-4k] [F10-mem-moe-4k] | PROVED given ASSUMPTION — H8 (2 GiB overhead, 64 MiB workspace) |
+| 5 | dense 1M f16 KV: every die 114.4–116.5 GB > 86, for every overhead ≥ 0; under ANY 8-way partition the fleet's KV room 282.3 GB < 515.4 (short by 233.0) | T_mem_infeas_dense_1M (∀ ort), T_mem_infeas_dense_1M_cells, T_mem_infeas_1M_any_partition (∀ w, kv), T_mem_room, T_mem_feas_dense_1M | [F10-mem-dense-1M] [F9-mem] | PROVED (∀ overhead, ∀ partition) |
+| 6 | dense 1M KV-int8: 84.3 / 83.4 / 82.2 / 84.3 GB, feasible iff overhead ≤ 3 804 224 512 B = 3.80 GB = 3.54 GiB; margin 1 656 740 864 B = 1.66 GB at 2 GiB; embedding to host → 82.2, lm_head die stays 84.3 | T_mem_feas_kv_int8 (∀ ort, iff), T_mem_feas_kv_int8_cells, T_mem_embed_to_host | [F10-mem-dense-1M KV-i8] [F1-dense-1M-kvi8] [F1-ort-threshold] | PROVED ∀ overhead (the razor-thin fit is the H8 hypothesis ort ≤ 3.80 GB: ASSUMPTION — H8) |
+| 7 | MoE 1M f16: 71.6 / 53.8 / 71.1 / 55.6 GB; KV 17.1 / 12.8 | T_mem_feas_moe_1M | [F10-mem-moe-1M] | PROVED given ASSUMPTION — H8 |
+| 8 | L_max = min_pos ⌊room/(n_pos·kv_tok·B)⌋: dense 551 253 / 137 813 / 34 453 (B = 1/4/16), KV-i8 1 102 506, B = 8: 68 906; MoE 1 925 823 / 481 455 / 120 363; binding position 0 (embedding) for both; the draft die is not binding (draft-free L_max = 551 253) | T_Lmax, T_Lmax_binding_pos, T_Lmax_formula | [F1-dense-Lmax] [F1-moe-Lmax] [F1-dense-draftfree] | PROVED given ASSUMPTION — H8 |
+| 9 | ΔL_max per GB of overhead = 16 276 (dense) / 61 035 (MoE); L_max monotone in the overhead | T_Lmax_dOverhead, T_Lmax_monotone (∀ a ≤ b) | [F1-dLmax] | PROVED (direction: EMPIRICAL — H8/H5 decide the overhead) |
+| 10 | minimum dies = 5: 4 dies infeasible for ANY layer assignment (≥ 30 / 7 layers on some die = 95.6 / 90.5 GB; totals > 344 GB); 5 dies fit at 4k (dense 24/die: 81.2 GB worst, 82.4 on the lm_head + draft die, L_max 52 693 ≈ 53k; MoE 6/6/6/5/5: 80.4 / 81.6); the fleet.py uniform-share heuristic agrees | T_min_dies, T_min_dies_dense_4, T_min_dies_moe_4 (∀ n₀..n₃), T_min_dies_4_total, T_min_dies_5_dense, T_min_dies_5_moe, T_min_dies_heuristic | [F1-dense-min-dies] [F1-moe-min-dies] [F1-*-Lmax] | PROVED (∀ assignment) under the stated hypothesis of full int8 residency (errata #12; the host-streaming escape is rejected in §9) |
+| 11 | Σbw per token: hops 2.9 / 3.6 µs (r = 1), 11.6 / 14.2 (r = 4), MoE 0.7 / 0.9; logits 18.8 / 75.2 µs; totals 41 107 / 164 443 / 657 799 ns (dense r = 1/4/16), 24 367 / 97 484 / 389 951 (MoE); 16 latencies | T_bw_hops, T_bw_sum | [F2-*-rows*] | PROVED |
+| 12 | hop sum = 4·(h₀+h₁+g₀+g₁) − h(first) − g(last) for every order with four dies of each kind; classes 41 107 / 42 277 / 48 792 / 49 962 ns; the chosen order (mask 0b01010101) is the minimum; logits source 18.8 vs 27.0 µs | T_order_formula, T_order_optimal, T_order_d1_d0, T_order_d0_d0, T_order_d1_d1, T_order_d0_d1, T_order_chosen (all 256 masks) | [F2-order] [F2-order-classes] | PROVED (∀ 70 orders) |
+| 13 | T_x(λ) = Σbw + 16λ: dense 201 / 1 497 / 8 041 µs at λ = 10 / 91 / 500 µs (r = 1), 324 / 1 620 / 8 164 (r = 4); MoE 184 / 1 480 / 8 024, 257 / 1 553 / 8 097; between the endpoints for every λ in the bracket | T_Tx_cells, T_Tx_bracket (∀ λ) | [F2-*-rows1] [F2-*-rows4] | PROVED ∀ λ; the value of λ: ASSUMPTION — H1/H3 (91 µs primary) |
+| 14 | bounce ≥ 10 % of the 32k step iff λ ≥ 16 392 030 ns (dense) / 917 693 (MoE); ≥ 50 % iff λ ≥ 147 548 816 / 8 271 412; the round-1 figures (14 762 / 835 µs; 73 820 / 4 181) give 9.1 / 9.2 % and 33.3 / 33.6 % | T_bounce_threshold_dense, T_bounce_threshold_moe (∀ λ, iff both ways), T_bounce_round1, T_step_lambda_form | [F9-dense-lambda] [F9-moe-lambda] | PROVED (∀ λ) — corrected |
+| 15 | per-card trunk bytes per token (dense r = 1): 98 308 (= 96 KiB) / 131 072 / 131 072 / 611 328; MoE 24 580 … 537 600; utilisation at Π = 1 < 0.02 % (dense 0.001 %, MoE 0.015 %); budget 27.6 GB/s × T_step = 65 / 3.7 GB | T_trunk_bytes, T_trunk_util | [F2-dense-rows1] [F2-moe-rows1] | PROVED |
+| 16 | queueing bound behind a bulk chunk on the 13.9 GB/s link: 64 KiB → 4 714 ns (5 µs), 1 MiB → 75 437 (75 µs), 16 MiB → 1 206 993 (1 207 µs = 1.2 ms) | T_queue | [F8-H3] | PROVED (the realised wait: EMPIRICAL — H3) |
+| 17 | per-layer times: dense GEMM 18 256 993 ns; MoE 240 223 + 2 967 496 (serial) / 2 344 360 (pp) = 3 207 719 / 2 584 583; heads 12 035 202 / 3 008 800; launches 546 000 / 637 000 per layer, 65.70 / 18.01 ms per token (722 / 198 launches); W = 2 202 874 362 / 92 824 932 ns; T_slab,pp = 97 015 = (784 118 − 8 000)/8 rounded | T_layer, T_W, T0_kv | [F3-dense-layer] [F3-moe-layer] | PROVED from INPUT (R_gemm M) and D2 (T_slab: moe.lean T_piece_expert, T1_pp; F = 8 µs: DESIGN-2 ASSUMPTION E14/E15; regime: EMPIRICAL — DESIGN-2 E13) |
+| 18 | attention per layer: every cell of the §3.1 table (KV 96 089 … 24 598 896 stream, ×3 gather3x; softmax native/poly; MMA 7 680 … 1 966 080); softmax/MMA 6.3 / 8.0 % of the KV stream; KV/T_gemm 4.2 % dense, 24.0 % MoE at 32k; KV monotone between the endpoints for every G in 582..1746, softmax linear for every c_E in 4..16 | T_attn_dense, T_attn_moe, T_attn_shares, T_attn_G_bracket (∀ G), T_attn_cE_bracket (∀ c_E) | [F3-*-attn] | PROVED ∀ G, c_E; which branch holds: EMPIRICAL — PROBLEM-3 E-gather / E-exp |
+| 19 | §3.2 table, all 26 rows: T_step, W, KV, launch, bounce, draft (hundredths of ms), tokens/step, tokens/s/card, feasibility; e.g. dense 32k 2362.31 → 0.105, spec 2416.71 → 0.262, B = 16 3746.62 → 1.067; MoE 32k 133.84 → 1.867, 436.12 → 1.451, 1696.70 → 2.357; dense 1M f16 MEM, KV-i8 3746.00 → 0.066; MoE 1M 801.09 → 0.312 | T_step_dense_4k, T_step_dense_32k, T_step_dense_128k, T_step_dense_1M, T_step_moe_4k, T_step_moe_32k, T_step_moe_128k, T_step_moe_1M, T_draft | [F3] | PROVED (primary branch: λ = 91 µs ASSUMPTION — H3; G/c_E EMPIRICAL — PROBLEM-3; launches serialised EMPIRICAL — H6; MoE serial regime EMPIRICAL — DESIGN-2 E13; A-fraction pen = 0, see row 39) |
+| 20 | §3.3 branches at 32k: dense gather3x 2546.81 → 0.098, poly 0.105, λ 10/500 µs 2361.02 / 2368.86 → 0.105, launches pipelined 2296.61 → 0.108, pessimistic 2553.35 → 0.097, optimistic 2295.32 → 0.108 (−8 % / +3 %); MoE 176.89 → 1.413, 132.55 → 1.886, 140.39 → 1.780, 115.82 → 2.158, pp 116.39 → 2.147 (−13 %), Zipf 1.867, pessimistic 183.43 → 1.362, optimistic 97.08 → 2.575 (−27 % / +38 %); dense 0.105 and MoE 1.780–1.886 for EVERY λ in 10–500 µs | T_branches_dense, T_branches_moe, T_step_lambda_form, T_step_lambda_bracket (∀ λ) | [F3b-*] | PROVED (∀ λ; branch endpoints) |
+| 21 | MoE B = 16 by family at 32k: uniform D = 128 → 1696.70 ms, 2.357; Zipf(1.0) D = 68 → 1076.88, 3.714; Zipf(1.5) D = 45 → 839.29, 4.765; at 1M MEM | T_moe_families | [F3c-*] | PROVED (D(16): EMPIRICAL — DESIGN-2 generator / H9) |
+| 22 | L*_KV: dense 778 240 (= W_layer/4096 exactly), 194 560, 48 640; gather3x 259 414 / 64 854 / 16 214; KV-i8 1 556 480 / 518 827; MoE 136 736 / 34 184 / 8 546, pp 110 173; gather3x 45 579 / 11 395 / 2 849, pp 36 725; 128k is 4.1 % under 136 736; KV ≥ GEMM ⟺ L ≥ L* on the exact per-layer model for every L | T_Lstar_kv, T_Lstar_iff (∀ L), T_Lstar_iff_moe (∀ L) | [F4-*-Lkv-*] | PROVED |
+| 23 | t* = ⌈kv_tok·3456/(G·H_q·c_E)⌉: dense 16 / 4 (native / poly), gather3x 48 / 12, KV-i8 8 / 2; MoE 64 / 16, gather3x 191 / 48; the exact-rate iff for every t; in the floored model at 32k t = 16 binds and 15 does not, poly t = 4 binds (776 722 vs 768 715, +1.0 %) and 3 does not | T_tstar, T_tstar_iff (∀ t), T_tstar_model | [F4-*-tsm-*] | PROVED |
+| 24 | MMA share of the KV time at 32k: dense 8.0 / 32.0 / 127.9 % (t = 1/4/16, fragments 1/4/16; t = 16 is MMA-bound), MoE 8.0 / 8.0 / 32.0 (1/1/4) | T_mma_share | [F4-*-mma-*] | PROVED |
+| 25 | regime map, all 24 cells: binding term (W everywhere except MoE 1M = KV, MEM where infeasible) and share: dense 96.5 / 94.3 / 89.7, 93.3 / 91.2 / 58.8 (KV 39 %), 83.5 / 81.8 / MEM, MEM → 58.8 with KV-i8; MoE 80.7 (launch 15.7) / 81.7 / 95.5, 69.4 (KV 16, launch 13.5) / 78.1 / 78.5 (KV 20), 46.8 (KV 43.4) / 68.1 / MEM, KV 86.0 / 62.4 / MEM; bounce ≤ 1.1 %, launch 2.8 / 13.5 % | T_regime_dense, T_regime_moe, T_regime_shares | [F4-regime] | PROVED |
+| 26 | layer-split ceiling: Σ_pos n_pos·T = n_L·T for ANY partition list; tokens/s ≤ R_gemm/bytes for ANY extra cost: dense ≤ 0.453 fleet-wide (0.113/card), MoE ≤ 13.457 (3.364); the predictions are 92.9 % / 55.5 % of the ceilings; the fleet streams one die's rate (0.423 fleet = 0.105 × 4) | T_serial_partition (∀ list), T_serial_partition_120, T_ceiling (∀ extra), T_serial | [F10-headline] | PROVED (∀ partition, ∀ extra); the "+2 % at 2 dies" measurement is INPUT |
+| 27 | P2P at any rate: saving ≤ T_x for any replacement cost x: 1 497 µs < 1.5 ms = 0.06 % of the dense step; 1 480 µs = 1.1 % MoE; over the λ bracket T_x ≤ 8.04 ms | T_p2p_bound (∀ x), T_whatif, T_Tx_bracket | [F5-*-p2p] | PROVED (∀ x, ∀ λ) |
+| 28 | tensor-split: dense 398.52 ms = 273.85 + 11.53 + 1.50 (lm_head/8) + 65.70 + 45.93 → 0.627 (5.9×); λ = 10 µs 359.64; pipelined 332.82; per reduction 191 µs; MoE 43.02 = 11.61 + 2.69 + 0.37 + 18.01 + 10.32 → 5.810 (3.1×), launch 42 %; 33.95 / 25.00; 184 µs; with P2P (50 GB/s, 10 µs): 20 / 13 µs per reduction, 357.50 → 0.699 (6.6×), 33.41 → 7.482 (4.0×), launch 54 % | T_tsplit, T_tsplit_p2p, T_regime_shares | [F5-*-tsplit] [F5-*-tsplit-p2p] | PROVED under the stated premises (8-way concurrent streaming + 2 host all-reduces per layer: a what-if, the runtime faults today — INPUT errata #11) |
+| 29 | Π = 8: dense blocks 293.67 / 293.76 / 293.76 … 305.99 ms, max 305 994 801 ns, Σ = 2 362 228 269 = T_step − λ, 1/max = 3.268 fleet = 0.817/card = 7.7×; MoE 18.55 / 14.02 / 18.64 … 17.23, max 18 636 756, Σ = 133 756 319, 53.657 fleet = 13.414/card = 7.1×; speed-up ≤ 8 + λ/max (< 8.003); MoE imbalance 10.3 % against a balanced split (ideal 59.810); trunk at Π = 8: 0.06 % / 0.84 %; B = 8 contexts at 32k fit (L_max(8) = 68 906) | T_pipelining, T_pipelining_blocks, T_pipelining_decomposition, T_pipelining_bound (via sumPos_le_maxOver), T_pipelining_balance, T_pipelining_trunk, T_pipelining_memory | [F5-*-pipe] [F5-*-pipe-balance] | PROVED under the premise Π = 8 (whether the runtime pipelines: EMPIRICAL — H4) |
+| 30 | D2D 10.7 → 50 GB/s: per-token cross-die traffic 0 B (the step has no D2D term); a re-partition move of one die's KV at 128k: dense 8.0 GB 753 → 161 ms, MoE 2.1 GB 201 → 43 ms | T_d2d, T_whatif | [F5-*-d2d] | PROVED (the 0 B is DEFINITION: KV is die-local, errata #11) |
+| 31 | draft token: 5 727 + 1 153 + 11 011 + 19 + 182 µs = 18 092 241 ns = 18.1 ms (7.1 pipelined), 61 % launch-bound; verify step k = 3: 54.28 ms (fleet.py `ms2` 54.27) / 21.24 pipelined; a 0.5 GB draft saves 2.9 ms, a 12-layer draft 5.5 ms; Π = 8 contention 6.9 ms per draft token; full-context draft KV 49 152 B/token = 10 % of the main model's, 51.5 GB at 1M | T_draft | [F6-draft] [F6-contention] | PROVED (launch floor INPUT; pipelining EMPIRICAL — H6; λ ASSUMPTION — H3; the 4k window is a model-quality choice: DEFINITION) |
+| 32 | τ(α, k) = Σ α^i: 1.500 / 1.750 / 1.875 / 1.968 / 1.990 (α = 0.5, k = 1/2/3/5/7), 1.700 / 2.190 / 2.533 / 2.941 / 3.139 (0.7), 1.900 / 2.710 / 3.439 / 4.685 / 5.693 (0.9); τ(α, 3) < 4 for every α < 1 | T_tau, T_tau_lt_rows (∀ α) | [F6-tau] | PROVED (α itself: ASSUMPTION — fleet-only H9) |
+| 33 | spec decode: dense 0.193 / 0.262 / 0.355 at α = 0.5 / 0.7 / 0.9 (gain 1.832 / 2.475 / 3.361×), best k = 5 → 0.200 (α 0.5), 7 → 0.315 (0.7) and 0.571 (0.9), a gain for every α ≥ 0.024; MoE uniform 1.074 / 1.451 / 1.971 < 1.867, best k = 1 → 1.811, loss iff α ≤ 0.864 (τ·T₁ < 1000·T₄, T₄/T₁ = 3.2584); Zipf(1.0) D(4) = 25: 1.740, loss iff α ≤ 0.746; Zipf(1.5) D(4) = 20: 2.028 (1.09×), loss iff α ≤ 0.646 (tie at 1.867); mechanism D(4) = 4·D(1), E₁ = 61.7 % of T₁, floor τ < 2.852 | T_spec_dense, T_spec_dense_all_alpha, T_spec_dense_breakeven, T_spec_dense_best_k, T_spec_steps, T_spec_moe_loss, T_spec_moe_loss_exact, T_spec_moe_loss_tps (∀ α, both directions), T_spec_moe_tie, T_spec_moe_mechanism, T_spec_moe_cells | [F6-dense-a*] [F6-dense-k7] [F6-dense-breakeven] [F6-moe-a*] [F6-moe-*-t4] [F6-moe-mechanism] | PROVED (∀ α); which routing family holds: EMPIRICAL — H9 |
+| 34 | rollout: 1 card 567.24 / 587.42 / 656.61 ms (dense, 4k / 32k / 128k), 2 cards 1134.59 / 1174.95 / 1313.31, 4 cards 2281.51 / 2362.22 / 2638.96; MoE 27.85 / 32.56 / 48.71, 55.81 / 65.22 / 97.51, 114.92 / 133.75 / 198.32; blocks 283.57 … 340.58 / 15.85 … 27.86; identity 4 × stage-1 + T_head + 2·T_launch + 4λ + (3 hops at 13.9 − 1 at 27.3 + logits) = T_step exactly (both shapes); the round-1 form gives 2362.84 | T_rollout_dense, T_rollout_moe, T_rollout_identity, T_pipelining_decomposition | [F7-*] [F7-*-identity] | PROVED — corrected |
+| 35 | ladder expectations: H1 link ns for 4 KiB / 64 KiB / 1 MiB / 64 MiB in both directions (2 374 / 4 714 / 2 400 / 3 449 ns at 64 KiB; 2 431 / 4 828 / 2 458 / 3 532 µs at 64 MiB); H2 41.5 vs 27.6; H5 slopes 61 440 / 16 384 / 12 288 B per token, 8.0 GB at 128k; H7 load 3.5 s (2.3 s with independent links), source 193.3 GB; H3 queue bound (row 16) | T_ladder_H1, T_ladder_rest, T_queue | [F8-*] | PROVED (what the experiments return: EMPIRICAL — H1/H2/H3/H5/H7) |
+| 36 | rows cliff: 81/174.6 = 46.3 % (46.4 rounded); B·t ≤ 16 — spec k = 3 allows B ≤ 4, B = 16 excludes spec | T_rows_cliff | [F9-rows] | INPUT (m ≥ 24 measurement) + PROVED arithmetic |
+| 37 | fallbacks: dense serial regime (138.9) 2928.50 ms → 0.085; MoE 1M gather3x 2178.63 ms → 0.114 (2.7×); launch fusion 6 → 4 saves 21.84 ms; H6 pipelining −18.0 ms MoE / −33.0 ms per verify step; host-paged KV prefix 2.1 s per card per token, ≥ 5.2 s, 0.0479; §10 single-unknown multipliers 0.93 / 0.76 / 1.15 / 1.03 / 1.16 / 1.0 / 0.95× | T_fallbacks, T_single_measurement | [F9-dense-serial] [F9-moe-1M-gather3x] [F9-launch-fuse] | PROVED |
+| 38 | power: Π = 1 one die streams at a time → ≤ 1 card at the measured 141 W; Π = 8 all cards at 141 < 150 W TDP, no throttle | T_power | [F9-power] | INPUT (HW-MAP card table) — the 141 < 150 comparison is the only arithmetic |
+| 39 | A-fraction approximation: the measured 174.6 carries 1.5 % of A bytes, the down-projection 3.1 % → 0.44 % per dense layer (27.4 % × 1.6 %); modelled as the explicit hypothesis `pen` (tenths of a percent) on every dense cell; the 32k headline is 0.105 for every pen ≤ 0.8 % and 0.104 at 0.9 %; the spec cell 0.262 → 0.260 at 0.5 %; the MoE step does not contain pen | T_afrac_size, T_afrac_headline (∀ pen ≤ 0.8 %), T_afrac_edge, T_serial_dense_afrac, T_serial_moe_afrac (∀ pen) | — | ASSUMPTION (stated; "3.1 %" is DESIGN-2's kernel-geometry figure, not re-derived here) — carried as a hypothesis, robustness PROVED |
+
+**Coverage of the 39 rows: 39/39 have a theorem (100 %); 37 PROVED (14 of them universally quantified over an
+assumed or unmeasured quantity: overhead, λ, G, c_E, α, partition, order, replacement cost, pen), 1 INPUT
+(row 38), 1 ASSUMPTION carried as a hypothesis with its robustness proved (row 39); 0 orphans.** The
+assumptions the proved rows rest on, each named where it enters: H8 (2 GiB overhead; rows 4, 6–8), H3/H1 (λ =
+91 µs; rows 13, 19, 20, 31 — every one also proved over the 10–500 µs bracket), H6 (launch serialisation; rows
+17, 19, 31), H4 (Π = 8 is a what-if; row 29), H9 (routing family and α; rows 21, 33), PROBLEM-3 E-gather / E-exp
+(rows 18–20, 22–25: both branches proved), DESIGN-2 E13 (serial vs ping-pong expert regime; rows 17, 19, 20, 22),
+errata #11/#12 as INPUT (KV die-local, no P2P, no tensor-split, int8 residency; rows 10, 26, 28, 30).
+
+## Section-by-section ledger (every other number in the text)
+
+### Constants table and header
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| R_gemm 174.6 flat m = 1..16, serial fallback 138.9, m ≥ 24: 81 (46.3 % of flat) | Measured.rGemm, rGemmSer, rRows24, T_rows_cliff | R_GEMM, R_GEMM_SER | INPUT |
+| R_ddr 173.8 / R_read ~181 (not binding) | Measured.rDdr, rRead | R_DDR, R_READ | INPUT (unused by any cell) |
+| host links 27.6 / 27.3, 13.9 / 19.0; P2P refused; D2D 10.7 | Measured.h2d0 … d2h1, rD2D | H2D, D2H, R_D2D | INPUT |
+| T_slab 122 979 ns serial, 97 015 pp = (784 118 − 8 000)/8 rounded, F = 8 µs | Measured.tSlabSer, tPpStep, tSlabPP (T0_kv proves 97 015), fMoe | T_SLAB_SER, T_SLAB_PP, F_MOE | D2 (moe.lean T_piece_expert, T1_pp); F: DESIGN-2 ASSUMPTION |
+| D(t): uniform min(8t, 256); Zipf(1.0) 8/25/68, Zipf(1.5) 8/20/45 | Design.dOf, Measured.dZipf10/15 | D_TAB, D_of | DEFINITION (uniform) / EMPIRICAL — DESIGN-2 generator, H9 |
+| c_mma 15 ns; R_vec 345.6 G lane-ops/s per die = 8 × 43.2; T_launch 91 µs | Measured.cMma, rVecCore, tLaunch; T0_kv (rVecDie = 3456) | C_MMA, R_VEC_DIE, T_LAUNCH | INPUT + PROVED unit conversion |
+| 86 GB per die, 8 dies = 688 GB; 141 W / 150 W | Measured.dieMemGB, cards, diesPerCard, pSustain, pTdp; T0_kv, T_power | DIE_MEM, DIES, P_SUSTAIN, P_TDP | INPUT |
+| G: stream 174.6 / gather3x 58.2; c_E native 4 / poly 16 | Design.gStream, gGather3x (T0_kv: 582), cNative, cPoly | G_BR, C_EXP | UNMEASURED — PROBLEM-3 E-gather / E-exp (both branches proved everywhere) |
+| λ 91 µs primary, bracket 10 / 500 | Design.lamLo/Mid/Hi | LAMBDA | ASSUMPTION — H3 (every λ-dependent theorem also ∀ λ in the bracket) |
+| O_rt 2 GiB, WS 64 MiB | Design.oRt, ws | O_RT, WS | ASSUMPTION — H8 (hypothesis variable `ort`) |
+| α 0.5 / 0.7 / 0.9; k = 3 | theorem variable `a`; Design.kDraft | ALPHA, K_DRAFT | ASSUMPTION — fleet-only H9 |
+| Π = 1 measured; 8 is the what-if | model structure (stepNs vs dieBlock) | — | INPUT / EMPIRICAL — H4 |
+| shapes: dense 120 layers, 16 384 / 53 248, 128 / 8 / 128; per-layer 3 187 671 040 (QKV 18 432 + O + 3 × 53 248); MoE 28 layers, 4 096, 32 / 8 / 128; 41 943 040 + 12 926 844 928; embed/head 2 101 346 304 / 525 336 576 | T0_dense_bytes, T0_moe_bytes (denseLayerBytes, moeAttnBytes, moeExpertBytes) | [F0-*] | PROVED |
+| KV 4 096 B per token-layer → 491 520 / 114 688 per token; 515.3 / 120.2 GB at 1M; launches 6 / 7 per layer | T0_kv, T_layer | [F0-kv1M] | PROVED |
+| draft 1 GB, 24 layers, 121 launches, 201 MB window, k = 3 | Design.draftW, draftLaunch, draftKv; T0_kv | [F0-draft] | DEFINITION (the draft is a design choice) |
+
+### §0 Summary
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| dense fits with f16 KV to L_max = 551 253; 1M does not close with f16 KV (515.3 vs 282.3 GB room); closes with KV-int8 at 84.3 of 86 on the worst die, 1.66 GB margin, iff overhead ≤ 3.80 GB; MoE L_max 1 925 823; minimum fleet 5 dies | rows 5, 6, 8, 10 | — | PROVED (given H8) |
+| 32k: dense 0.105 (t = 1), 0.262 spec, 1.067 at B = 16; MoE 1.867, 2.357 B = 16 (4.765 Zipf 1.5); spec on MoE 1.451 | T_step_dense_32k, T_step_moe_32k, T_moe_families | [F10-headline] | PROVED |
+| binding: the weight stream of one die at a time; KV binds for MoE at 1M (86 %) and dense beyond L* = 778 240; bounce ≤ 1.1 %; launch 13.5 % of the MoE step; softmax never binds at t = 1 | T_regime_dense, T_regime_moe, T_regime_shares, T_Lstar_kv, T_tstar (t* ≥ 4 on every branch) | [F4-regime] | PROVED |
+| 1M: MoE 0.312 (KV 688.8 of 801.1 ms); dense 0.066 with KV-int8 (KV 1 475.9 of 3 746.0); f16 infeasible | T_step_moe_1M, T_step_dense_1M, T_summary | [F3] | PROVED |
+| P2P ≤ 1.5 ms (≤ 1.1 %); D2D nothing per token; tensor-split 5.9× / 3.1×; Π = 8 7.7× / 7.1× | rows 27–30 | [F5-*] | PROVED (premises as hypotheses) |
+| H4 moves every cell ~7×; at 32k no other unknown > 1.32×; at 1M the G branch 2.7× | T_single_measurement | [F3b-*] [F9-moe-1M-gather3x] | PROVED — corrected |
+| ceiling 174.6 / 384.6 = 0.454 fleet (0.113/card), MoE ≈ 13.5 (3.4); predictions at 93 % / 55 % | T_ceiling, T_serial | [F10-headline] | PROVED (0.453 / 13.457 in floored thousandths) |
+
+### §1 Partition
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| §1.1 chain order d1 first / d0 last: 18.8 vs 27.0 µs logits; the hop sum depends only on the first and last die types; chosen = min of four classes (1.2 µs) | T_bw_hops, T_order_* | [F2-order*] | PROVED — corrected |
+| §1.1 boundaries after 14, 29, …; MoE 4/3 split; imbalance invisible at Π = 1, 10.3 % at Π = 8 | T_serial_partition, T_pipelining_balance | [F1-*-layout] [F5-moe-pipe-balance] | PROVED — corrected (12.5 → 10.3) |
+| §1.1 extra dies cost one hop each ≈ 2λ + 3 µs; 5 dies hold dense to L ≈ 53k (24 layers = 76.5 GB, 78.6 with embedding, 5.2 GB left) | T_summary (185 / 186 µs), T_min_dies_5_dense (52 693; 76.5; 78.6; 5.1 GB floored) | [F1-dense-min-dies] | PROVED |
+| §1.2 expert-parallel split = tensor-split (faults); 12.9 GB (12 GiB) of slabs per layer | T0_expert_slabs_units | [F0-moe-experts] | INPUT (errata #11) + PROVED — corrected units |
+| §1.3 16 per-core streams of L × 256 B; kv_tok = 4 KiB written per token-layer; L_cap 551 253 / 1 102 506 / 1 925 823; 2048-key blocks = 128 KiB of scores | T0_kv_write, T_Lmax | — | PROVED — corrected (8 → 4 KiB); the stream rate itself: EMPIRICAL — E-gather |
+| §1.4 draft on position 1 costs no context (binding die is position 0) | T_Lmax_binding_pos | [F1-dense-draftfree] | PROVED |
+| §1.6 load 3.5 s link-bound (2.3 if independent); a host byte costs 6.3× its DDR time | T_ladder_rest, T_serial (x10 1746 276 = 63) | [F8-H7] | PROVED |
+| §1.7 tables (rows 4–8); ΔL_max 16 276 / 61 035; B = 16 feasible only to 34k / 120k | rows 4–9 | [F10-mem-*] | PROVED (given H8) |
+
+### §2 Exchange
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| §2.1 hop table (bytes, µs r = 1 / r = 4), logits 18.8 / 75.2, ids 0.0, Σ 41.1 / 164.4 / 24.4 / 97.5 µs, 16 λ | T_bw_hops, T_bw_sum | [F10-xch-*] [F2-*] | PROVED |
+| §2.1 T_x table (λ = 10 / 91 / 500) | T_Tx_cells, T_Tx_bracket | [F2-*] | PROVED (∀ λ) |
+| §2.2 shares 0.06 % / 1.1 % at 32k | T_regime_shares, T_p2p_bound | [F5-*-p2p] | PROVED |
+| §2.2 T8 thresholds 16.4 ms / 918 µs (10 %), 147.5 / 8.27 ms (50 %) | T_bounce_threshold_dense/_moe, T_bounce_round1 | [F9-*-lambda] | PROVED (∀ λ) — corrected |
+| §2.2 T7 order dependence | T_order_* | [F2-order-classes] | PROVED — corrected |
+| §2.3 trunk bytes 96 KiB / 128 / 128 / 597; budget 65 / 3.7 GB; < 0.02 % | T_trunk_bytes, T_trunk_util | [F2-dense-rows1] | PROVED — corrected units |
+| §2.3 Π = 8: 0.84 % on the logits card (MoE), 0.06 % dense | T_pipelining_trunk | [F5-*-pipe-balance] | PROVED — corrected |
+| §2.3 bulk chunk waits 5 µs / 75 µs / 1.2 ms | T_queue | [F8-H3] | PROVED (realised wait: EMPIRICAL — H3) |
+| §2.3 hop 1/3/5 slowest: 3.6 / 14.2 µs, 2.4 µs below … ≈ 0.6 / 2.6 µs more than a d1 → d0 hop | T_bw_hops (3 557 − 2 911 = 646 ns; 14 230 − 11 646 = 2 584) | [F2-*] | PROVED (the "2.4 µs" is the r = 4 figure 2.6 rounded down — below λ either way) |
+
+### §3 Predictive model
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| §3.1 T_gemm 18 256 993; MoE 240 223 + 2 967 496 / 2 344 360; T_head 12 035 202 / 3 008 800; T_launch 65.70 / 18.01 ms; T_draft 54.27 / 21.24 ms; rows ≤ 16 | T_layer, T_W, T_draft, T_rows_cliff | [F3-*-layer] [F6-draft] | PROVED |
+| §3.1 attention table (8 rows) and the 6–8 % / 4.2 % / 24 % shares | T_attn_dense, T_attn_moe, T_attn_shares | [F3-*-attn] | PROVED (∀ G, c_E) |
+| §3.2 table (26 rows) | row 19 | [F3] | PROVED |
+| §3.3 branches and brackets | row 20 | [F3b-*] | PROVED (∀ λ) |
+| §3.4 B = 16 families | row 21 | [F3c-*] | PROVED (D(16) EMPIRICAL — H9) |
+
+### §4 Regime map and crossovers
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| §4.1 all cells and sub-shares | T_regime_dense, T_regime_moe, T_regime_shares | [F4-regime] | PROVED |
+| §4.2 T5 L* table; 778 240 = W_layer/4096; 128k 4 % under 136 736; batching divides L* by B | T_Lstar_kv, T_Lstar_iff, T_Lstar_iff_moe | [F4-*-Lkv-*] | PROVED |
+| §4.2 T6 t* table; dense t = 4 softmax-bound iff poly and stream, +1 %; KV-int8 poly at t = 2 | T_tstar, T_tstar_iff, T_tstar_model | [F4-*-tsm-*] | PROVED |
+| §4.2 T-MMA 8.0 / 32.0 / 127.9 %, MoE 8.0 / 8.0 / 32.0 | T_mma_share | [F4-*-mma-*] | PROVED |
+| §4.2 T4 infeasible by 233.0 GB; T8; T2 ceiling | T_mem_room, T_bounce_threshold_*, T_ceiling | [F9-mem] [F9-*-lambda] | PROVED |
+
+### §5 What-ifs
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| P2P ≤ 1.497 / 1.480 ms; D2D 0 B, moves 753 → 161 / 201 → 43 ms; tensor-split 398.52 / 43.02 ms with the corrected decompositions, 5.9× / 3.1×, λ-lo and pipelined variants, 42 % launch-bound; Π = 8 blocks, 7.7× / 7.1×, sub-layer split → ≈ 8× (x10 (8·T_step) Σblocks = 80); tensor-split + P2P 20 / 13 µs per reduction, 6.6× / 4.0×, 54 % launch-bound | T_whatif, T_p2p_bound, T_d2d, T_tsplit, T_tsplit_p2p, T_pipelining_*, T_regime_shares | [F5-*] | PROVED (premises as hypotheses: Π = 8 EMPIRICAL — H4; tensor-split and P2P are counterfactuals to INPUT errata #11) |
+
+### §6 Draft and speculative decoding
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| §6.1 cost table; 61 % launch-bound; 2.9 / 5.5 ms savings | T_draft | [F6-draft] | PROVED |
+| §6.2 placement: no contention at Π = 1 (DEFINITION); 6.9 ms DDR contention per draft token at Π = 8; 49 152 B / 10 % / 51.5 GB for a full-context draft KV; 1.2 GB reservation on a 42.7 GB die | T_draft, T_mem_feas_moe_4k | [F6-contention] [F10-mem-moe-4k] | PROVED |
+| §6.3 τ table; dense 0.193 / 0.262 / 0.355 (1.83 / 2.48 / 3.36×), k = 7: 0.315 / 0.571; MoE 1.074 / 1.451 / 1.971, best k = 1: 1.811; Zipf(1.5) 2.028 (1.09×); T12 thresholds α ≥ 0.865 / 0.747 / 0.647; mechanism floor τ < 2.852; partition unchanged (bounce bytes × 4 ≤ 0.07 %) | rows 32, 33; T_regime_shares (xNs r = 4 share) | [F6-*] | PROVED (∀ α) — thresholds corrected |
+
+### §7 Rollout
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| T15 block invariance: block(pos) depends only on (layers, extras, L) | Design.dieBlock (a function of exactly those) | — | DEFINITION |
+| stage table (18 cells) and per-stage KV facts (61 440 B/token, 8.0 GB at 128k, room to 551k) | T_rollout_dense, T_rollout_moe, T_ladder_rest, T_Lmax | [F7-*] [F8-H5] | PROVED |
+| KV move 753 / 201 ms; per-layer oracle 3.2 / 12.9 GB; D × 32 chunks per slab (DESIGN-2 E15) | T_d2d, T0_dense_bytes, T0_moe_bytes | [F5-*-d2d] | PROVED / D2 |
+| scaling identity (exact, both shapes) | T_rollout_identity | [F7-*-identity] | PROVED — corrected |
+
+### §8 Ladder and §9 Risks
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| H1 link curves, H2 41.5 vs 27.6, H3 queue, H5 slopes and 16 276 per GB, H7 3.5 s, H8 3.54 GiB (3.80 GB) threshold, H9 D(4) ≥ 30 / ≤ 20 cut-offs | T_ladder_H1, T_ladder_rest, T_queue, T_Lmax_dOverhead, T_mem_feas_kv_int8 | [F8-*] [F1-ort-threshold] | PROVED expectations; outcomes EMPIRICAL — H0–H9 |
+| §9 memory risk: 515.3 vs 282.3, 233 GB; KV-int8 257.6 GB; host-paged prefix 2.1 s / ≥ 5.2 s / 0.048 (0.0479); embedding to host 82.2 / 84.3; lm_head 2.1 G MACs ≈ 3 % of the 1M step (0.1 s CPU is an assumption); f16-K/i8-V 386.5 GB, short by 104 | T_mem_room, T_fallbacks, T_mem_embed_to_host, T_summary | [F9-mem] | PROVED (the 0.1 s CPU figure: ASSUMPTION, host-only) |
+| §9 bounce thresholds; λ = 500 µs → 140.39 ms (−5 %); 5 dies = 4 hops = 10 λ | T_bounce_threshold_*, T_branches_moe | [F9-*-lambda] [F3b-moe] | PROVED — corrected |
+| §9 ceiling 0.113 / 3.4 per card; B = 16 = 10× dense at 32k (memory-limited to 34k); spec 2.48×; Π = 8 7–8× | T_ceiling, T_summary (10 × 1067 / 105 = 101), T_spec_dense, T_pipelining | — | PROVED |
+| §9 launch floor 13.5 / 2.8 / 61 / 42 %; fusion saves 21.84 ms; H6 −18.0 / −33.0 ms | T_regime_shares, T_draft, T_fallbacks | [F9-launch-fuse] | PROVED |
+| §9 regime −13 %; G −7 / −24 %, 1M 0.312 → 0.114, L* 259k / 45.6k; poly +1 % at t ≥ 4; rows cliff; serial fallback 2928.50 → 0.085; overhead −16 276 / −61 035 per GB; trunk sharing (load 3.5 vs 2.3 s, Π = 8 ≤ 0.84 %); imbalance 0 / 10.3 %; spec on MoE 1.451 vs 1.867, α ≥ 0.647 with Zipf(1.5); draft 54.27 ms = 2.3 % dense / 41 % MoE; host RAM 193.3 + 233 GB; thermal; sampling 19 / 75 / 301 µs + λ ≤ 0.3 % | T_branches_*, T_fallbacks, T_Lstar_kv, T_tstar_model, T_rows_cliff, T_Lmax_dOverhead, T_ladder_rest, T_pipelining_trunk, T_pipelining_balance, T_spec_moe_*, T_draft, T_step_*, T_summary, T_power | [F9-*] [F3b-*] | PROVED (thermal INPUT) |
+
+### §10 The single measurement
+| Claim | Proof | fleet.py | Status |
+|---|---|---|---|
+| Π = 8 moves every cell 7.7× / 7.1×; at 32k every other unknown ≤ 1.32× (0.93 / 0.76 / 1.15 / 1.03 / 1.16 / 1.0 / 0.95×); at 1M the G branch 2.7×; 0.84 % of a trunk; 6.9 ms draft contention; L_max(8) = 68 906 ≥ 32k | T_pipelining, T_single_measurement, T_pipelining_trunk, T_draft, T_pipelining_memory | [F5-*-pipe*] [F6-contention] [F1-dense-Lmax] | PROVED — corrected (the 1M exception) |

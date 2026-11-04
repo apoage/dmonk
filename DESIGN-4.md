@@ -1,5 +1,18 @@
 # DESIGN-4 — fleet partition planner (4 cards × 2 dies, no P2P, layer-split-only runtime)
 
+> **ROUND-2 STATUS (proof session)**: every derived number below is checked by `proof/fleet.lean` (core Lean 4.35,
+> no declared axioms, builds standalone and via lake) and printed by `proof/fleet.py`; the claim ledger is
+> `PROOF-COVERAGE-4.md`. Corrections the prover forced are applied in place and listed there: the bounce-threshold
+> formula (T8: the step itself carries the 16 λ — a 10 % share needs λ ≥ 918 µs / 16.4 ms, not 835 µs / 14.8 ms;
+> 50 % needs 8.27 / 147.5 ms, not 4.18 / 73.8), the §7 scaling identity (4 × stage-1 + T_head + 2·T_launch + 4λ +
+> hop terms = 2362.32 ms exactly, not "+ 12λ" with a residual), the H8 overhead ceiling (3.54 GiB = 3.80 GB, not
+> 3.85 GiB), the spec-decode thresholds (α ≥ 0.865 / 0.747 / 0.647 by routing family, proved in both directions;
+> the dense gain is 2.475×), the T7 order statement (order-dependent through the first and last die types, 1.2 µs),
+> the Π = 8 imbalance (10.3 %, not 12.5 %) and trunk share (0.84 %, not 0.2 %), the tensor-split decomposition
+> (the lm_head/8 term), the §10 "≤ 1.3×" claim (2.7× for MoE at 1M on the G branch), and unit slips (12 GiB expert
+> slabs, 4 KiB of K/V per token-layer, 96 KiB trunk bytes, 386.5 GB, 21.8 ms, 0.44 %). **T_min_dies (4 dies
+> infeasible for every layer assignment; 5 feasible) and T_spec_moe_loss (the verify batch multiplies the
+> active-expert bytes; a loss for every α ≤ 0.864 under uniform routing) survive formalization unchanged.**
 Scope (PROBLEM-4.md): place one model (dense-GEMM shape and MoE shape, both parameterised so that the int8
 residency lands inside the 320..400 GB band that errata #12 forces), its KV cache and a draft model on 8 dies
 of 86 GB, choose the per-token exchange schedule through host memory, and predict tokens/s per card at
@@ -73,12 +86,12 @@ Draft model: 1 GB int8, 24 layers, 121 launches per draft token, 4k-token slidin
 
 | Question | Answer | Where |
 |---|---|---|
-| Memory | dense 386.7 GB fits with f16 KV up to **L_max = 551 253** tokens (B = 1); **1M does not close with f16 KV** (515.3 GB of KV against 282.3 GB of room, `[F9-mem]`); it closes with the **KV-int8 escape at 84.3 of 86 GB** on the worst die (1.7 GB margin, hostage to the 2 GiB overhead assumption H8). MoE 363.0 GB fits with f16 KV to L_max = 1 925 823. Minimum fleet for either shape: 5 dies (3 cards). | §1, T3–T4 |
+| Memory | dense 386.7 GB fits with f16 KV up to **L_max = 551 253** tokens (B = 1); **1M does not close with f16 KV** (515.3 GB of KV against 282.3 GB of room, `[F9-mem]`); it closes with the **KV-int8 escape at 84.3 of 86 GB** on the worst die (1.66 GB margin: it fits iff the per-die runtime overhead is ≤ 3.80 GB = 3.54 GiB, hostage to the 2 GiB assumption H8; T_mem_feas_kv_int8). MoE 363.0 GB fits with f16 KV to L_max = 1 925 823. Minimum fleet for either shape: 5 dies (3 cards). | §1, T3–T4 |
 | tokens/s per card at L = 32k (primary branch) | **dense 0.105** (t = 1), 0.262 with spec decode (α = 0.7, k = 3), 1.067 at B = 16 sequences; **MoE 1.867** (t = 1), 2.357 at B = 16 uniform (4.765 under Zipf 1.5); **spec decode is a loss on MoE** (1.451) because the verify batch multiplies the active-expert set (T12). | §3, §6 |
 | Binding constraint | in every Π = 1 cell the **weight stream of ONE die at a time** (layer-split serialises the dies: the fleet streams 174.6 GB/s, not 8 × 174.6); KV binds for MoE at 1M (86 % of the step) and for dense beyond L* = 778 240; host bounce is ≤ 1.1 %; the launch floor is 13.5 % of the MoE step; softmax never binds at t = 1. | §4 |
 | 1M | MoE 0.312 tokens/s/card (KV-bound: 688.8 of 801.1 ms); dense 0.066 with KV-int8 (weights-bound; KV 1 475.9 of 3 746.0 ms); dense with f16 KV: infeasible. | §3 |
 | What a runtime upgrade buys | P2P at any rate: ≤ 1.5 ms per token (≤ 1.1 %); D2D 10.7 → 50: nothing per token; tensor-split: 5.9× dense / 3.1× MoE (then launch-floor-bound); **pipelining Π = 8 independent sequences: 7.7× dense / 7.1× MoE throughput** at unchanged per-sequence latency. | §5 |
-| The single measurement | **H4: does the runtime pipeline independent sequences through the layer-split chain?** It moves every cell by ~7×; no other unknown moves any cell by more than 1.3× (G 3× slower: −7 % dense / −24 % MoE; MoE ping-pong regime +15 %; launch pipelining +3 % / +16 %; λ 10 ↔ 500 µs: ±5 % MoE). | §10 |
+| The single measurement | **H4: does the runtime pipeline independent sequences through the layer-split chain?** It moves every cell by ~7×; at 32k no other unknown moves a cell by more than 1.32× (G 3× slower: −7 % dense / −24 % MoE; MoE ping-pong regime +15 %; launch pipelining +3 % / +16 %; λ 10 ↔ 500 µs: ±5 % MoE); the one larger single-unknown swing is the G branch at 1M, where the MoE cell falls 2.7× (0.312 → 0.114, T_single_measurement). | §10 |
 
 Honest ceiling of any layer-split, single-stream plan on this fleet (T2): tokens/s ≤ R_gemm / bytes streamed
 per token = 174.6 / 384.6 = **0.454 tokens/s fleet-wide for dense** (0.113 per card) and 174.6 / 12.9 ≈ 13.5
@@ -92,7 +105,7 @@ serial-regime expert kernel 135.3 vs 174.6, the launch floor and the KV stream).
 ### 1.1 (a) layer → die assignment (contiguous blocks, 7 boundaries)
 Chain order puts a **die 1 first and a die 0 last**: the first position receives only token ids (4 B over
 the 13.9 GB/s link), the last emits the logits (513 KB at t = 1) over the 27.3 GB/s link instead of 19.0
-(`[F2-order]`: 18.8 vs 27.0 µs). Hop bandwidth cost is otherwise order-invariant (T7, §2).
+(`[F2-order]`: 18.8 vs 27.0 µs). The activation-hop sum depends on the order only through the first and last die types (T7, §2): the chosen order is the minimum of the four classes, by 1.2 µs over the other d0-last order.
 
 | pos | card.die | dense layers (15 each) | MoE layers (4/3) | extras |
 |---|---|---|---|---|
@@ -107,7 +120,7 @@ the 13.9 GB/s link), the last emits the logits (513 KB at t = 1) over the 27.3 G
 
 Boundaries: dense after layers 14, 29, 44, 59, 74, 89, 104; MoE after 3, 6, 10, 13, 17, 20, 24. 28 MoE
 layers do not divide by 8 (3.5 per die): the 4-layer dies take 4/3 of a 3-layer die's time, which is
-invisible at Π = 1 (T1: the step is the sum) and costs 12.5 % at Π = 8 (§5; a sub-layer split — attention
+invisible at Π = 1 (T1: the step is the sum) and costs 10.3 % of throughput at Π = 8 (the max block, 18.64 ms, against the 16.72 ms balanced mean — 12.5 % is the pure 4-vs-3.5-layer figure before lm_head and the bounce halves; T_pipelining_balance) (§5; a sub-layer split — attention
 block / expert block as separate runtime units, 56 units = 7 per die — would balance it exactly, contingent
 on the runtime accepting sub-layer placement, H4).
 
@@ -121,7 +134,7 @@ All 256 experts of a layer live on the layer's die: an expert-parallel split acr
 tensor-split of one op (the measured runtime fault, errata #11) and would add 2 host reductions per layer.
 Inside a die, DESIGN-2 scheme S: core c owns column slice c of every active expert (per-core bytes identical
 under every routing outcome, DESIGN-2 Z2), 3 slabs per expert (gate+up fused into one launch of two slabs,
-down in a second), region-difference accumulator reset. The 12.0 GB of expert slabs per layer are packed
+down in a second), region-difference accumulator reset. The 12.9 GB (12 GiB) of expert slabs per layer are packed
 per DESIGN-2 §2.1 at load.
 
 ### 1.3 (c) KV placement and growth policy
@@ -129,7 +142,7 @@ KV is die-local to its layers (errata #11). Per (layer, kv-head) one contiguous 
 L_cap × 256 B each (f16, d_h = 128), **core c ↔ kv-head c** (8 heads = 8 cores): a decode step on a layer is 16
 sequential per-core streams of L × 256 B, i.e. the "per-core slabs" access pattern of the measured 180/181
 GB/s figures — this is what justifies the stream branch of G, and the gather3x branch is kept because the
-attention kernel is unbuilt (PROBLEM-3). Append-only: the new token's K/V (8 KiB per layer at t = 1) is
+attention kernel is unbuilt (PROBLEM-3). Append-only: the new token's K and V (kv_tok = 4 KiB per layer at t = 1) are
 written at offset L inside the attention launch; no paging, no reallocation. L_cap per die is fixed at load
 from the memory table (T4): dense 551 253 (f16) / 1 102 506 (int8), MoE 1 925 823. Online softmax in 2048-key
 blocks (scores 16 × 2048 × 4 B = 128 KiB in L0C, double-buffered; running max/sum per (query row, head):
@@ -234,30 +247,25 @@ bounced — so the exchange is modelled as **fully additive**, the worst case th
 Σ_layers T_layer + T_head + T_launch + T_x (+ T_draft). Shares at L = 32k, λ = 91 µs: dense 1.497 / 2 362 ms =
 **0.06 %**, MoE 1.480 / 133.84 ms = **1.1 %** (`[F5-*-p2p]`).
 
-**T8 (bounce threshold).** The bounce reaches a fraction x of the step iff λ ≥ (x·T_step − Σbw)/16:
-10 % needs λ ≥ 14.8 ms (dense) / **835 µs (MoE)**; 50 % needs 73.8 ms / 4.18 ms (`[F9-*-lambda]`). The
+**T8 (bounce threshold).** The step itself carries the 16 λ, so the bounce reaches a fraction x of the step iff 16λ + Σbw ≥ x·(T_rest + Σbw + 16λ), i.e. λ ≥ (x·T_rest − (1−x)·Σbw) / (16·(1−x)) with T_rest = T_step − T_x: 10 % needs λ ≥ 16.4 ms (dense) / **918 µs (MoE)**; 50 % needs 147.5 ms / 8.27 ms (`[F9-*-lambda]`, T_bounce_threshold_dense/_moe, iff for every λ). Round 1 solved against the fixed λ = 91 µs step and quoted 14.8 ms / 835 µs and 73.8 / 4.18 ms — at λ = 4.18 ms the MoE bounce is 33.6 % of the step, not 50 %. The
 measured "+2 % at 2 dies" (one boundary, on a model of unstated size) bounds nothing sharper than λ ≲ 1 % of
 that model's step; H1/H3 measure λ directly.
 
-**T7 (order invariance).** Every die receives the activation once and sends it once, so Σbw = Σ_dies
-act·(10/H2D(die) + 10/D2H(die)) over the 7 hops is the same for every chain order; the only order-dependent
-terms are the logits source (27.3 vs 19.0 GB/s: 18.8 vs 27.0 µs) and the id sink. The chosen order is
-optimal by 8 µs per token and otherwise free.
+**T7 (order dependence).** Every die except the first receives the activation once and every die except the last sends it once, so the hop sum over the 7 hops is 4·(h₀ + h₁ + g₀ + g₁) − h(first die) − g(last die) (h = H2D time, g = D2H time of one activation): it depends on the chain order only through the first and last die types, plus the logits source (27.3 vs 19.0 GB/s: 18.8 vs 27.0 µs) and the id sink. The four classes are 41.1 µs (d1 first, d0 last — the chosen order), 42.3 (d0, d0), 48.8 (d1, d1) and 50.0 (d0, d1): the chosen order is the minimum, by 1.2 µs over the other d0-last order and 7.7–8.9 µs over the d1-last orders (T_order_formula, T_order_optimal: proved over all 70 orders; round 1 called the hop sum order-invariant).
 
 ### 2.3 The host bounce as a contended resource
 - **Per-card trunk occupancy.** Die 1's link transits die 0, so each card's die-0 link carries its own
-  hops plus die 1's: per token (dense r=1) 98 KiB, 128 KiB, 128 KiB and 597 KiB on the logits card
+  hops plus die 1's: per token (dense r=1) 96 KiB (98 308 B), 128 KiB, 128 KiB and 597 KiB on the logits card
   (`[F2-dense-rows1]`); against a budget of 27.6 GB/s × T_step = 65 GB (dense) / 3.7 GB (MoE) per token the
   utilisation is < 0.02 %. **Bandwidth never binds; latency is the whole cost.**
 - **Concurrent transfers.** At Π = 1 the only transfers that can coexist with a bounce are the draft's
-  logits/ids (its die is idle otherwise) — no queueing. At Π = 8 (§5) up to 8 bounces per block time share
-  the trunks: 8 × 128 KiB per 18.6 ms block (MoE) = 0.2 % utilisation; still no queueing.
+  logits/ids (its die is idle otherwise) — no queueing. At Π = 8 (§5) up to 8 bounces per block time share the trunks: on the logits card 8 × 537 600 B per 18.6 ms block (MoE) = 0.84 % utilisation (dense: 8 × 611 328 B per 306 ms = 0.06 %); still no queueing (T_pipelining_trunk).
 - **Bulk traffic (load, re-partition KV moves, any host-paging escape) does queue ahead of a bounce.** With
   bulk chunk size C on the same link the added wait is ≤ C/R_link per direction (T-queue, `[F8-H3]`): 64 KiB →
   5 µs, 1 MiB → 75 µs, 16 MiB → 1.2 ms on the 13.9 GB/s die-1 link. Rule: bulk streams that overlap decode
   are chunked at ≤ 1 MiB; H3 measures the realised wait under exactly this contention and fails the
   rule if the wait exceeds C/R + λ.
-- **Hop 1/3/5 (d0 → d1', H2D at 13.9) is the slowest hop** (3.6 µs at 32 KiB, 14.2 at 128 KiB); the 2.4 µs it
+- **Hop 1/3/5 (d0 → d1', H2D at 13.9) is the slowest hop** (3.6 µs at 32 KiB, 14.2 at 128 KiB); the 0.6 µs (r = 1) to 2.6 µs (r = 4) it
   loses to a d1 → d0 hop is below λ's bracket and is not worth re-ordering for (T7).
 
 ---
@@ -417,7 +425,7 @@ MoE (g = 4): 8.0 % / 8.0 % / 32.0 % (`[F4-*-mma-*]`). The plan never runs a sing
 
 **T4 — memory boundary** (§1.7): L_max values; dense f16 1M infeasible by 515.3 − 282.3 = 233.0 GB fleet-wide.
 
-**T8 — bounce boundary** (§2.2): λ ≥ 835 µs (MoE) / 14.8 ms (dense) for a 10 % share.
+**T8 — bounce boundary** (§2.2): λ ≥ 918 µs (MoE) / 16.4 ms (dense) for a 10 % share.
 
 **T2 — the layer-split ceiling.** For any partition under Π = 1, T_step ≥ Σ_layers T_gemm = bytes streamed per
 token / R_gemm: tokens/s ≤ 174.6 / 384.6 GB = 0.454 fleet-wide (dense), 0.113 per card. No layer→die map, no
@@ -431,7 +439,7 @@ die count, no exchange schedule beats it; the "+2 % at 2 dies" measurement is th
 |---|---|---|---|
 | **P2P link at any rate X** | saving ≤ T_x (the whole exchange) — at Π = 1 nothing else is on the link | ≤ 1.497 ms = **0.06 %** | ≤ 1.480 ms = **1.1 %** |
 | **D2D 10.7 → 50 GB/s** | per-token traffic is 0 B (KV never moves) → 0 %; only a re-partition move changes: one die's KV at 128k (dense 8.0 GB, MoE 2.1 GB) | 753 → 161 ms per move | 201 → 43 ms |
-| **tensor-split worked** (8 dies stream each layer concurrently, 2 host all-reduces per layer of a rows × d f32 partial: per card the trunk carries both dies' partials out and both results in + 2λ = 191 µs (dense d = 16384) / 184 µs (MoE)) | T_TS = Σ(W + KV)/8 + T_launch + 2·n_L·T_red | 398.52 ms = 273.85 + 11.53 + 65.70 + 45.93 → **0.627 tok/s/card (5.9×)**; λ = 10 µs: 359.64; launches pipelined: 332.82 | 43.02 ms = 11.61 + 2.69 + 18.01 + 10.32 → **5.810 (3.1×)**, launch-floor-bound (42 %); λ 10: 33.95; pipelined: 25.00 |
+| **tensor-split worked** (8 dies stream each layer concurrently, 2 host all-reduces per layer of a rows × d f32 partial: per card the trunk carries both dies' partials out and both results in + 2λ = 191 µs (dense d = 16384) / 184 µs (MoE)) | T_TS = Σ(W + KV)/8 + T_head/8 + T_launch + 2·n_L·T_red | 398.52 ms = 273.85 + 11.53 + 1.50 (lm_head/8) + 65.70 + 45.93 → **0.627 tok/s/card (5.9×)**; λ = 10 µs: 359.64; launches pipelined: 332.82 | 43.02 ms = 11.61 + 2.69 + 0.37 (lm_head/8) + 18.01 + 10.32 → **5.810 (3.1×)**, launch-floor-bound (42 %); λ 10: 33.95; pipelined: 25.00 |
 | **pipelined sequences Π = 8** (the runtime keeps every die busy on a different sequence; per-sequence latency unchanged) | fleet tokens/s = 1 / max_pos block(pos); block = n_pos·(T_gemm + T_attn + launches) + extras + its two bounce halves | blocks 293.66–305.99 ms (pos 7 carries lm_head) → 3.268 fleet = **0.817/card (7.7×)** | blocks 14.02 (3-layer) / 18.63 ms (4-layer) → 53.66 fleet = **13.414/card (7.1×)**; a sub-layer split (7 units per die) would reach 8× |
 | **tensor-split + P2P** | the reductions leave the host: T_red → 8 · rows·d·4 B / X + λ_p2p; at X = 50 GB/s, λ_p2p = 10 µs: 20 µs (dense) / 13 µs (MoE) per reduction instead of 191 / 184 (`[F5-*-tsplit-p2p]`) | 357.50 ms → 0.699 (6.6×) | 33.41 ms → 7.482 (4.0×), launch-bound (54 %) |
 
@@ -482,21 +490,20 @@ host acceptance test, ids back. Tokens per step τ(α, k) = Σ_{i=0..k} α^i (`[
 
 | shape, L = 32k | t = 1 | spec k = 3: α 0.5 / 0.7 / 0.9 | best k at α = 0.7 (rows = k+1 ≤ 16) |
 |---|---|---|---|
-| dense | 0.105 | 0.193 / **0.262** / 0.355 (1.8× / 2.4× / 3.3×) | k = 7: 0.315 (`[F6-dense-k7]`; 0.571 at α = 0.9) |
+| dense | 0.105 | 0.193 / **0.262** / 0.355 (1.83× / 2.48× / 3.36×) | k = 7: 0.315 (`[F6-dense-k7]`; 0.571 at α = 0.9) |
 | MoE, uniform routing | 1.867 | 1.074 / **1.451** / 1.971 (0.5× / 0.7× / 1.0×) | k = 1: 1.811 — still a loss |
 | MoE, Zipf(1.5) routing | 1.867 | – / 2.028 / – (1.09×) | – |
 
 **T12 (spec decode on MoE).** Under uniform routing D(t) = min(8t, 256), so the expert stream of a verify
 step is (k+1)× that of a decode step: T(k+1) ≥ (k+1)·W_exp(1) + (everything else), while tokens per step
 τ(α, k) < k+1 for every α < 1. Hence tokens/s(spec) < tokens/s(t = 1) whenever the expert stream dominates
-— at 32k the break-even is τ(α, 3) ≥ 3.258 (`[F6-moe-uniform-t4]`), i.e. α ≥ 0.87; under Zipf(1.5) (D(4) = 20)
-the break-even is τ ≥ 2.332, α ≥ 0.65. On dense the verify rows are free (W is flat in rows), so spec decode
-is a pure gain: ×2.4 at α = 0.7 and ×3.0 with k = 7.
+— at 32k the break-even is τ(α, 3) ≥ T₄/T₁ = 3.2584 (`[F6-moe-uniform-t4]`), i.e. α ≥ 0.865 (α = 0.864 loses, 0.865 gains; T_spec_moe_loss_exact proves both directions for every α); under Zipf(1.0) (D(4) = 25) it is τ ≥ 2.7182, α ≥ 0.747; under Zipf(1.5) (D(4) = 20) τ ≥ 2.3322, α ≥ 0.647 (α = 0.646 ties at 1.867 in thousandths and loses by 0.01 % exactly). Before any draft cost is counted, T₄ ≥ 4·E₁ + (T₁ − E₁) with E₁ = 61.7 % of T₁ makes every τ < 2.852 a loss (T_spec_moe_mechanism). On dense the verify rows are free (W is flat in rows), so spec decode
+is a pure gain: ×2.475 at α = 0.7 (every α ≥ 0.024 gains) and ×3.0 with k = 7.
 
 **Does spec decode change the partition?** Dense: no — 1.2 GB on a non-binding die, same boundaries, same
 KV policy, L_max unchanged; the only schedule change is that each step carries 4 rows (bounce bytes ×4,
 still ≤ 0.07 %). MoE: it changes the *decision*, not the partition: spec decode is off unless H9 measures
-routing skew at Zipf(1.5)-class or better and the fleet-measured α clears 0.65; the reservation on position 7
+routing skew at Zipf(1.5)-class or better and the fleet-measured α clears 0.647; the reservation on position 7
 costs 1.2 GB of a 42.7 GB die. The draft's own layers never contend with the main model's dies at Π = 1.
 
 ---
@@ -527,11 +534,7 @@ assumed): teacher-forced tokens, and a **per-layer host oracle** — the host ho
 the output. MoE stage 1 additionally checks per-core chunk counts = D × 32 per slab (DESIGN-2 E15) through the
 runtime's profiler.
 
-Scaling arithmetic the stages verify: T_full = Σ_pos block(pos) + bounces; stage 1's two blocks predict
-the eight of stage 3 to within the lm_head term (12.0 ms dense / 3.0 MoE) and six more latency pairs
-(12 λ ≈ 1.1 ms): the 4-card prediction is **4 × (stage-1 step) + 12λ + T_head** = 4 × 587.42 + 1.09 + 12.04 =
-2362.8 ms at 32k against the direct 2362.31 (the 0.5 ms residual is the stage-1 chain ends — logits exit and
-id entry — counted four times instead of once).
+Scaling arithmetic the stages verify: T_full = Σ_pos block(pos) + λ (the id-entry latency is the only term outside the blocks, T_pipelining_decomposition). 4 × (stage-1 step) already carries 12 of the 16 latencies, so the 4-card prediction is **4 × (stage-1 step) + T_head + 2·T_launch (lm_head's launches) + 4λ + (3 hops at 13.9 − 1 at 27.3 + logits)** = 4 × 587.43 + 12.04 + 0.18 + 0.36 + 0.03 = 2362.32 ms at 32k — exactly the direct 2362.32 (T_rollout_identity; MoE: 4 × 32.57 + 3.57 = 133.85). Round 1 wrote 4 × stage-1 + 12λ + T_head = 2362.8 and attributed the 0.5 ms residual to double-counted chain ends.
 
 ---
 
@@ -552,7 +555,7 @@ timing alone. Expected values are `[F8-*]`.
 | **H5** | KV growth trace: the runtime allocator's real bytes per token per die | the stage-1 model; query per-die free memory every 1k tokens to 128k and beyond; expected slope 61 440 B/token (dense 15-layer die), 16 384 / 12 288 (MoE 4-/3-layer die), 8.0 GB at 128k | slope above expected (allocator overhead → L_max shrinks by 16 276 tokens per GB), steps (preallocation granularity), non-monotone free memory (fragmentation) | L_max, T4's premise, whether the preallocated-slab policy of §1.3 is what the runtime does |
 | **H6** | launch-floor serialisation through the runtime (DESIGN.md E0 from the host) | N = 1, 10, 100 queued tiny ops, each writing its index to slot i | missing/duplicate slots; T(N) ≈ N × 91 µs serialised vs ≈ 91 + N × small pipelined | the launch branch: 65.7 ms (dense) / 18.0 ms (MoE) per token, 11.0 ms per draft token |
 | **H7** | load path: int4 → int8 expansion throughput and end-to-end load time | expand per 64 KiB chunk into pinned buffers, stream per die; per-die checksum over the loaded bytes vs the host's checksum of the expanded chunk stream; differencing: layer A then layer B into the same region must change the checksum | checksum mismatch (expansion or DMA error); load slower than 3.5 s link-bound (386.7 GB) by more than the expansion's own cost | §1.6; whether the expansion must be cached on disk |
-| **H8** | per-die overhead after load (the 2 GiB assumption) | free memory reported by the runtime after loading a die's final block, minus the known weight bytes | overhead > 3.85 GiB → the dense 1M KV-int8 layout (84.3 GB) no longer fits; > 2 GiB → L_max falls per T4 | T3/T4 margins |
+| **H8** | per-die overhead after load (the 2 GiB assumption) | free memory reported by the runtime after loading a die's final block, minus the known weight bytes | overhead > 3.54 GiB (3.80 GB) → the dense 1M KV-int8 layout (84.3 GB) no longer fits; > 2 GiB → L_max falls per T4 | T3/T4 margins |
 | **H9** | routing skew D(t) (host-side; the router is 2 MiB per layer) and — fleet-only — the draft's α | run the 28 routers on the host over a text sample of ≥ 10⁵ tokens; histogram of distinct experts per 4- and 16-token group; compare with DESIGN-2's generator columns | D(4) ≥ 30 → uniform rows of §3.4 and T12's loss apply; D(4) ≤ 20 → the Zipf(1.5) rows | spec decode on/off for MoE; which B = 16 row to expect |
 
 Order: H0, H1, H2, H3, H6, H8, H5, H4, H7, H9. H1–H3 settle λ (the only exchange unknown) in an afternoon;
@@ -564,12 +567,12 @@ H4 is the one whose answer rewrites §5 from a what-if into the plan.
 
 | risk | trigger / evidence | impact (numbers from `proof/fleet.py`) | fallback |
 |---|---|---|---|
-| **Memory infeasibility at 1M (dense)** | T3: f16 KV = 120 layers × 4 096 B × 2²⁰ = 515.3 GB against 282.3 GB of fleet room after weights (T4) — infeasible by 233 GB, on every die (114.4–116.5 GB) | no dense 1M with f16 KV on 8 dies, under any partition (the weights alone leave 282.3 GB) | **KV-int8** (257.6 GB; 84.3 of 86 GB on positions 0 and 7, T3') at the i8×i8 attention route; or a host-paged KV prefix: 233 GB per token through 4 trunks at 27.6 = 2.1 s per card per token if perfectly overlapped — T_step ≥ max(chain, X_card/R_h2d) (T10) → ≥ 5.2 s, 0.048 tokens/s/card, and ≥ 233 GB of host RAM (H0); or fewer layers resident (host-streamed layers cost 6.3× their DDR time) |
-| KV-int8 is the only dense 1M layout and it has 1.7 GB of margin on two dies | H8 (runtime overhead), H5 (allocator slope) | overhead > 3.85 GiB kills it; every GB above 2 GiB costs 16 276 tokens of L_max (T4) | move the embedding table to the host (a lookup; 32 KiB per token over the id link) → position 0 drops to 82.2 GB, but position 7 (lm_head) stays at 84.3: the margin grows only if lm_head also moves to the host (2.1 G MACs per token ≈ 0.1 s of CPU, 3 % of the 1M step) |
-| KV-int8 numerics (i8 K, V and P) | fleet-only: relerr on attention outputs vs an f16 host reference on the stage-1 card | accuracy, not rate | keep f16 K and int8 V (386.4 GB of KV → still infeasible by 104 GB); or accept L_max = 551k |
-| **Host bounce becomes the serial bottleneck** | H1/H3 λ; T8 | bounce = 10 % of the MoE step iff λ ≥ 835 µs; 50 % iff ≥ 4.18 ms; dense 14.8 / 73.8 ms. At λ = 500 µs the MoE step is 140.39 ms (−5 %) | nothing structural is left to remove (7 hops is the minimum for 8 dies); the lever is fewer dies (5 dies: 4 hops, 10 λ) at the cost of context: dense L_max on 5 dies ≈ 53k |
-| **Layer-split's "+2 %" ceiling** (T2) | measured: dies alternate | single-stream tokens/s ≤ 174.6 GB/s ÷ bytes per token no matter how many dies: 0.113/card dense, 3.4/card MoE; the fleet's 1.4 TB/s is unreachable by any Π = 1 plan | batching sequences (B = 16: 10× dense throughput at 32k, memory-limited to 34k), spec decode (2.4× dense), or the Π = 8 runtime capability (H4, 7–8×) |
-| Launch floor | H6; measured 91 µs per launch | 13.5 % of the MoE step (18.0 of 133.8 ms), 2.8 % of dense, 61 % of a draft token; 42 % of the tensor-split what-if | fuse launches (norm/rope into GEMM epilogues: 6 → 4 per dense layer saves 21.9 ms per token); H6 may show pipelining (then −18.0 ms MoE, −33 ms per verify step) |
+| **Memory infeasibility at 1M (dense)** | T3: f16 KV = 120 layers × 4 096 B × 2²⁰ = 515.3 GB against 282.3 GB of fleet room after weights (T4) — infeasible by 233 GB, on every die (114.4–116.5 GB) | no dense 1M with f16 KV on 8 dies, under any partition (the weights alone leave 282.3 GB) | **KV-int8** (257.6 GB; 84.3 of 86 GB on positions 0 and 7, T3') at the i8×i8 attention route; or a host-paged KV prefix: 233 GB per token through 4 trunks at 27.6 = 2.1 s per card per token if perfectly overlapped — T_step ≥ max(chain, X_card/R_h2d) (T10) → ≥ 5.2 s, 0.048 tokens/s/card (0.0479; 0.047 under the floor convention), and ≥ 233 GB of host RAM (H0); or fewer layers resident (host-streamed layers cost 6.3× their DDR time) |
+| KV-int8 is the only dense 1M layout and it has 1.7 GB of margin on two dies | H8 (runtime overhead), H5 (allocator slope) | overhead > 3.54 GiB (3.80 GB) kills it (T_mem_feas_kv_int8); every GB above 2 GiB costs 16 276 tokens of L_max (T4) | move the embedding table to the host (a lookup; 32 KiB per token over the id link) → position 0 drops to 82.2 GB, but position 7 (lm_head) stays at 84.3: the margin grows only if lm_head also moves to the host (2.1 G MACs per token ≈ 0.1 s of CPU, 3 % of the 1M step) |
+| KV-int8 numerics (i8 K, V and P) | fleet-only: relerr on attention outputs vs an f16 host reference on the stage-1 card | accuracy, not rate | keep f16 K and int8 V (386.5 GB of KV → still infeasible by 104 GB); or accept L_max = 551k |
+| **Host bounce becomes the serial bottleneck** | H1/H3 λ; T8 | bounce = 10 % of the MoE step iff λ ≥ 918 µs; 50 % iff ≥ 8.27 ms; dense 16.4 / 147.5 ms (T8, corrected). At λ = 500 µs the MoE step is 140.39 ms (−5 %) | nothing structural is left to remove (7 hops is the minimum for 8 dies); the lever is fewer dies (5 dies: 4 hops, 10 λ) at the cost of context: dense L_max on 5 dies ≈ 53k |
+| **Layer-split's "+2 %" ceiling** (T2) | measured: dies alternate | single-stream tokens/s ≤ 174.6 GB/s ÷ bytes per token no matter how many dies: 0.113/card dense, 3.4/card MoE; the fleet's 1.4 TB/s is unreachable by any Π = 1 plan | batching sequences (B = 16: 10× dense throughput at 32k, memory-limited to 34k), spec decode (2.48× dense), or the Π = 8 runtime capability (H4, 7–8×) |
+| Launch floor | H6; measured 91 µs per launch | 13.5 % of the MoE step (18.0 of 133.8 ms), 2.8 % of dense, 61 % of a draft token; 42 % of the tensor-split what-if | fuse launches (norm/rope into GEMM epilogues: 6 → 4 per dense layer saves 21.8 ms per token); H6 may show pipelining (then −18.0 ms MoE, −33 ms per verify step) |
 | MoE kernel stays in the serial regime | DESIGN-2 E13 | 133.84 ms (serial) vs 116.39 (ping-pong): −13 % | ship the serial number (it is the anchored one) |
 | KV gather 3× slower than stream (attention kernel unbuilt) | PROBLEM-3 E-gather | −7 % dense at 32k; −24 % MoE at 32k; MoE 1M 0.312 → 0.114 (`[F9-moe-1M-gather3x]`); L*_KV falls to 259k (dense) / 45.6k (MoE) | the per-core head-slab layout of §1.3 makes the read sequential; if the realised rate is still low, the attention kernel, not the plan, is the fix |
 | No exp instruction (poly softmax) | PROBLEM-3 E-exp | only dense verify batches at t ≥ 4 (t* = 4, T6): +1 % per attention layer | reduce k to 2 for dense (t* not reached) |
@@ -578,7 +581,7 @@ H4 is the one whose answer rewrites §5 from a what-if into the plan.
 | Runtime overhead / allocator fragmentation | H5, H8 | L_max −16 276 tokens per GB (dense), −61 035 (MoE) | preallocated slabs (§1.3) if the runtime exposes them |
 | Trunk sharing (die 1 transits die 0) | H2 | at Π = 1 nothing (utilisation < 0.02 %); load 3.5 s vs 2.3 s; Π = 8 bounces still ≤ 0.2 % of a trunk | none needed |
 | MoE expert imbalance across dies (4 vs 3 layers) | layout | 0 at Π = 1 (T1); −12.5 % at Π = 8 | sub-layer split (7 units per die) if the runtime allows placing attention and expert blocks separately (H4) |
-| Spec decode on MoE is a loss | T12; H9 routing | 1.451 vs 1.867 at α = 0.7 under uniform routing | off by default; on only if H9 shows Zipf(1.5)-class skew and α ≥ 0.65 |
+| Spec decode on MoE is a loss | T12; H9 routing | 1.451 vs 1.867 at α = 0.7 under uniform routing | off by default; on only if H9 shows Zipf(1.5)-class skew and α ≥ 0.647 |
 | Draft launch-bound | H6 | 54.27 ms per verify step (2.3 % of dense, 41 % of MoE) | fewer draft layers; pipelined launches → 21.24 ms |
 | Host RAM for the int4 source and (paging escape) KV | H0 | 193.3 GB (dense source) must be host-resident or disk-streamed at load; the paging escape needs ≥ 233 GB more | stream the source from disk through the expansion pipeline (load time becomes disk-bound) |
 | Thermal | measured 141 W sustained all-core per card, 150 W class, no throttle | Π = 1: one die streams at a time (one card at ≤ 141 W, three near 41 W idle); Π = 8: every card at the measured sustained load | none |
@@ -589,8 +592,7 @@ H4 is the one whose answer rewrites §5 from a what-if into the plan.
 ## 10. The single measurement that most changes the plan
 
 **H4 — whether the serving runtime pipelines independent sequences through the layer-split chain (Π > 1).**
-Every other unknown moves a cell by at most 1.3× (G: 0.93× / 0.76×; MoE regime: 1.15×; launch pipelining:
-1.03× / 1.16×; λ across its whole bracket: 1.0× / 0.95×; routing skew: 1× at t = 1). Π = 8 moves every cell
+At 32k every other unknown moves a cell by at most 1.32× (G: 0.93× / 0.76×; MoE regime: 1.15×; launch pipelining: 1.03× / 1.16×; λ across its whole bracket: 1.0× / 0.95×; routing skew: 1× at t = 1); the exception is the G branch at 1M, where the MoE cell falls 2.7× (0.312 → 0.114). Π = 8 moves every cell
 by **7.7× (dense) / 7.1× (MoE)** at unchanged per-sequence latency, with zero extra link bandwidth (0.2 % of a
 trunk) and no kernel change — and it rewrites the plan: the partition objective becomes the per-die block
 time (balance MoE at the sub-layer level, 7 units per die; put lm_head and the draft on the lightest
@@ -606,47 +608,46 @@ witness that both dies of a card are streaming at once.
 
 ## Appendix A — claim ledger (for the proof session: `proof/fleet.py` labels and proposed theorem names)
 
-Status: M = HW-MAP input; D2 = DESIGN-2 derived input; D = derived here (theorem target, `decide`/`omega`
-over Nat); A = assumption measured by the named host experiment; U = empirical branch.
+Status: M = HW-MAP input; D2 = DESIGN-2 derived input; D = derived here (theorem target, `decide`/`omega` over Nat); A = assumption measured by the named host experiment; U = empirical branch. Round 2: the theorem names are those of `proof/fleet.lean`; "∀ x" marks a result universally quantified over the unmeasured or assumed quantity x.
 
 | # | claim | value | status | fleet.py / theorem |
 |---|---|---|---|---|
-| 1 | dense resident int8 = 120 · 3 187 671 040 + 2 · 2 101 346 304 | 386 723 217 408 B | D | [F0-dense] F0_dense_bytes |
-| 2 | MoE resident int8 = 28 · 12 926 844 928 + 2 · 525 336 576 | 363 002 331 136 B | D | [F0-moe] F0_moe_bytes |
-| 3 | KV per token: 491 520 B (dense), 114 688 (MoE); at 2²⁰ tokens 515.3 / 120.2 GB | | D | [F0-kv1M] F0_kv |
-| 4 | per-die totals at 4k: dense ≤ 52.3 GB, MoE ≤ 54.5 — all ≤ 86·10⁹ | feasible | D | [F10-mem-*-4k] T3_feasible_4k |
-| 5 | dense 1M f16: every die ≥ 114.4 GB > 86 | infeasible | D | [F10-mem-dense-1M] T3_infeasible_1M_f16 |
-| 6 | dense 1M KV-int8: max die 84.3 GB ≤ 86 | feasible | D | [F10-mem-dense-1M KV-i8] T3_feasible_1M_i8 |
-| 7 | MoE 1M f16: max die 71.6 GB | feasible | D | [F10-mem-moe-1M] T3_feasible_moe_1M |
-| 8 | L_max = min_pos ⌊room_pos / (n_pos·kv_tok·B)⌋: dense 551 253 / 137 813 / 34 453 (B = 1/4/16), int8 1 102 506; MoE 1 925 823 / 481 455 / 120 363 | | D | [F1-*-Lmax] T4_Lmax |
-| 9 | ΔL_max per GB of overhead: 16 276 (dense), 61 035 (MoE) | | D | [F1-dLmax] T4_dLmax |
-| 10 | minimum dies for either shape | 5 | D | [F1-*-Lmax] T4_min_dies |
-| 11 | Σbw per token = 41 107 ns (dense r=1), 164 443 (r=4), 24 367 / 97 484 (MoE); 16 latencies | | D | [F2-*] T7_bw_sum |
-| 12 | bandwidth sum is chain-order invariant; logits source 18.8 vs 27.0 µs | | D | [F2-order] T7_order_invariance |
-| 13 | T_x(λ) at 10/91/500 µs: dense 201 / 1 497 / 8 041 µs; MoE 184 / 1 480 / 8 024 | | D (λ A) | [F2-*] T8_Tx |
-| 14 | bounce ≥ 10 % of the 32k step iff λ ≥ 14 762 µs (dense) / 835 (MoE); 50 % iff 73 820 / 4 181 | | D | [F9-*-lambda] T8_threshold |
-| 15 | per-card trunk bytes per token (dense r=1): 98 308 / 131 072 / 131 072 / 611 328 | | D | [F2-dense-rows1] T9_trunk |
+| 1 | dense resident int8 = 120 · 3 187 671 040 + 2 · 2 101 346 304 | 386 723 217 408 B | D | [F0-dense] T0_dense_bytes |
+| 2 | MoE resident int8 = 28 · 12 926 844 928 + 2 · 525 336 576; expert slabs 12 GiB = 12.9 GB per layer | 363 002 331 136 B | D | [F0-moe] [F0-moe-experts] T0_moe_bytes, T0_expert_slabs_units |
+| 3 | KV per token: 491 520 B (dense), 114 688 (MoE); at 2²⁰ tokens 515.3 / 120.2 GB; K+V per token-layer 4 KiB | | D | [F0-kv1M] T0_kv, T0_kv_write |
+| 4 | per-die totals at 4k: dense ≤ 52.3 GB, MoE ≤ 54.5 — all ≤ 86·10⁹ | feasible | D | [F10-mem-*-4k] T_mem_feas_dense_4k, T_mem_feas_moe_4k |
+| 5 | dense 1M f16: every die ≥ 114.4 GB > 86 for any overhead, and under ANY partition (fleet KV room 282.3 GB < 515.4) | infeasible | D (∀ overhead, ∀ partition) | [F10-mem-dense-1M] [F9-mem] T_mem_infeas_dense_1M, T_mem_infeas_1M_any_partition, T_mem_room, T_mem_feas_dense_1M |
+| 6 | dense 1M KV-int8: max die 84.3 GB ≤ 86; fits iff the per-die overhead ≤ 3 804 224 512 B = 3.80 GB = 3.54 GiB (margin 1.66 GB at 2 GiB) | feasible | D (overhead A, H8) | [F10-mem-dense-1M KV-i8] [F1-ort-threshold] T_mem_feas_kv_int8 (∀ overhead, iff), T_mem_feas_kv_int8_cells |
+| 7 | MoE 1M f16: max die 71.6 GB | feasible | D | [F10-mem-moe-1M] T_mem_feas_moe_1M |
+| 8 | L_max = min_pos ⌊room_pos / (n_pos·kv_tok·B)⌋: dense 551 253 / 137 813 / 34 453 (B = 1/4/16), int8 1 102 506; MoE 1 925 823 / 481 455 / 120 363; B = 8: 68 906 | | D | [F1-*-Lmax] T_Lmax, T_Lmax_binding_pos, T_Lmax_formula |
+| 9 | ΔL_max per GB of overhead: 16 276 (dense), 61 035 (MoE); L_max monotone in the overhead | | D | [F1-dLmax] T_Lmax_dOverhead, T_Lmax_monotone |
+| 10 | minimum dies for either shape: 4 dies infeasible for ANY layer assignment (some die holds ≥ 30 / 7 layers = 95.6 / 90.5 GB; totals 386.7 / 363.0 > 344); 5 dies feasible (24 / 6 layers per die, worst die 81.2 / 80.4 GB at 4k; dense L_max ≈ 53k) | 5 | D (∀ assignment) | [F1-*-min-dies] T_min_dies, T_min_dies_dense_4, T_min_dies_moe_4, T_min_dies_4_total, T_min_dies_5_dense, T_min_dies_5_moe, T_min_dies_heuristic |
+| 11 | Σbw per token = 41 107 ns (dense r=1), 164 443 (r=4), 24 367 / 97 484 (MoE); 16 latencies | | D | [F2-*] T_bw_hops, T_bw_sum |
+| 12 | hop sum = 4·(h₀+h₁+g₀+g₁) − h(first die) − g(last die): order-dependent only through the first and last die types; classes 41 107 / 42 277 / 48 792 / 49 962 ns, chosen (d1, d0) = min; logits source 18.8 vs 27.0 µs | | D (∀ 70 orders) | [F2-order] [F2-order-classes] T_order_formula, T_order_optimal, T_order_d1_d0, T_order_d0_d0, T_order_d1_d1, T_order_d0_d1, T_order_chosen |
+| 13 | T_x(λ) at 10/91/500 µs: dense 201 / 1 497 / 8 041 µs; MoE 184 / 1 480 / 8 024; = Σbw + 16λ over the whole bracket | | D (λ A) | [F2-*] T_Tx_cells, T_Tx_bracket (∀ λ) |
+| 14 | bounce ≥ 10 % of the 32k step iff λ ≥ 16 392 µs (dense) / 918 (MoE); 50 % iff 147 549 / 8 271 — the step carries the 16 λ (round 1: 14 762 / 835 and 73 820 / 4 181 against the fixed λ = 91 µs step) | | D (∀ λ, iff) | [F9-*-lambda] T_bounce_threshold_dense, T_bounce_threshold_moe, T_bounce_round1 |
+| 15 | per-card trunk bytes per token (dense r=1): 98 308 (= 96 KiB) / 131 072 / 131 072 / 611 328; utilisation < 0.02 % | | D | [F2-dense-rows1] T_trunk_bytes, T_trunk_util |
 | 16 | queueing bound behind bulk chunk C on the 13.9 link: 5 / 75 / 1 207 µs for 64 KiB / 1 MiB / 16 MiB | | D | [F8-H3] T_queue |
-| 17 | per-layer times: dense GEMM 18 256 993 ns; MoE 240 223 + 2 967 496 (serial) / 2 344 360 (pp); heads 12 035 202 / 3 008 800; launches 546 000 / 637 000 | | D (D2) | [F3-*-layer] T1_layer |
-| 18 | attention per layer (`[F3-*-attn]`): KV = 4096·L·10/G; SM = t·H_q·L·c_E·10/3456; MMA = 2·8·(L/16)·⌈t·g/16⌉·15/8 | table §3.1 | D (G, c_E U) | T1_attn |
-| 19 | §3.2 table: 26 rows of T_step, components, tokens/s/card, binding | | D | [F3] T1_step_table |
-| 20 | §3.3 branch table and brackets (dense −8 %/+3 %; MoE −27 %/+38 %) | | D | [F3b] T1_branches |
-| 21 | MoE B = 16 by family: 2.357 / 3.714 / 4.765 at 32k | | D (D(16) U) | [F3c] T1_moe_families |
-| 22 | L*_KV = ⌈T_w·G/(10·kv_tok·B)⌉: dense 778 240 (= W_layer/4096), 194 560, 48 640; gather3x 259 414; int8 1 556 480; MoE 136 736 / 34 184 / 8 546, pp 110 173, gather3x 45 579 | | D | [F4-*-Lkv-*] T5_Lstar_kv |
-| 23 | t* = ⌈kv_tok·3456/(G·H_q·c_E)⌉, L-independent: dense 16 / 4 (native / poly), MoE 64 / 16; gather3x 48 / 12, 191 / 48; int8 8 / 2 | | D | [F4-*-tsm-*] T6_tstar_softmax |
+| 17 | per-layer times: dense GEMM 18 256 993 ns; MoE 240 223 + 2 967 496 (serial) / 2 344 360 (pp); heads 12 035 202 / 3 008 800; launches 546 000 / 637 000; W = 2 202 874 362 / 92 824 932 | | D (D2) | [F3-*-layer] T_layer, T_W |
+| 18 | attention per layer (`[F3-*-attn]`): KV = 4096·L·10/G; SM = t·H_q·L·c_E·10/3456; MMA = 2·8·(L/16)·⌈t·g/16⌉·15/8 — every cell of the §3.1 table; KV monotone over 582 ≤ G ≤ 1746, SM linear over 4 ≤ c_E ≤ 16 | table §3.1 | D (G, c_E U: ∀ over the brackets) | T_attn_dense, T_attn_moe, T_attn_shares, T_attn_G_bracket, T_attn_cE_bracket |
+| 19 | §3.2 table: 26 rows of T_step, components, tokens/s/card, feasibility | | D | [F3] T_step_dense_4k/_32k/_128k/_1M, T_step_moe_4k/_32k/_128k/_1M, T_draft |
+| 20 | §3.3 branch table and brackets (dense −8 %/+3 %; MoE −27 %/+38 %); dense 0.105 for every λ in 10–500 µs, MoE within 1.780–1.886 | | D (∀ λ) | [F3b] T_branches_dense, T_branches_moe, T_step_lambda_form, T_step_lambda_bracket |
+| 21 | MoE B = 16 by family: 2.357 / 3.714 / 4.765 at 32k | | D (D(16) U) | [F3c] T_moe_families |
+| 22 | L*_KV = ⌈T_w·G/(10·kv_tok·B)⌉: dense 778 240 (= W_layer/4096), 194 560, 48 640; gather3x 259 414; int8 1 556 480; MoE 136 736 / 34 184 / 8 546, pp 110 173, gather3x 45 579; an iff on the exact model for every L | | D | [F4-*-Lkv-*] T_Lstar_kv, T_Lstar_iff, T_Lstar_iff_moe |
+| 23 | t* = ⌈kv_tok·3456/(G·H_q·c_E)⌉, L-independent: dense 16 / 4 (native / poly), MoE 64 / 16; gather3x 48 / 12, 191 / 48; int8 8 / 2; both sides of the threshold in the floored model | | D | [F4-*-tsm-*] T_tstar, T_tstar_iff, T_tstar_model |
 | 24 | MMA share of KV time: dense 8.0 / 32.0 / 127.9 % at t = 1/4/16; MoE 8.0 / 8.0 / 32.0 | | D | [F4-*-mma-*] T_mma_share |
-| 25 | regime map cells (§4.1) | | D | [F4-regime] T_regime |
-| 26 | layer-split ceiling: tokens/s ≤ R_gemm / bytes per token = 0.454 fleet (dense) | | D | T2_ceiling |
-| 27 | P2P saving ≤ T_x: 0.06 % / 1.1 % | | D | [F5-*-p2p] T9_p2p_bound |
-| 28 | tensor-split: dense 398.52 ms (273.85 + 11.53 + 65.70 + 45.93), MoE 43.02 (11.61 + 2.69 + 18.01 + 10.32); per reduction 191 / 184 µs; with P2P 357.50 / 33.41 | | D | [F5-*-tsplit*] T10_tsplit |
-| 29 | Π = 8: blocks 293.66–305.99 ms (dense), 14.02–18.63 (MoE); 1/max = 3.268 / 53.657 fleet tokens/s | | D | [F5-*-pipe] T11_pipeline |
-| 30 | D2D: 0 B per token; KV move 753 → 161 ms (dense 128k), 201 → 43 (MoE) | | D | [F5-*-d2d] T_d2d |
-| 31 | draft token 18.1 ms (5 727 + 1 153 + 11 011 + bounce); verify step 54.27 / 21.24 ms | | D (launch M, λ A) | [F6-draft] T14_draft |
-| 32 | τ(α, k) = Σ α^i: 1.875 / 2.533 / 3.439 at k = 3 | | D | [F6-tau] T14_tau |
-| 33 | spec on dense: 0.262 (k = 3), 0.315 (k = 7) at α = 0.7; on MoE uniform 1.451 < 1.867; break-even τ ≥ 3.258 (uniform) / 2.332 (Zipf 1.5) | | D (α A) | [F6-*] T12_spec_moe_loss |
-| 34 | rollout: stage steps (§7 table); 4 × stage-1 + 12λ + T_head = 2362.8 vs 2362.31 ms | | D | [F7-*] T15_block_invariance |
-| 35 | ladder expectations: link µs per size, trunk 41.5 vs 27.6, KV slopes 61 440 / 16 384 / 12 288 B per token, load 3.5 s | | D | [F8-*] T_ladder |
-| 36 | rows cliff: 81/174.6 = 46.3 %; B·t ≤ 16 | | M/D | [F9-rows] T13_rows |
-| 37 | dense serial fallback: 2928.50 ms → 0.085; MoE 1M gather3x: 2178.63 ms → 0.114 | | D | [F9-*] T_fallbacks |
-| 38 | power: Π = 1 one card at ≤ 141 W; Π = 8 all at 141 < 150 | | M | [F9-power] — |
-| 39 | A-fraction approximation: the measured 174.6 carries 1.5 % of A bytes; the dense down-projection (K = 53 248) streams 3.1 % → ≤ 0.4 % per layer, not modelled | | A (stated) | — |
+| 25 | regime map cells (§4.1): binding term and share, all 24 cells | | D | [F4-regime] T_regime_dense, T_regime_moe, T_regime_shares |
+| 26 | layer-split ceiling: Σ_pos n_pos·T = n_L·T for any partition; tokens/s ≤ R_gemm / bytes per token = 0.453 fleet (dense), 13.457 (MoE) for any extra cost | | D (∀ partition, ∀ extra) | T_serial_partition, T_serial_partition_120, T_ceiling, T_serial |
+| 27 | P2P saving ≤ T_x = 1 497 µs < 1.5 ms: 0.06 % / 1.1 % | | D (∀ replacement cost) | [F5-*-p2p] T_p2p_bound, T_whatif |
+| 28 | tensor-split: dense 398.52 ms (273.85 + 11.53 + 1.50 lm_head/8 + 65.70 + 45.93), MoE 43.02 (11.61 + 2.69 + 0.37 + 18.01 + 10.32); per reduction 191 / 184 µs; with P2P 357.50 / 33.41; 5.9× / 3.1×, 6.6× / 4.0× | | D | [F5-*-tsplit*] T_tsplit, T_tsplit_p2p |
+| 29 | Π = 8: blocks 293.66–305.99 ms (dense), 14.02–18.63 (MoE); 1/max = 3.268 / 53.657 fleet tokens/s = 7.7× / 7.1×; T_step = Σ blocks + λ, speed-up ≤ 8 + λ/max; MoE imbalance loss 10.3 % (not 12.5 %); trunk 0.06 % / 0.84 % (not 0.2 %) | | D | [F5-*-pipe] [F5-*-pipe-balance] T_pipelining, T_pipelining_blocks, T_pipelining_decomposition, T_pipelining_bound, T_pipelining_balance, T_pipelining_trunk, T_pipelining_memory |
+| 30 | D2D: 0 B per token (no D2D term in the step); KV move 753 → 161 ms (dense 128k), 201 → 43 (MoE) | | D / DEFINITION | [F5-*-d2d] T_d2d |
+| 31 | draft token 18.1 ms (5 727 + 1 153 + 11 011 + 19 + 182 µs); verify step 54.27 / 21.24 ms; 61 % launch-bound; 0.5 GB saves 2.9 ms, 12 layers save 5.5 | | D (launch M, λ A) | [F6-draft] T_draft |
+| 32 | τ(α, k) = Σ α^i: 1.875 / 2.533 / 3.439 at k = 3; τ(α, 3) < 4 for every α < 1 | | D | [F6-tau] T_tau, T_tau_lt_rows |
+| 33 | spec on dense: 0.262 (k = 3), 0.315 (k = 7) at α = 0.7, gain 2.475× (1.832 / 3.361 at α = 0.5 / 0.9), a gain for every α ≥ 0.024; on MoE uniform 1.451 < 1.867: loss iff α ≤ 0.864 (τ < T₄/T₁ = 3.2584), Zipf(1.0) iff α ≤ 0.746, Zipf(1.5) iff α ≤ 0.646 (tie at 1.867 in thousandths), both directions for every α; mechanism D(4) = 4·D(1) | | D (α as a variable) | [F6-*] T_spec_dense, T_spec_dense_all_alpha, T_spec_dense_breakeven, T_spec_dense_best_k, T_spec_moe_loss, T_spec_moe_mechanism, T_spec_moe_loss_exact, T_spec_moe_loss_tps, T_spec_moe_tie, T_spec_moe_cells, T_spec_steps |
+| 34 | rollout: stage steps (§7 table); 4 × stage-1 + T_head + 2·T_launch + 4λ + (3 hops at 13.9 − 1 at 27.3 + logits) = 2362.32 ms exactly (round 1: + 12λ + T_head = 2362.8 with a 0.5 ms residual) | | D | [F7-*] [F7-*-identity] T_rollout_dense, T_rollout_moe, T_rollout_identity |
+| 35 | ladder expectations: link µs per size, trunk 41.5 vs 27.6, KV slopes 61 440 / 16 384 / 12 288 B per token, load 3.5 s (2.3 s with independent links) | | D | [F8-*] T_ladder_H1, T_ladder_rest |
+| 36 | rows cliff: 81/174.6 = 46.3 %; B·t ≤ 16 | | M/D | [F9-rows] T_rows_cliff |
+| 37 | dense serial fallback: 2928.50 ms → 0.085; MoE 1M gather3x: 2178.63 ms → 0.114 (2.7× — the one single-unknown swing above 1.32×) | | D | [F9-*] T_fallbacks, T_single_measurement |
+| 38 | power: Π = 1 one card at ≤ 141 W; Π = 8 all at 141 < 150 | | M | [F9-power] T_power |
+| 39 | A-fraction approximation: the measured 174.6 carries 1.5 % of A bytes; the dense down-projection (K = 53 248) streams 3.1 % → 0.44 % per layer (27.4 % of the layer × 1.6 %), carried as the explicit hypothesis pen ≤ 0.5 % on every dense cell; the headline 0.105 survives any penalty ≤ 0.8 % | | A (stated, as a hypothesis) | T_afrac_size, T_afrac_headline, T_afrac_edge, T_serial_dense_afrac, T_serial_moe_afrac |
