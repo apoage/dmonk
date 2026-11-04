@@ -13,9 +13,15 @@ kernel: the per-die step-rate inputs your model needs) and, if present,
 DESIGN-2.md / DESIGN-3.md (MoE and attention results — carry their open
 branches as your model's parameters).
 
-YOUR PROBLEM: PROBLEM-4.md — partition 160-200 GB of W4 weights + KV cache
+YOUR PROBLEM: PROBLEM-4.md — partition the model + KV cache
 + a draft model across 8 dies with NO peer-to-peer and a layer-split-only
-runtime, and predict tokens/s per card at L = 4k..1M. This is a planning
+runtime, and predict tokens/s per card at L = 4k..1M. LATE-BREAKING INPUT
+(HW-MAP errata #12, measured): sub-8-bit weights are silicon-dead here —
+resident weights are int8 (2x bytes) unless your plan includes a legal
+escape. The prior premise "Q4 model fits 4 cards" no longer closes
+trivially; whether ANY configuration closes is your headline question, and
+the measured decode rate is now 174.6 GB/s flat m=1..16 with 181 pure-read
+streams (not the older 137.8/173.8 figures). This is a planning
 problem: the deliverable is a partition, an exchange schedule, and a
 predictive model where every term derives from measured rates — the
 crossovers ("L* where KV bandwidth starts binding") must be theorems-in-
