@@ -19,8 +19,14 @@ theorems. Round-1 deliverable: DESIGN-4.md.
 
 ## The model to place (parameterized like the others)
 
-- Total weights W_tot = 160..200 GB, W4 static (per-layer dense GEMM slabs
-  and/or MoE expert slabs per PROBLEM-2 — carry both weight shapes).
+- Total weights: the source model is 160..200 GB of sub-8-bit quantization,
+  **but W4 is silicon-dead on this part (HW-MAP errata #12) — weights
+  resident on the dies must be modeled as int8 (2x the source bytes,
+  320..400 GB) unless your plan includes a legal escape** (more dies,
+  per-layer host streaming, hot/cold residency split with quantified
+  on-the-fly costs). The headline question of this problem is now: **does
+  ANY configuration of this fleet run the model at all**, and at what
+  tokens/s. Both dense-GEMM and MoE (PROBLEM-2) weight shapes carry.
 - KV cache: grows with context L and layer index; f16; the per-layer KV
   write path is die-local (errata #11).
 - Draft model (speculative decoding): a second small model (0.5..2 GB)
