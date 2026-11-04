@@ -48,6 +48,7 @@ def tn(b, R):     return b * 10 // R                 # ns for b bytes at R tenth
 def usR(ns):      return (ns + 500) // 1000
 def msR(ns):      return (ns + 500_000) // 1_000_000
 def pct(n, d):    return (2 * n * 1000 + d) // (2 * d)
+def pctH(n, d):   return (2 * n * 10000 + d) // (2 * d)       # hundredths of a percent
 def t10(x):       return f"{x // 10}.{x % 10}"
 def t3(x):        return f"{x // 1000}.{x % 1000:03d}"
 def gb1(b):       return f"{b // GB}.{(b % GB) // (GB // 10)}"     # decimal GB, one decimal (floor)
@@ -237,6 +238,7 @@ def main():
         print(f"[F0-{s['name']}] layers {s['nL']}, resident/layer {s['w_res']} B, embed {s['w_embed']} B, head {s['w_head']} B,"
               f" total int8 {tot} B = {gb1(tot)} GB (int4 source {gb1(tot // 2)} GB), kv/token/layer {s['kv_tok']} B,"
               f" kv/token total {s['nL'] * s['kv_tok']} B, streamed/token (t=1) {streamed_per_token(s)} B = {gb1(streamed_per_token(s))} GB")
+    print(f"[F0-moe-experts] expert slabs per layer {MOE['w_experts']} B = {MOE['w_experts'] // GiB} GiB = {gb1(MOE['w_experts'])} GB ; K+V written per token per layer = kv_tok = {MOE['kv_tok'] // KiB} KiB")
     print(f"[F0-draft] {DRAFT['w']} B i8, {DRAFT['nlaunch']} launches/token, KV window {DRAFT['kv_window']} B")
     print(f"[F0-kv1M] KV bytes at L=1M (2^20) f16: dense {gb1(DENSE['nL'] * 4096 * 2**20)} GB, moe {gb1(MOE['nL'] * 4096 * 2**20)} GB ;"
           f" fleet capacity 8 x 86 = {8 * 86} GB")
@@ -257,6 +259,15 @@ def main():
         print(f"[F1-{s['name']}-Lmax] L_max f16 B=1: {Lmax(s)} ; B=4: {Lmax(s, 4)} ; B=16: {Lmax(s, 16)} ; KV-i8 B=1: {Lmax(s, 1, True)} ; min dies: {min_dies(s)}")
         print(f"[F1-{s['name']}-draftfree] L_max without the draft on its die: {min((DIE_MEM - O_RT - WS - die_weights(s, p, False)) // (s['layers'][p] * s['kv_tok']) for p in range(DIES))}")
     print(f"[F1-dLmax] dense: tokens of L_max lost per GB of extra per-die overhead = {GB // (15 * 4096)} ; moe (4-layer die) {GB // (4 * 4096)}")
+    room = DIE_MEM - die_weights(DENSE, 0) - die_kv(DENSE, 0, 1 << 20, 1, True) - WS
+    print(f"[F1-ort-threshold] dense 1M KV-int8 fits iff the per-die runtime overhead <= {room} B = {gb1(room)} GB = {room * 100 // GiB / 100} GiB "
+          f"(assumed 2 GiB = {gb1(O_RT)} GB ; margin at 2 GiB {gb1(DIE_MEM - die_total(DENSE, 0, 1 << 20, 1, True))} GB)")
+    for s in SHAPES:
+        n4, n5 = ceil(s["nL"], 4), ceil(s["nL"], 5)
+        print(f"[F1-{s['name']}-min-dies] 4 dies: some die holds >= {n4} layers = {gb1(n4 * s['w_res'])} GB > 86 for ANY assignment (total {gb1(total_resident(s))} GB > 4 x 86 = 344) ; "
+              f"5 dies: {n5} layers/die = {gb1(n5 * s['w_res'])} GB, worst die (+embed) {gb1(n5 * s['w_res'] + s['w_embed'] + n5 * s['kv_tok'] * 4096 + WS + O_RT)} GB at L=4k, "
+              f"lm_head+draft die {gb1(n5 * s['w_res'] + s['w_head'] + DRAFT['w'] + DRAFT['kv_window'] + n5 * s['kv_tok'] * 4096 + WS + O_RT)} GB"
+              + (f" ; dense 5-die L_max {(DIE_MEM - O_RT - WS - 24 * s['w_res'] - s['w_embed']) // (24 * 4096)}" if not s["moe"] else ""))
     print()
     # ---------------------------------------------------------------- F2 exchange
     print("## [F2] exchange traffic per token-step (t=1 rows unless stated)")
@@ -270,8 +281,16 @@ def main():
             print(f"      bandwidth-only total {bw} ns = {usR(bw)} us over {nlat} latencies ; with lambda lo/mid/hi: "
                   + ", ".join(f"{k}:{usR(exchange(s, rows, v)[0])} us" for k, v in LAMBDA.items())
                   + f" ; die-0 link bytes per card per token {link_bytes_per_card(s, rows)}")
-    print(f"[F2-order] bandwidth term is order-invariant: every die receives once and sends once; sum over dies of act*(1/H2D+1/D2H) ; "
-          f"the only order-dependent term is which die emits the logits (d0 27.3 vs d1 19.0): {usR(tn(128256 * 4, D2H[0]))} vs {usR(tn(128256 * 4, D2H[1]))} us at rows=1")
+    print(f"[F2-order] the hop sum = 4*(h0+h1+g0+g1) - h(first die) - g(last die): order-dependent only through the first and last die types, "
+          f"plus which die emits the logits (d0 27.3 vs d1 19.0): {usR(tn(128256 * 4, D2H[0]))} vs {usR(tn(128256 * 4, D2H[1]))} us at rows=1")
+    def bw_order(s, m):
+        bitd = lambda p: (m >> p) & 1; act = s["d"] * 2
+        return sum(tn(act, D2H[bitd(p)]) + tn(act, H2D[bitd(p + 1)]) for p in range(7)) + tn(s["vocab"] * 4, D2H[bitd(7)]) + tn(4, H2D[bitd(0)])
+    cls = {}
+    for m in range(256):
+        if bin(m).count("1") == 4: cls.setdefault(((m >> 0) & 1, (m >> 7) & 1), set()).add(bw_order(DENSE, m))
+    print(f"[F2-order-classes] dense r=1 bandwidth sum by (first die, last die) over all 70 orders with four dies of each kind: "
+          + ", ".join(f"(d{k[0]},d{k[1]}): {sorted(v)} ns" for k, v in sorted(cls.items())) + f" ; chosen order (d1,d0) = {bw_order(DENSE, 0b01010101)} ns = min")
     print()
     # ---------------------------------------------------------------- F3 step table
     print("## [F3] per-layer components and step time, primary branch (G stream, exp native, lambda 91 us, launches serialised, MoE serial, uniform routing)")
@@ -356,7 +375,7 @@ def main():
         xch = p0["XCH"]
         print(f"[F5-{s['name']}-p2p] host-bounce total {usR(xch)} us = {t10(pct(xch, T0))} % of the step: a P2P link at ANY rate saves at most that (bound)")
         Tts, pts = step_tensor_split(s, 32768)
-        print(f"[F5-{s['name']}-tsplit] tensor-split over 8 dies: {ms2(Tts)} ms = W/8 {ms2(pts['W/8'])} + KV/8 {ms2(pts['KV/8'])} + launch {ms2(pts['LAUNCH'])} + 2x{s['nL']} host reductions {ms2(pts['REDUCE'])} ; "
+        print(f"[F5-{s['name']}-tsplit] tensor-split over 8 dies: {ms2(Tts)} ms = W/8 {ms2(pts['W/8'])} + KV/8 {ms2(pts['KV/8'])} + lm_head/8 {ms2(tn(s['w_head'], 8 * R_GEMM))} + launch {ms2(pts['LAUNCH'])} + 2x{s['nL']} host reductions {ms2(pts['REDUCE'])} ; "
               f"tok/s/card {t3(tps_card(1000, Tts))} ({t10((Tts and (T0 * 10 // Tts)))}x) ; per reduction {usR(t_reduce(LAMBDA['mid'], 1, s['d']))} us ; with lambda lo: {ms2(step_tensor_split(s, 32768, lam='lo')[0])} ms ; pipelined launches: {ms2(step_tensor_split(s, 32768, launch=False)[0])} ms")
         # tensor-split with P2P all-reduce at X = 50 GB/s and lambda_p2p = 10 us: 8 partials over the P2P fabric
         red_p2p = 8 * (1 * s["d"] * 4) * 10 // 500 + 10_000
@@ -366,6 +385,10 @@ def main():
         mx = max(blocks)
         print(f"[F5-{s['name']}-pipe] per-die block times ms {[ms2(b) for b in blocks]} ; pipelined (Pi=8 sequences) fleet tok/s = 1/max = {t3(tps_fleet(1000, mx))} -> per card {t3(tps_card(1000, mx))} ; "
               f"speed-up over the chain {t10(T0 * 10 // mx)}x ; per-sequence latency stays {ms2(T0)} ms")
+        sm = sum(blocks)
+        print(f"[F5-{s['name']}-pipe-balance] T_step = sum of blocks + lambda: {T0} = {sm} + {T0 - sm} ns ; loss vs a balanced 8-way split of the same work {t10(pct(8 * mx - sm, 8 * mx))} % "
+              f"(ideal {t3(tps_fleet(1000, ceil(sm, 8)))} fleet tok/s, max block {ms2(mx)} vs mean {ms2(ceil(sm, 8))} ms) ; "
+              f"trunk utilisation at Pi=8 on the worst card: 8 x {max(link_bytes_per_card(s, 1))} B per block = {pctH(8 * tn(max(link_bytes_per_card(s, 1)), H2D[0]), mx) / 100:.2f} % of 27.6 GB/s")
         kvmove = s["layers"][0] * s["kv_tok"] * 131072
         print(f"[F5-{s['name']}-d2d] per-token D2D traffic 0 B ; re-partition move of one die's KV at 128k = {gb1(kvmove)} GB: {msR(tn(kvmove, R_D2D))} ms at 10.7, {msR(tn(kvmove, 500))} ms at 50")
     print()
@@ -385,10 +408,23 @@ def main():
                 r = tps_card(tau_milli(a, k), T)
                 if best is None or r > best[1]: best = (k, r)
             T3, _ = step(s, 32768, 1, 4)
-            print(f"[F6-{s['name']}-{ak}] k=3: {ms2(T3)} ms, {t3(tau_milli(a))} tok/step -> {t3(tps_card(tau_milli(a), T3))} tok/s/card = {t10(tps_card(tau_milli(a), T3) * 10 // tps_card(1000, T1))}x of t=1 ; best k = {best[0]} -> {t3(best[1])}")
-    for fam in ("uniform", "zipf15"):
+            print(f"[F6-{s['name']}-{ak}] k=3: {ms2(T3)} ms, {t3(tau_milli(a))} tok/step -> {t3(tps_card(tau_milli(a), T3))} tok/s/card = {t10(tps_card(tau_milli(a), T3) * 10 // tps_card(1000, T1))}x of t=1 "
+                  f"(exact gain tau*T1/T4 = {t3(tau_milli(a) * T1 // T3)}) ; best k = {best[0]} -> {t3(best[1])}")
+        if not s["moe"]:
+            T3 = step(s, 32768, 1, 4)[0]; a = 0
+            while tau_milli(a, 3) * T1 <= 1000 * T3: a += 1
+            print(f"[F6-dense-breakeven] spec k=3 is a gain on dense for every alpha >= {t3(a)} (tau >= T4/T1 = {T3 * 10000 // T1 / 10000})")
+    T1m = step(MOE, 32768)[0]
+    for fam in ("uniform", "zipf10", "zipf15"):
         T4, p4 = step(MOE, 32768, 1, 4, fam=fam)
-        print(f"[F6-moe-{fam}-t4] D(4)={D_of(fam, 4)} ; step {ms2(T4)} ms (W {ms2(p4['W'])}) ; tok/s/card at a=0.7: {t3(tps_card(tau_milli(700), T4))} vs t=1 {t3(tps_card(1000, step(MOE, 32768)[0]))} ; break-even alpha: tau(a,3) >= {t3(T4 * 1000 // step(MOE, 32768)[0])}")
+        a = 0
+        while tau_milli(a, 3) * T1m < 1000 * T4: a += 1          # exact criterion: spec is a loss iff tau * T1 < T4
+        print(f"[F6-moe-{fam}-t4] D(4)={D_of(fam, 4)} ; step {ms2(T4)} ms (W {ms2(p4['W'])}) ; tok/s/card at a=0.7: {t3(tps_card(tau_milli(700), T4))} vs t=1 {t3(tps_card(1000, T1m))} ; "
+              f"break-even tau(a,3) >= T4/T1 = {T4 * 10000 // T1m / 10000} -> alpha >= {t3(a)} "
+              f"(alpha {t3(a - 1)} loses: tau {t3(tau_milli(a - 1, 3))} -> {t3(tps_card(tau_milli(a - 1, 3), T4))} ; alpha {t3(a)} gains: tau {t3(tau_milli(a, 3))} -> {t3(tps_card(tau_milli(a, 3), T4))})")
+    E1 = MOE["nL"] * (experts_ns(MOE, 1, "uniform", "serial") - 2 * F_MOE)
+    print(f"[F6-moe-mechanism] uniform D(4) = 4 D(1): the verify batch multiplies the active-expert bytes ; expert stream at t=1 E1 = {ms2(E1)} ms = {t10(pct(E1, T1m))} % of T1 ; "
+          f"T4 >= 4 E1 + (T1 - E1) = {ms2(4 * E1 + T1m - E1)} ms, so any tau < 1 + 3 E1/T1 = {t3(1000 + 3 * E1 * 1000 // T1m)} is a loss before the draft cost is counted")
     T8d, _ = step(DENSE, 32768, 1, 8)
     T8d = T8d - draft_ns(LAMBDA["mid"], True) + draft_ns(LAMBDA["mid"], True, 7)
     print(f"[F6-dense-k7] k=7 (rows 8): step {ms2(T8d)} ms ; a=0.7 -> {t3(tps_card(tau_milli(700, 7), T8d))} tok/s/card ; a=0.9 -> {t3(tps_card(tau_milli(900, 7), T8d))}")
@@ -404,6 +440,11 @@ def main():
                 T = sum(die_block_ns(s, p, L) for p in range(npos))
                 # the prefix chain ends on position npos-1: its logits leave from that die
                 print(f"[F7-{s['name']}-{ncard}card-{lab}] layers {sum(s['layers'][:npos])} ; predicted prefix step {ms2(T)} ms ; per-die blocks {[ms2(die_block_ns(s, p, L)) for p in range(npos)]}")
+    for s in SHAPES:
+        st1 = sum(die_block_ns(s, p, 32768) for p in range(2)); act = s["d"] * 2
+        extra = tn(s["w_head"], R_GEMM) + 2 * T_LAUNCH + 4 * LAMBDA["mid"] + 3 * tn(act, H2D[1]) + tn(s["vocab"] * 4, D2H[0]) - tn(act, D2H[0])
+        print(f"[F7-{s['name']}-identity] 4 x stage-1 ({ms2(st1)} ms) + T_head + 2 T_launch + 4 lambda + 3 hops@13.9 - 1 hop@27.3 + logits ({ms2(extra)} ms) = {ms2(4 * st1 + extra)} ms = direct {ms2(step(s, 32768)[0])} ms exactly ({4 * st1 + extra} = {step(s, 32768)[0]} ns) ; "
+              f"round-1 form 4 x stage-1 + 12 lambda + T_head = {ms2(4 * st1 + 12 * LAMBDA['mid'] + tn(s['w_head'], R_GEMM))} ms")
     print()
     # ---------------------------------------------------------------- F8 ladder expectations
     print("## [F8] host-ladder expected values")
@@ -411,23 +452,26 @@ def main():
         print(f"[F8-H1-{n}] H2D d0 {tn(n, H2D[0])} ns, d1 {tn(n, H2D[1])} ; D2H d0 {tn(n, D2H[0])}, d1 {tn(n, D2H[1])} ns (plus lambda)")
     print(f"[F8-H2] trunk question: concurrent H2D to both dies of a card = {t10(H2D[0] + H2D[1])} GB/s if independent, {t10(H2D[0])} if die 0's link is the trunk")
     print(f"[F8-H5] KV growth slope per token: dense die {15 * 4096} B, MoE 4-layer die {4 * 4096} B, 3-layer die {3 * 4096} B ; at 128k a dense die holds {gb1(15 * 4096 * 131072)} GB")
-    print(f"[F8-H7] load: {gb1(total_resident(DENSE))} GB over 4 cards at 27.6 GB/s trunk = {total_resident(DENSE) // 4 * 10 // H2D[0] // 10**9} s ; int4 source {gb1(total_resident(DENSE) // 2)} GB")
+    print(f"[F8-H7] load: {gb1(total_resident(DENSE))} GB over 4 cards at 27.6 GB/s trunk = {t10(tn(total_resident(DENSE) // 4, H2D[0]) // 10**8)} s ({t10(tn(total_resident(DENSE) // 4, H2D[0] + H2D[1]) // 10**8)} s if both links of a card were independent, H2) ; int4 source {gb1(total_resident(DENSE) // 2)} GB")
     print(f"[F8-H3] bounce queueing bound behind a bulk chunk C: wait <= C/R: 64 KiB {usR(tn(64 * KiB, H2D[1]))} us, 1 MiB {usR(tn(MiB, H2D[1]))} us, 16 MiB {usR(tn(16 * MiB, H2D[1]))} us on the die-1 link")
     print()
     # ---------------------------------------------------------------- F9 risk numbers
     print("## [F9] risk numbers")
     for s in SHAPES:
         T0, p0 = step(s, 32768)
-        bw = exchange(s, 1, 0)[1]
-        lam10 = (T0 // 10 - bw) // 16
-        print(f"[F9-{s['name']}-lambda] bounce reaches 10 % of the 32k step iff lambda >= {usR(lam10)} us ; 50 % iff lambda >= {usR((T0 // 2 - bw) // 16)} us")
+        bw = exchange(s, 1, 0)[1]; rest = T0 - p0["XCH"]           # T_step = rest + bw + 16*lambda: the step itself carries the 16 latencies
+        lam10 = ceil(rest - 9 * bw, 144); lam50 = ceil(rest - bw, 16)   # x*(rest+bw+16L) <= bw+16L  <=>  L >= (x*rest - (1-x)*bw) / (16*(1-x))
+        old10 = (T0 // 10 - bw) // 16; old50 = (T0 // 2 - bw) // 16
+        print(f"[F9-{s['name']}-lambda] bounce reaches 10 % of the 32k step iff lambda >= {usR(lam10)} us ({lam10} ns) ; 50 % iff lambda >= {usR(lam50)} us ({lam50} ns) ; "
+              f"round-1 fixed-denominator figures {usR(old10)} / {usR(old50)} us actually give shares {t10(pct(bw + 16 * old10, rest + bw + 16 * old10))} / {t10(pct(bw + 16 * old50, rest + bw + 16 * old50))} %")
         print(f"[F9-{s['name']}-launch] launch floor share of the 32k step {t10(pct(p0['LAUNCH'], T0))} % ; dense-serial-fallback (138.9) step {ms2(T0 - p0['W'] + p0['W'] * R_GEMM // R_GEMM_SER)} ms")
     Tg, _ = step(MOE, 1048576, G="gather3x")
-    print(f"[F9-moe-1M-gather3x] MoE 1M on the gather3x branch: {ms2(Tg)} ms -> {t3(tps_card(1000, Tg))} tok/s/card (stream branch {t3(tps_card(1000, step(MOE, 1048576)[0]))})")
+    print(f"[F9-moe-1M-gather3x] MoE 1M on the gather3x branch: {ms2(Tg)} ms -> {t3(tps_card(1000, Tg))} tok/s/card (stream branch {t3(tps_card(1000, step(MOE, 1048576)[0]))}) ; the G branch moves this cell {t10(tps_card(1000, step(MOE, 1048576)[0]) * 10 // tps_card(1000, Tg))}x")
     Td, _ = step(DENSE, 32768)
     Tds = Td - (step(DENSE, 32768)[1]['W']) + step(DENSE, 32768)[1]['W'] * R_GEMM // R_GEMM_SER
     print(f"[F9-dense-serial] dense 32k if the kernel falls back to the serial regime (138.9): {ms2(Tds)} ms -> {t3(tps_card(1000, Tds))} tok/s/card")
-    print(f"[F9-mem] dense 1M f16 KV needs {gb1(DENSE['nL'] * 4096 * 2**20)} GB; fleet room for KV = {gb1(sum(DIE_MEM - O_RT - WS - die_weights(DENSE, p) for p in range(DIES)))} GB ; i8 KV needs {gb1(DENSE['nL'] * 2048 * 2**20)} GB")
+    print(f"[F9-mem] dense 1M f16 KV needs {gb1(DENSE['nL'] * 4096 * 2**20)} GB; fleet room for KV = {gb1(sum(DIE_MEM - O_RT - WS - die_weights(DENSE, p) for p in range(DIES)))} GB ; i8 KV needs {gb1(DENSE['nL'] * 2048 * 2**20)} GB ; f16-K/i8-V needs {gb1(DENSE['nL'] * 3072 * 2**20)} GB (short by {gb1(DENSE['nL'] * 3072 * 2**20 - sum(DIE_MEM - O_RT - WS - die_weights(DENSE, p) for p in range(DIES)))} GB)")
+    print(f"[F9-launch-fuse] 6 -> 4 launches per dense layer saves {ms2(240 * T_LAUNCH)} ms per token ; pipelined launches save {ms2(3 * DRAFT['nlaunch'] * T_LAUNCH)} ms per verify step")
     print(f"[F9-rows] B*t <= 16 always (m >= 24 measured at 81 GB/s = {t10(810 * 1000 // R_GEMM)} % of the flat rate)")
     print(f"[F9-power] Pi=1: one die streams at a time -> <= 1 card at the measured sustained {P_SUSTAIN} W; Pi=8: all cards at {P_SUSTAIN} W < {P_TDP} W TDP class (measured, no throttle)")
     print()
