@@ -1,5 +1,17 @@
 # DESIGN-2 — MoE grouped quant-GEMM decode kernel (one die, 8 cores)
 
+> **ROUND-2 STATUS (proof session, commit after 7b82332)**: every derived number below is checked by
+> `proof/moe.lean` (189 core-Lean theorems, 0 axioms) and printed by `proof/moe.py`; the claim ledger is
+> `PROOF-COVERAGE-2.md`. Corrections the prover forced are applied in place and listed there (the W4
+> "parity" claim, the regression decomposition, the per-step epilogue, the W-dyn loss range, the §8.2 c_res
+> row units, the A-resident small-shape row, the −128 operand caveat, and smaller ones).
+> **SILICON NOTE**: this design is anchored to HW-MAP@3eaf322's dense row (487 µs / 137.8 GB/s, S1-staged
+> serial loader). The current HW-MAP (f951a5c) lists that path as the "serial fallback 138.9" and a
+> DDR→L0B direct path at 174.6 flat (181.3 direct stream, ~181 pure-read roof). The theorems here are
+> conditionals on the anchor: re-anchored to 138.9 the headline is 136.4 (T_sync_reanchor); the DDR-bound
+> ceiling at the ~181 roof is 178.2 (T_sync_roof); a direct-path MoE kernel (no S1→L0B leg) is not modelled
+> here and is the natural round-3 exercise.
+
 Scope (PROBLEM-2.md): per decode step, t ∈ 1..16 tokens, each routed to k experts (k = 4..10), E = 64..512
 experts, expert slab `W_e [K, N_e]`, K = 2048..7168, N_e = 512..4096, W8 (i8 + per-channel f32 scale s_e[n])
 primary, W4 secondary; `y_τ[n] = Σ_{e ∈ topk(τ)} score_{τ,e} · s_e[n] · Σ_k x_τ[k]·W_e[k,n]`. Everything derives
@@ -74,7 +86,7 @@ the design in the DDR-bound regime: 173.8 × 128 MiB / (128 MiB + 0.64 MiB of A,
 | 1 | **S (this design, G=1)** | **135.3** / 171.2 | 134.2 | 135.4 | i32 difference epilogue (§3.2); A fragment probe (E11) | low: every path is one the dense kernel already exercised, plus one vector op |
 | 1b | S with expert pairs per A lift (G=2, §5.6) | 136.7 / 171.2 | — | — | + interleaved 2-region DDR pattern (A-reg2, E15) | low-medium |
 | 2 | W-dyn: whole experts per core, round-robin per step | 137.7 / 171.2 only when 8 \| D | 68.9 | 77.8 | 256 KiB C slab = L0C full (errata 14) → 2 slabs → 137.4 | high: rate is a function of D mod 8 |
-| 3 | K-split hybrid: each core K/8 rows of every expert, i32 partials reduced in a second launch | 125.3 / — | 114.7 | 124.7 | +T_launch, +2·8·k·t·N_e·4 B of partials | below S on every §8 cell except (t=16, D=128), where S-G2 still wins (Z8) |
+| 3 | K-split hybrid: each core K/8 rows of every expert, i32 partials reduced in a second launch | 125.3 / — | 114.7 | 124.7 | +T_launch, +8·k·t·N_e·4 B of partials read back (their write hides under the DDR slack, Z8) | below S on every §8 cell except (t=16, D=128), where S-G2 still wins (Z8) |
 | 4 | Vector-only (DESIGN.md route 4) | 70–78 (M), ∝ 1/t | | | | floor |
 | 5 | Vendor grouped op | 24.6 (M) | | | | floor |
 
@@ -119,10 +131,11 @@ Alternatives, costed (`[M5]`, `[M18]`; serial regime; W8; headline unless stated
   D = 8: 137.7 (its A fraction is 0.4 %); D = 4 (k = 4): 68.9; D = 10 (k = 10): 86.4; D = 9: 77.8. Its C slab
   for one expert is 16 × 4096 × 4 B = 256 KiB = L0C exactly, the errata-14 hang; two slabs of 2048 columns
   double its A lifts → 137.4. It beats S only when ⌈D/8⌉·T_W < D·T_S (Z7), i.e. by ≤ 1.8 % on the set
-  {8, 16, …, 128} ∪ {63, 71, …, 127} ∪ {118, 126}, and loses by 10–50 % everywhere else.
+  {8, 16, …, 128} ∪ {63, 71, …, 127} ∪ {118, 126}, and loses everywhere else — by 95 % at D = 4, 74 % at D = 9,
+  57 % at D = 10, down to 0.03 % at D = 55 (the D just below the r = 7 crossover; T_Z7_losses).
 - **W-static** (expert e lives on core e mod 8, no per-step assignment): adversarial single-hot routing puts all
   D active experts on one core → 17.3 GB/s (Z9). Under the generator (§7.1) the hottest core carries 2.6×
-  the mean at t = 1 and 1.3–1.7× at t = 16 (`[Z]`). Dead.
+  the mean at t = 1 and 1.3–1.6× at t = 16 (`[Z]`). Dead.
 - **K-split** (core = K/8 rows of every expert, all N_e columns): every core emits i32 partials [t, N_e] per
   expert: 8·D·t·N_e·4 B written and read back (1 MiB at the headline), reduced in a second launch (+91 µs,
   M) — 125.3 at D = 8, 114.7 at k = 4; below S on every §8 cell except (t=16, D=128), where its 8× smaller A block outweighs the launch floor by 0.6 % — a margin the G = 2 knob returns to S (Z8).
@@ -137,8 +150,8 @@ slabs instead of D; batching is never worse and the "free lunch" is exactly k·t
 
 ### 1.4 Axis 3 — dispatch: in-kernel, redundant per core, on the scalar path, overlapped
 Each core reads the router descriptor (≤ 960 B) and builds the active-expert list and per-expert token/score
-lists itself (t·k ≤ 128 scalar iterations, §4). Cores are independent (no cross-core sync exists), the work
-is ≤ 12.8 µs even at σ_d = 100 ns and t = 16, and it overlaps the 64 KiB A copy and the first expert's
+lists itself (t·k ≤ 160 scalar iterations, §4). Cores are independent (no cross-core sync exists), the work
+is ≤ 16 µs even at σ_d = 100 ns, t = 16, k = 10 (12.8 µs at k = 8), and it overlaps the 64 KiB A copy and the first expert's
 stream; only the first iteration is exposed. A host pre-pass costs ≥ T_launch = 91 µs = 9.2 % of the
 headline step and 211 % of a (K, N_e, k) = (2048, 512, 4) step (`[M16]`, `[M17]`): dead.
 
@@ -227,7 +240,9 @@ step end: Cast_f32→f16(y_acc rows < t) ; COPY t × 1 KiB → y[τ, c·N_c ..]
 Exactness (Lean targets): **P2** the difference is exact whatever the region held before, in modular i32
 arithmetic, iff |S_e| < 2³¹ where S_e is the true per-expert sum; |S_e| ≤ 127²·K = 66 064 384 (K=4096).
 **P3** overflow never occurs (so wrap-vs-saturate semantics are irrelevant) if each region is used at most
-U_max = ⌊(2³¹−1)/(127²·K)⌋ times per launch: U_max = 32 at K = 4096 → 6 regions cover D ≤ 192; at K = 7168,
+U_max = ⌊(2³¹−1)/(127²·K)⌋ times per launch (the operand bound |a|, |b| ≤ 127 is a requirement on the quantizers:
+if −128 can occur, 128²·4096·32 = 2³¹ exactly and U_max drops to 31 at K = 4096 — 6 regions still cover
+D ≤ 186 ≥ 128; K = 7168 is unchanged at 18 — T_overflow_m128): U_max = 32 at K = 4096 → 6 regions cover D ≤ 192; at K = 7168,
 U_max = 18 → 7 regions (224 KiB) cover D ≤ 126 (`[M12]`). The regions total 192 KiB (224 at K = 7168), never
 the full 256 KB (errata 14). Only routed rows are converted and accumulated: Σ_e m_e = k·t pairs per step. The six shadows (192 KiB) live in
 S1 (US cannot hold them, §6): the region's shadow is copied S1→US before the Sub and the new drain copied back
@@ -237,7 +252,7 @@ ISA.md's "DDR ↔ S1 ↔ vector SRAM plain copies are real" and is content-check
 Costs per step (`[M8]`, `[M15]`, `[M19]`): drain D × 32 KiB per core (256 KiB at D = 8; 4 MiB at D = 128) on
 the L0C→US path at R_drain (U): 3.3 µs per expert at 10 GB/s/core = 2.7 % of the 123 µs per-expert serial
 time **if exposed**, 0 if overlapped with the next expert's MMA into another region (E16); vector: 8192
-lane-ops Sub per expert (190 ns) + 2048 per routed pair (47 ns) → 31.9 µs per step at t = 16, D = 128 = 0.2 %;
+lane-ops Sub per expert (189 ns) + 2048 per routed pair (47 ns) → 30.3 µs per step at t = 16, D = 128 = 0.2 %;
 copy-out t KiB.
 
 Branches: (i) E11 shows the first call of an expert does zero-init after all → drop the shadow/Sub, keep
@@ -256,8 +271,10 @@ running sum under 2²⁴ at the cost of more regions per launch; (iii) nothing e
 | scatter-add + scores | 8 × (3.3 µs drain + 0.24 µs vector) = 28 µs | next expert's chain (regions double-buffered) | U/A (E16) |
 | pipeline fill + tail | 5 + 1 µs | — | A |
 | **step** | **991.8 µs → 135.3 GB/s**; + 91 µs launch floor → 123.9 wall | | |
-Regression versus a dense kernel of the same bytes (two measured 8 MiB passes = 974 µs): +17.8 µs = 14.8 µs
-of extra A lifts (3.1 % vs 1.5 %) + 3 µs of dispatch/tail (`[M11]`): 1.8 %, of which the dispatch share is 0.3 %.
+Regression versus a dense kernel of the same bytes (two measured 8 MiB passes = 974 µs): +17.8 µs = 9.9 µs
+of extra A lifts (256 KiB more through the loader: 8 × 64 KiB instead of 2 × 128 KiB, an A fraction of 3.1 % vs
+1.6 %) + 8 µs of F (5 fill + 2 dispatch + 1 tail) − 0.05 µs of anchor rounding (`[M11]`): 1.8 %, of which the
+dispatch share is 0.2 %.
 
 ---
 
@@ -410,7 +427,7 @@ and changes the DDR pattern class (A-reg2, E15 timing).
 | y_out | US | 16 × 1 KiB f16 | 1 | tail |
 | **US total** | | **≈ 162 KiB** | | ≤ 208 KiB evidenced |
 
-Why the shadows are in S1: with six 32 KiB shadows resident in US the US total would be ≈ 317 KiB, above the
+Why the shadows are in S1: with six 32 KiB shadows resident in US (and no staging buffer) the US total would be ≈ 322 KiB, above the
 208 KiB evidenced. Alternatives if S1 is short (E7-style aliasing test): (b) 4 regions (overflow bound D ≤ 128
 at K ≤ 4096, D ≤ 72 at K = 7168 — beyond that A-mag); (c) shadow only the rows that will be routed to the
 region's next occupant (known from dispatch), 2 KiB per row. For the W4 branch the dequant staging of
@@ -443,7 +460,7 @@ only for a static expert→core map (H_c).
   t·2·N_c` — the expression has no c and no m_e in it. Hence max_c / mean_c = 1 for all ω, and the
   per-die DDR time is `ddrBytes·10/1738` with the measured 8-stream aggregate, no ρ₁ assumption.
 - **Z4** (W-dyn imbalance): max_c units = ⌈D/8⌉, min_c = ⌊D/8⌋; max per-core bytes = ⌈D/8⌉·K·N_e + 16·K;
-  max/mean = 8⌈D/8⌉/D: = 1 iff 8 | D, = 8(q+1)/(8q+r) > 1 for D = 8q + r, 1 ≤ r ≤ 7 (2 at D = 9, 64/63 at D = 63), and 8/D at D < 8.
+  max/mean = 8⌈D/8⌉/D: = 1 iff 8 | D, = 8(q+1)/(8q+r) > 1 for D = 8q + r, 1 ≤ r ≤ 7 (16/9 at D = 9, 64/63 at D = 63), and 8/D at D < 8.
 - **Z9** (W-static, family H_c): max per-core bytes = D·K·N_e + 16·K (all active experts on one core): max/mean
   = 8.
 - **Z5** (one fragment): t ≤ 16 ⇒ m_e ≤ 16 ⇒ mFrag(m_e) = ⌈m_e/16⌉ = 1 for every e, every ω ⇒ MMA calls per
@@ -463,15 +480,18 @@ F = 8 000 ns, B_x = 16 MiB; `[M15]`, `[M20]`)
 - **Z7** (whole-expert versus slice; the "imbalance threshold"): `stepW(D) = F + ⌈D/8⌉·T_W`; W-dyn beats S iff
   `⌈D/8⌉·T_W < D·T_S`. With T_W/(8·T_S) = 0.9824 the winning set within 1..128 is {8, 16, …, 128} ∪
   {63, 71, 79, 87, 95, 103, 111, 119, 127} ∪ {118, 126}, by at most 1.8 % (the A-lift fraction); on every
-  other D scheme S wins, by 74 % at D = 9 (1.115 ms vs 1.941 ms), 100 % at D = 4. Under the generator the
+  other D scheme S wins, by 74 % at D = 9 (1.115 ms vs 1.941 ms), 95 % at D = 4, and by as little as 0.03 % at
+  D = 55. Under the generator the
   winning set is hit by 20 / 19 / 4 % of outcomes at t = 4 and 25 / 26 / 12 % at t = 16 (s = 0 / 1.0 / 1.5),
   and the generator-mean W-dyn rate is 132 / 121 / 115 (t = 4) and 134 / 132 / 129 (t = 16) against 136 for
   S. With the G = 2 knob
   (T_S' = 121 743 ns) the set shrinks to 8 | D and the margin to 0.8 %. There is no threshold in s at which
   a whole-expert scheme becomes preferable: the dependence is on D mod 8, not on s.
 - **Z8** (K-split never pays): `stepK(D, t) = F + D·(T_S − ΔA) + T_launch + partialBytes·10/1738` with ΔA =
-  2 164 ns (its A block is 8 KiB instead of 64) and partialBytes = 2·8·k·t·N_e·4 (i32 rows written once, read
-  once in the reduce launch). Margin stepK − stepS = T_launch + partials − D·ΔA: +79.7 µs (t=1, D=8), +45.8 µs
+  2 164 ns (its A block is 8 KiB instead of 64) and partialBytes = 8·k·t·N_e·4 (the i32 rows read back by the
+  reduce launch; their write — the same bytes — rides under the serial regime's DDR slack: 6 µs of 208 µs at
+  the headline, 97 µs of 3.4 ms at D = 128, T_Z8_write_hidden). Margin stepK − stepS = T_launch + partials −
+  D·ΔA (exact up to the chain's floor rounding, < 2D ns): +79.7 µs (t=1, D=8), +45.8 µs
   (t=4, D=32), +71.8 µs (t=4, D=20), +40.3 µs (t=16, D=68), +90.1 µs (t=16, D=45), and **−89.6 µs at (t=16,
   D=128)** — the one cell where K-split's A amortization beats a launch floor (137.1 vs 136.4), ignoring that its
   256 KiB C slab is the errata-14 size. S with G = 2 is 137.7 there without any reduction, so S ≥ K-split on
@@ -483,7 +503,7 @@ F = 8 000 ns, B_x = 16 MiB; `[M15]`, `[M20]`)
 |---|---|---|---|---|
 | U idealized | 135.3 / 136.1 / 136.4 | 137.7 / 138.6 / 138.8 (8 \| D always) | 17.3 | 125.3 / 134.6 / 137.1 |
 | U_s sampled | 135.3 / 136.1 / 136.3 | 137.7 / **108.3** (25) / **128.7** (89) | 17.3 | 125.3 / 133.4 / 136.4 |
-| Z(1.0) | 135.3 / 135.9 / 136.3 | 137.7 / **103.9** (18) / **123.5** (57) | 17.4 | 125.3 / 131.4 / 134.8 |
+| Z(1.0) | 135.3 / 135.9 / 136.3 | 137.7 / **103.9** (18) / **123.5** (57) | 17.3 | 125.3 / 131.4 / 134.8 |
 | Z(1.5) | 135.3 / 135.7 / 136.2 | 137.7 / **98.1** (17) / **117.8** (34) | 17.3 | 125.3 / 128.8 / 132.6 |
 | H single-hot | 135.3 / 135.3 / 135.3 | 137.7 / 137.7 / 137.7 | 17.3 | 125.3 / 123.2 / 115.5 |
 Scheme S's floor is ≥ 135.3 under every family; W-dyn's floor under any sampled family is 98–129; W-static's
@@ -510,13 +530,14 @@ regime (the number to be judged) with the ping-pong branch beside it; W4 = the c
 | 16 | Zipf(1.0) | 68 | 1088 MiB | 8.371 ms | 136.3 | 1.91 | 6.582 → 173.3 | 544 MiB | 8.661 ms | 65.9 |
 | 16 | Zipf(1.5) | 45 | 720 MiB | 5.542 ms | 136.2 | 2.89 | 4.360 → 173.2 | 360 MiB | 5.734 ms | 65.8 |
 Single-hot (D = 8 at every t): 0.992 ms, 135.3 GB/s, 16.13 tokens/ms at t = 16. Derivation of every W8 cell:
-step = 8 000 + D × 122 979 ns (Z3); GB/s = D·16 MiB / step; the per-expert 122 979 ns = (2 MiB + 64 KiB)·10/265
+step = 8 000 + D × 122 979 ns (Z3; exact up to the floor rounding of the summed loader and residual terms, < 2D ns:
+991 842 vs 991 832 at D = 8, invisible at µs precision); GB/s = D·16 MiB / step; the per-expert 122 979 ns = (2 MiB + 64 KiB)·10/265
 + 1024 × 15 + 1024 × 25.4 (§5.3). Ping-pong cell: max(ddrBytes·10/1738, loaderBytes·10/265, calls × 15) + 8 000.
 
 ### 8.2 Sensitivity of the headline cell
 | Quantity | Values → headline GB/s | Status |
 |---|---|---|
-| c_res (per-call residual) | 0: 171.2 (= the DDR bound: a zero-overhead serial chain is exactly DDR-paced), 50: 162.7, 100: 155.0, 150: 148.0, 200: 141.6, **25.4 ns: 135.3**, 30 ns: 130.4 (`[M2]`) | D; E13 splits it into loader-granule and barrier parts |
+| c_res (per-call residual) | 0 ns: 171.2 (= the DDR bound: a zero-overhead serial chain is exactly DDR-paced), 5 ns: 162.7, 10 ns: 155.0, 15 ns: 148.0, 20 ns: 141.6, **25.4 ns: 135.3**, 30 ns: 130.4, 40.9 ns: 120.0 (the gate's edge: target met iff c_res ≤ 40.9 ns, T_cres_target), 50 ns: 112.5 (`[M2]`, `[M24]`) | D; E13 splits it into loader-granule and barrier parts |
 | loader L in the ping-pong regime | 15.0: 115.6, 20.0: 153.7, 22.0: 168.9, **≥ 22.3: 171.2** (`[M3]`) | threshold PROVED; regime U |
 | A-lift group G | 1: 135.3, 2: 136.7, 4: 137.4, 8: 137.7 (`[M14]`) | D; G = 2 is the clean upgrade |
 | wall clock (+91 µs unpipelined launch) | t=1: 123.9; t=4 (D=32): 133.1; t=4 (D=20): 131.1; t=16 (D=128): 135.6; t=16 (D=45): 134.0 | floor M; pipelining E17 |
@@ -531,10 +552,11 @@ step = 8 000 + D × 122 979 ns (Z3); GB/s = D·16 MiB / step; the per-expert 122
 | (7168, 2048, 8) | 256 | 896 | 6.3 % | 132.5 | 170.3 | 120.2 | 137.2 |
 | (4096, 1024, 8) | 128 | 256 | 12.5 % → 3.1 % with G = 4 | 124.8 → 132.1 | 164.2 | 93.3 | 133.4 |
 | (4096, 512, 8) | 64 | 128 | 25 % → 6.3 % with G = 4 | 113.1 → 125.7 | 155.8 | 70.1 | 128.1 |
-| (2048, 512, 4) | 64 | 64 | 25 % → 0 (A resident in L0A: 32 KiB) | 97.4 → 110.0 | 124.3 | 31.3 | 60.4 |
+| (2048, 512, 4) | 64 | 64 | 25 % → 0.8 % (A resident in L0A: one 32 KiB lift per step) | 97.4 → 106.6 | 124.3 | 31.3 | 60.4 |
 Small N_e hurts scheme S through the A-lift fraction (16/N_c of B through the loader), not through the
 MMA: at N_e ≤ 1024 use the G = 4 knob (A fraction /4: 124.8 → 132.1, 113.1 → 125.7) or, for K ≤ 3072, keep A
-resident in L0A (the last row: 97.4 → 110.0, still launch-floor-bound on the wall clock). Small total bytes are launch-floor-bound on the wall clock regardless of the kernel
+resident in L0A (the last row: 97.4 → 106.6 — the one remaining 32 KiB lift per step still costs 1.2 µs of a 43 µs
+step; still launch-floor-bound on the wall clock). Small total bytes are launch-floor-bound on the wall clock regardless of the kernel
 (31.3 GB/s at 4 MiB per step): such layers must be fused into the surrounding ops' launch (E17).
 
 ### 8.4 W4 on this part (errata 12: no i4→f16 path; the vector unpack ceiling is 42 GB/s aggregate — dead vs 120)
@@ -545,9 +567,11 @@ forces a drain of the [16, N_c] i32 slab **per group** (the scale cannot fold in
 (K/128) × 32 KiB per expert per core on the L0C→US path (U). Cost at the headline (`[M7]`): DDR bytes 68.5 MiB
 (i4 + scales + A), serial chain 1 018 µs (2× the calls: 16 384 × 40.4 ns = 662 µs, plus 9 MiB of i4, group scales
 and A lifts through the loader at 26.5 = 356 µs) → **65.4 W4-GB/s =
-130.8 W8-equivalent**, i.e. the same tokens/s as W8 — in the serial regime the call count, not bytes, is the
-wall. Ping-pong regime: DDR-bound at 159.3 W4-GB/s (2× tokens/s) only if the i4 operand is 1 KiB per
-(16,16,128) call, the drain path sustains ≥ 8.2 GB/s/core, and the 2× calls (31.6 % MMA) stay hidden. Decision
+130.8 W8-equivalent**, i.e. 96.7 % of W8's tokens/s (1 026 µs per step vs 992): in the serial regime the call
+count, not bytes, is the wall, and W4 is 3.4 % *slower* than W8; tokens/s parity would need c_res ≤ 21.2 ns
+(T_w4_parity, ∀ c_res). Ping-pong regime: DDR-bound at 159.3 W4-GB/s (1.86× W8's ping-pong tokens/s) only if the
+i4 operand is 1 KiB per (16,16,128) call, the drain path sustains ≥ 8.2 GB/s/core, and the 2× calls (59.5 % of
+the W4 DDR time) stay hidden. Decision
 rule: W4 only if E19 passes all three; else W4 weights are requantized offline to per-channel i8 and streamed as
 W8 (no memory saving, the measured route). The W4 column of §8.1 is the serial-regime conditional number.
 
@@ -566,7 +590,7 @@ reused as written there with the (16,16,128) shape.
 |---|---|---|---|---|
 | **E11** | accumulator semantics across experts, the region-difference epilogue, launch state, wrap-vs-saturate, H-op, H-A | A = all-ones i8 [16, 256] (2 k-chunks); two experts with b_e[k,n] = ((7k + 13n + 5e) mod 31) − 15 packed per §2.1 into one 64-column slice; (i) run expert 0 then expert 1 into the same region with no reset → drained row 0 must equal ΣW_0 + ΣW_1 (accumulate-across-experts confirmed; if it equals ΣW_1, the first call of a pass zero-inits and §3.2 simplifies); (ii) drain before/after expert 1, i32 difference must equal ΣW_1 exactly; repeat with a second B pattern at the same addresses; (iii) drain all six regions at kernel start and write them out, 20 launches; (iv) 1 100 calls of a 127-valued oracle into one region (2 064 512 per call) → the drained value is either the wrapped integer (known) or 2³¹−1; (v) A row r = one-hot e_j for every j → C[r, n] must equal b[j, n] (H-A); (vi) a B pattern whose four 32-k fragments have distinct column sums → the permutation of fragments in the result (H-op); (vii) rows 1..15 of C must be 0 for row-0-only A | all-zero → silent no-op (bisect with E5/E3); expert-1-only → zero-init exists (branch); difference ≠ ΣW_1 → Sub/drain path broken; non-identical launch state → regions must be drained lazily (the design does, so this only informs); wrong (j, n) in (v)/(vi) → packer change | the reset mechanism (**the ranking measurement**, Summary), the two geometry hypotheses, the overflow semantics |
 | **E12** | the epilogue vector chain and the drain rate R_drain | i32 Sub (or Add of a negated operand), Cast i32→f32, Mul f32, Muls scalar, Add; 1024-lane calls with a sentinel beyond lane 1024 (errata 3); 1 000 drains of a 32 KiB region with known content; S1→US copy of a 32 KiB shadow | lanes beyond 1024 keep the sentinel; a missing i32 Sub shows as wrong bits at magnitudes ≥ 2²⁴ (test with 2²⁵ + 1); drain content mismatch or rep-to-rep islands; the measured R_drain classifies §3.2's overlap claim | i32 vs f32 difference branch; whether 3.3 µs per expert of drain is hidden (E16) |
-| **E13** | **the loader regime: c_res split into granule overhead and barrier cost; ping-pong** | (a) E2-style accumulating oracle (10 000 loads alternating tiles X/Y into L0B, each followed by 8 MMA calls into one region; expected total n_X·ΣX + n_Y·ΣY ≤ 9.6·10⁶ exact) at 2 KiB and 16 KiB load granules with strict-serial barriers; (b) the same with 2 and 3 L0B slots and flag→wait choreography; 20 reps each; (c) positive control: one wait removed — must hang (watchdog) or corrupt the total | a skipped or stale load changes the total; any rep-to-rep difference in (b) = choreography fault; a positive control that passes means the detector is blind and (b) is void | the headline number: serial 135.3 vs ping-pong 171.2 (§8.2); the per-piece barrier budget 136 ns |
+| **E13** | **the loader regime: c_res split into granule overhead and barrier cost; ping-pong** | (a) E2-style accumulating oracle (10 000 loads alternating tiles X/Y into L0B, each followed by 8 MMA calls into one region; expected total n_X·ΣX + n_Y·ΣY ≤ 10 000 × 8 × 128 × 15 = 1.5·10⁸ < 2³¹, exact in i32 — above 2²⁴, so the region is read as i32, never through f32) at 2 KiB and 16 KiB load granules with strict-serial barriers; (b) the same with 2 and 3 L0B slots and flag→wait choreography; 20 reps each; (c) positive control: one wait removed — must hang (watchdog) or corrupt the total | a skipped or stale load changes the total; any rep-to-rep difference in (b) = choreography fault; a positive control that passes means the detector is blind and (b) is void | the headline number: serial 135.3 vs ping-pong 171.2 (§8.2); the per-piece barrier budget 136 ns |
 | **E14** | dispatch correctness and σ_d | every core builds the CSR from a synthetic descriptor with duplicates (t = 16, k = 8, 37 distinct experts) and writes `act, tok, sc, cnt` to DDR; compared with the host; a second descriptor through the same address; 20 reps; descriptor-only kernel vs empty kernel for σ_d and the descriptor latency | wrong or stale lists; cores disagreeing with each other (impossible by construction — a disagreement is a copy fault) | the 2 µs exposed-dispatch assumption inside F |
 | **E15** | end-to-end numerics and the balance premise under every family | random x (per-token-quantized on the host), random W_e, routing from the generator Z (§9.3) for (U, U_s, Z(1.0), Z(1.5), H) at t ∈ {1, 4, 16}, 20 reps per config; host f64 reference of Σ_e score·sx·s_e·(x_q·W_e); each core also writes (chunk count, expert list) to DDR | relerr > 10⁻³ (includes a violated A-mag in the f32 branch); any rep-to-rep bit difference = missing barrier; any core whose chunk count ≠ D × 32 = mapping bug (Z2's premise checked on silicon) | ship/no-ship; the region-switch timing A-reg (recorded) |
 | **E16** | region double-buffering and drain overlap; six-region rotation | expert d accumulates into region (d mod 6) while the vector unit drains region ((d−1) mod 6); 20 reps bit-identical; positive control with B5' removed | islands or non-identical reps; the control must show islands | whether §3.2's drain is hidden (0 %) or exposed (2.7 %) |
@@ -604,7 +628,7 @@ reference computes y from the same arrays. Reported per seed: D, max m_e, per-co
 | i32 saturates and the bound is exceeded (K = 7168, D > 126) | E11(iv) | wrong differences | cap D per launch at 7·U_max, second launch for the rest |
 | Ping-pong choreography hangs (errata 14) | E13(b) | stays in the serial regime | ship serial: 135.3 (above target); the upside 171.2 is the follow-up, never the baseline |
 | c_res is granule-bound rather than barrier-bound | E13(a) | 16 KiB pieces cut it: up to 162.7 at 50 ns | free gain; nothing in the design changes |
-| Loader < 22.3 GB/s/core at 16 KiB granules (the measured 26.5 may be granule-specific) | E13(a) | ping-pong regime becomes loader-bound: 8·L·(16 MiB/16.5 MiB) → L = 20: 153.7 | still > 120 for L ≥ 15.6 |
+| Loader < 22.3 GB/s/core at 16 KiB granules (the measured 26.5 may be granule-specific) | E13(a) | ping-pong regime becomes loader-bound: 128 MiB / (16.5 MiB/L + 8 µs) → L = 20: 153.7 | still > 120 for L ≥ 15.6 (T_pp_target, ∀ L) |
 | H-op / H-A geometry different | E11(v)(vi) | wrong results | host packer / producer epilogue updated from the probe; no rate change |
 | Dispatch descriptor latency > 2 µs or σ_d > 250 ns | E14 | exposed prologue grows: +30 µs at t = 16 worst case = 0.2 % | router emits the CSR (one ≤ 6 KiB copy) |
 | US cannot hold 162 KiB | E7-style aliasing | shadows and y_acc contend | shadows in S1 (already the design); shrink regions to 4 |
@@ -627,7 +651,7 @@ reference computes y from the same arrays. Reported per seed: D, max m_e, per-co
 4. **i32 vector Sub (E12)** — exact difference without the magnitude assumption.
 5. **Launch pipelining (E17)** — wall-clock rate of small MoE layers (31 → 97 GB/s at 4 MiB per step).
 6. **σ_d and descriptor latency (E14)** — the 2 µs inside F; ≤ 0.3 % either way.
-7. **i4×i4→i32 (E19)** — W4 at 2× tokens/s only in the ping-pong regime; equal tokens/s in the serial regime.
+7. **i4×i4→i32 (E19)** — W4 at 1.86× tokens/s only in the ping-pong regime; 0.97× in the serial regime (parity iff c_res ≤ 21.2 ns).
 8. **ρ₁ (E18)** — nothing for this design; it would only soften W-dyn's imbalance, never its loader imbalance.
 
 **The one measurement that most changes the ranking: E11 — whether an exact per-expert accumulator reset
@@ -639,8 +663,9 @@ predicted number (E13 by up to 36 GB/s) but leaves scheme S ranked first.
 ## Appendix A — claim ledger (for the round-2 proof session)
 
 Status: M = HW-MAP input; D = derived (theorem target, `decide`/`omega`); A = assumption measured by the
-named experiment; U = empirical. Labels refer to `proof/moe.py` output; proposed theorem names follow
-DESIGN.md's pattern.
+named experiment; U = empirical. Labels refer to `proof/moe.py` output. The theorem names in the last column
+were round-1 proposals; the actual `proof/moe.lean` theorem for every row (and for every other number in this
+document) is in `PROOF-COVERAGE-2.md`, which supersedes this table as the ledger.
 
 | # | Claim | Value | Status | moe.py / proposed theorem |
 |---|---|---|---|---|
@@ -654,7 +679,7 @@ DESIGN.md's pattern.
 | 8 | vendor ratio; MMA occupancy; loader share of DDR time | 5.5×; 15.8 %; 84.1 % | D | [M1] P1_occupancy |
 | 9 | ping-pong DDR-bound iff L ≥ 22.3 GB/s/core | threshold | D (∀L) | [M3] P3_loader_threshold |
 | 10 | per-16 KiB piece: 754 / 618 / 120 / 203 ns; serial 941 | | D | [M4] P4_piece |
-| 11 | per-expert serial 122 979 ns ≥ per-expert DDR 96 626 + 3 100 for all D ≥ 1 | Z3 premise | D (∀D) | [M15] Z3_affine |
+| 11 | per-expert serial 122 979 ns ≥ per-expert DDR 96 626 + 3 110 for all D ≥ 1 (min slack 22 536 ns at D = 1, t = 16) | Z3 premise | D (∀D) | [M15][M28] T_Z3_chain_dominates |
 | 12 | rateS(D) increasing, limit 136.4; bracket [135.3, 136.4] for D ∈ [8, 128] | Z10 | D (∀D) | [M5] Z10_bracket |
 | 13 | W-dyn: ⌈D/8⌉·T_W < D·T_S exactly on the listed set | Z7 | D (∀D ≤ 128) | Z7_crossover |
 | 14 | W-dyn at D = 4, 8, 9, 10: 68.9, 137.7, 77.8, 86.4; W-static 17.3 | | D | [M5][M18] Z4_rows, Z9_static |
@@ -663,14 +688,14 @@ DESIGN.md's pattern.
 | 17 | overflow bound: 127²·4096·32 < 2³¹ ; 127²·7168·18 < 2³¹ ; 22 × 66 064 384 < 2³¹ | P3 | D | [M12] P3_overflow |
 | 18 | modular difference exact iff \|S_e\| < 2³¹ | P2 | D (Int) | P2_modular_diff |
 | 19 | pack map bijection (k, n') ↔ offset on [0, K·N_c) | P1 | D (∀) | P1_pack_bijection |
-| 20 | epilogue 2048 lane-ops = 47 ns per routed pair; 31.9 µs per step at t = 16, D = 128 | | D | [M8][M19] P5_epilogue |
+| 20 | epilogue 2048 lane-ops = 47 ns per routed pair; 30.3 µs per step at t = 16, D = 128 | | D | [M8][M19] T_epilogue_vector |
 | 21 | drain 32 KiB at 10 GB/s = 3 276 ns = 2.7 % of 122 979 | | D (rate U) | [M15] P5_drain |
-| 22 | regression vs 2 × 487 µs: +17 842 ns = 14 838 (A lifts) + 8 000 (F) | | D | [M11] P1_regression |
+| 22 | regression vs 2 × 487 µs: +17 842 ns = 9 892 (256 KiB of A lifts) + 8 000 (F) − 50 (anchor rounding) | | D | [M11] T_epilogue_regression |
 | 23 | dispatch: 8σ_d / 128σ_d; host pre-pass 9.2 % / 211 % | | D (σ_d U) | [M16][M17] P4_dispatch |
 | 24 | A-lift fraction 16/N_c: 3.1 / 6.3 / 12.5 / 25 % | | D | [M6][M14] P2_alift |
 | 25 | G knob rates 136.7 / 137.4 / 137.7 | | D | [M14] P5_gknob |
-| 26 | §8.1 table, 18 cells + tokens/ms | | D (Zipf D: U) | [T8] T8_cells |
-| 27 | §8.3 rows | | D | [M6] T8_shapes |
+| 26 | §8.1 table, 18 cells + tokens/ms | | D (Zipf D: U) | [T8] T8_row_t1 … T8_row_t16_Z15, T8_single_hot |
+| 27 | §8.3 rows | | D | [M6][M22] T8s_4096_4096_8 … T8s_2048_512_4, T8s_steps |
 | 28 | W4: 65.4 W4-GB/s serial = 130.8 W8-equivalent; 159.3 ping-pong; drain need 8.2 GB/s/core | | D (route U) | [M7] P6_w4 |
 | 29 | buffers: S1 512–592 KiB; L0B 48 of 64; L0C 192/224 of 256; US ≈ 162 KiB | | D | [M9] P7_budget |
 | 30 | D(t, s) generator means and ranges | §7.1 table | U (generator, 2000 seeds) | [Z] |
