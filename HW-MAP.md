@@ -47,10 +47,11 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
 | DDR → S1 (plain copies, pre-packed layout) | **180 GB/s aggregate** (≈22.5/core) | DRAM-roof-bound; per-core slabs, 64 MiB working set |
 | Vector SRAM → S1 (plain fill, 48–64 KB tiles) | **250–255 GB/s/core** | plateau; ≤32 KB tiles masked by a ~91 µs launch+queue floor |
 | Grouped quant-GEMM, vendor op (MoE decode shape: 8 groups, 1 token/group, K=N=4096, i8 weights) | **24.6 GB/s** effective weight read, relerr 0 | measured — the floor any custom MoE kernel must beat by ~5× |
-| S1 → L0A/L0B (loader) | **26.5 GB/s/core under strict-serial barriers** | measured — below the matrix unit's 69 GB/s/core B demand: overlap/ping-pong is the known follow-up (full kernel still hit 137.8 GB/s aggregate, see below) |
+| S1 → L0A/L0B (loader) | **26.5 GB/s/core strict-serial** | measured — superseded in production by the direct path below |
+| **DDR → L0B direct load (bypassing S1 entirely)** | **181.3 GB/s aggregate** | measured, byte-exact — now the production B path (beats the S1-staged DataCopy leg at 180.4); with one full barrier per tile and two 32 KiB parity halves the whole kernel runs **174.6 GB/s m=1, flat m=1..16, fp64 20/20** |
 | DDR → L0 direct load instructions | exist in ISA | **UNMEASURED on silicon** (may be a silent no-op — see errata) |
 | MMA issue cost | **15 ns/call at (m,n,k)=(16,16,128)** | measured — 4096 calls/core = 61 µs vs 487 µs stream = 12.5% occupancy |
-| Full W8 decode kernel (i8×i8 route, per-token-quantized A) | **137.8 GB/s aggregate at m=1, m=16 identical** | measured, fp64-verified 20/20 (relerr 4.8e-4) — the gate (120) is met at 115% |
+| Full W8 decode kernel (i8×i8 route, per-token-quantized A) | **174.6 GB/s aggregate, flat m=1..16** (serial fallback 138.9; m>=24 stays serial: 81/59/43 — direct-load multi-strip wedge unresolved) | measured, fp64 20/20 — the 173.8 "roof" was a read+write roof; pure read streams sustain ~181 |
 | Vector i4→f16 unpack (5-pass) | **~5.3 GB/s/core = 42 aggregate int4-effective** | measured — there is NO i4→f16 hardware path on this part (see errata #12); vector dequant for W4 is dead vs 120 |
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 
@@ -82,7 +83,13 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
     dies alternate, no concurrent streaming); **tensor-split of a single op
     across dies is unsupported** for this workload class (runtime fault).
     All cross-die exchanges bounce through the host.
-12. **No i4→f16 conversion path exists anywhere on this part** (measured):
+12. **No i4→f16 conversion path exists anywhere on this part** (measured),
+    and the **i4×i4→i32 matrix tuple is silicon-dead** (in the calibration
+    table and compiles, but produces all-zero C via staged operands and
+    dead-waits on direct operands): **W4 must ride as int8** — host-side
+    int4→int8 expansion at load, doubling weight memory; there is no
+    on-the-fly route that sustains ≥120. Plan fleet memory accordingly.
+    Original: no i4→f16 conversion path exists (measured):
     the dedicated dequant instruction's gate covers only i8 inputs here; the
     vector cast table has only the quantize direction; the dequantizing copy
     modes are compiled-out no-ops; there is no u8 bitwise And. All i4
@@ -95,12 +102,17 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
     the realized W8 route is **i8×i8→i32 with per-token-quantized A**
     (activation scale folded into the epilogue). Assumptions of an f16×i8
     route are library-level artifacts, not silicon.
-14. **Choreography landmines (raw pipelines)**: two consecutive producer
-    flags without an intervening wait hang ~50% of runs; some cross-engine
-    flag pairs are unwired; queue-based staging into L1 shows
-    nondeterministic ordering (the likely root of an entire class of
-    "never stabilizes" verifications) — use raw buffer staging + full
-    barriers. m=64 hangs when L0C is filled to exactly its 256 KB capacity.
+14. **Choreography landmines (raw pipelines, all live-probed)**: the
+    copy-in→matrix consumer flag is INERT (stale reads — catch by
+    differencing); some cross-engine handshakes fault after direct loads;
+    consecutive same-pair different-ID producer flags are LEGAL (vendor
+    ping-pong constructor does exactly this — corrects an earlier note);
+    **the full barrier is the ONLY working fence for direct GM loads**;
+    queue-based staging into L1 is nondeterministically ordered (root of
+    the "never stabilizes" verification class) — raw buffer staging +
+    full barriers. m=64 across the full 256 KB accumulator WORKS (the
+    earlier "exactly-full" hang was an artifact of a 4-sweep structure).
+    k=64 matrix calls are nondeterministically wrong (32/128 exact).
 
 ## Verified layout geometry (for matrix-operand packs)
 
