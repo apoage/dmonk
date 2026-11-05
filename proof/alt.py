@@ -1,0 +1,487 @@
+#!/usr/bin/env python3
+"""proof/alt.py -- executable arithmetic for ALTERNATIVES.md (the pattern-matching round).
+
+Integer arithmetic only, in the conventions of proof/model.py / moe.py / attn.py / fleet.py:
+  rates : tenths of GB/s (1 B/ns = 1 GB/s decimal; bytes*10 // ns = tenths)
+  bytes : binary KiB/MiB ; time : ns floored ; usR = (ns+500)//1000 ; pct = tenths of a percent
+Run:  python3 -I proof/alt.py   (Python >= 3.8, no dependencies; imports proof/fleet.py and proof/attn.py
+for the DESIGN-4 / DESIGN-3 cost models so that every "today" cell is the ledgered number, and every
+alternative is the same model with one term changed).  Labels [ALT-x-...] are cited in ALTERNATIVES.md;
+the rational (Zipf traffic-share) rows are printed to 0.1 % and marked EMPIRICAL-class in the ledger.
+"""
+import os, sys
+from fractions import Fraction
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fleet as F
+import attn as A
+
+KiB, MiB, GiB, GB = 1024, 1 << 20, 1 << 30, 10 ** 9
+ceil, tn, usR, pct, t10, rateT = F.ceil, F.tn, F.usR, F.pct, F.t10, A.rateT
+def t3(x):  return F.t3(x)
+def ms2(ns): return F.ms2(ns)
+def pcs(n, d):                       # signed percent change in tenths, n vs d
+    return (n - d) * 1000 // d if n >= d else -((d - n) * 1000 // d)
+def spc(x):                          # "+12.3%" / "-4.5%"
+    return ("+" if x >= 0 else "-") + t10(abs(x)) + "%"
+
+# ------------------------------------------------------------ Measured (HW-MAP) used beyond fleet/attn -------
+R_CORE_GEMM = 1746               # per-die kernel rate (M); per-core share = 1746/8 -> ns = bytes*80//1746
+R_LOADER    = 265                # S1->L0 loader, strict-serial, per core (M)
+C_RES_T     = 254                # tenths of ns per call, the DESIGN-2 subtraction residual (D)
+C_MMA       = 15                 # ns per (16,16,128) call (M)
+R_W4V_CORE  = 53                 # vector i4->f16 unpack, 5-pass: 5.3 GB/s/core of int4 bytes (M, HW-MAP)
+R_W4V_DIE   = 8 * R_W4V_CORE     # 42.4 aggregate int4-effective (HW-MAP quotes ~42)
+R_US_S1     = 2500               # US->S1 plain fill per core (M)
+R_VEC       = 432                # 43.2 G lane-ops/s/core (M)
+T_LAUNCH    = F.T_LAUNCH         # 91 us (M)
+LAM         = F.LAMBDA["mid"]    # 91 us primary host-bounce latency (A, H3)
+DIE_MEM, O_RT, WS = F.DIE_MEM, F.O_RT, F.WS
+
+# ============================================================ ALT-1: MoE expert kernel on the direct path =====
+def alt1():
+    out = {}
+    b_core = 2 * MiB                                   # per-core expert slice at the DESIGN-2 headline (N_c = 512)
+    t_b = b_core * 80 // R_CORE_GEMM                   # DDR->L0B direct, 21.825 GB/s/core share: 96 089 ns
+    a_lift = tn(64 * KiB, R_LOADER) + 32 * C_RES_T // 10   # 64 KiB of A per expert per core through S1->L0A + 32 calls' residual
+    ser = t_b + a_lift                                 # A lift serialised with the direct-load barrier cadence
+    ovl = t_b                                          # A lift overlapped (different engine, between barriers)
+    mma = 1024 * C_MMA
+    F_MOE = F.F_MOE
+    step_ser = 8 * ser + F_MOE; step_ovl = 8 * ovl + F_MOE
+    bytes_step = 8 * 16 * MiB
+    out.update(t_b=t_b, a_lift=a_lift, ser=ser, ovl=ovl, mma=mma, step_ser=step_ser, step_ovl=step_ovl,
+               rate_ser=rateT(bytes_step, step_ser), rate_ovl=rateT(bytes_step, step_ovl),
+               rate_anchor=rateT(bytes_step, 8 * F.T_SLAB_SER + F_MOE), g2=t_b + a_lift // 2,
+               drain_thresh=rateT(32 * KiB, t_b))      # R_drain (tenths GB/s/core) that hides a 32 KiB drain under one expert
+    return out
+
+def fleet_cell(s, L, B=1, t=1, tslab=None, nlaunch=None, **kw):
+    """fleet.step with an optional expert-chain time (per expert-slab per core) and launches-per-layer override."""
+    s2 = dict(s)
+    if nlaunch is not None: s2["nlaunch"] = nlaunch
+    saved = F.T_SLAB_PP
+    if tslab is not None:
+        F.T_SLAB_PP = tslab; kw = dict(kw); kw["regime"] = "pp"
+    try:
+        T, parts = F.step(s2, L, B, t, **kw)
+    finally:
+        F.T_SLAB_PP = saved
+    return T, parts
+
+# ============================================================ ALT-2: replication with a minimal W4 tier ========
+# Instance = 4 dies (2 cards), chain d1-first/d0-last inside each card: positions (c0.d1, c0.d0, c1.d1, c1.d0).
+POS4 = [(0, 1), (0, 0), (1, 1), (1, 0)]
+LAYERS4 = {"dense": [30, 30, 30, 30], "moe": [7, 7, 7, 7]}
+T_SLAB_W4_OVL = tn(MiB, R_W4V_CORE)                            # 1 MiB of int4 per core per expert slab at 5.3 GB/s: 197 849 ns
+T_PIECE_W4_SER = (tn(2 * KiB, R_W4V_CORE) + tn(4 * KiB, R_US_S1) + tn(4 * KiB, R_LOADER) + C_RES_T // 10 + C_MMA)
+T_SLAB_W4_SER = 512 * T_PIECE_W4_SER                            # unpack -> US->S1 -> loader -> MMA strictly serial per 2 KiB i4
+R_W4_W8EQ_OVL = 2 * R_W4V_DIE                                   # 84.8 W8-equivalent GB/s per die
+def w4_dense_rate(branch):          # W8-equivalent die rate of the W4 vector path (tenths)
+    return R_W4_W8EQ_OVL if branch == "ovl" else rateT(2 * 2 * KiB, T_PIECE_W4_SER) * 8
+
+def inst_die_weights(s, pos, x, draft=True):
+    """resident bytes on die pos of a 4-die instance when a fraction x (thousandths) of the candidate bytes is int4."""
+    n = LAYERS4[s["name"]][pos]
+    if s["moe"]: w = n * (s["w_attn"] + s["w_experts"] - s["w_experts"] * x // 2000)
+    else:        w = n * (s["w_layer"] - s["w_layer"] * x // 2000)
+    if pos == 0: w += s["w_embed"]
+    if pos == 3: w += s["w_head"]
+    if draft and (not s["moe"]) and pos == 1: w += F.DRAFT["w"] + F.DRAFT["kv_window"]
+    return w
+def inst_die_kv(s, pos, L, B=1, i8=False):
+    b = LAYERS4[s["name"]][pos] * s["kv_tok"] * L * B
+    return b // 2 if i8 else b
+def min_x(s, pos, L, B=1, i8=False):
+    """smallest x (thousandths, 0..1000) with weights(x) + KV + ws + rt <= 86 GB on die pos; None if even x=1000 fails."""
+    room = DIE_MEM - O_RT - WS - inst_die_kv(s, pos, L, B, i8)
+    lo, hi = 0, 1000
+    if inst_die_weights(s, pos, 1000) > room: return None
+    if inst_die_weights(s, pos, 0) <= room: return 0
+    while lo < hi:                           # weights(x) is non-increasing in x
+        mid = (lo + hi) // 2
+        if inst_die_weights(s, pos, mid) <= room: hi = mid
+        else: lo = mid + 1
+    return lo
+def harmonic(n, sexp=Fraction(1)):          # sum_{r=1..n} r^-s for s = 1 (exact rational); s=1.5 handled separately
+    return sum(Fraction(1, r) for r in range(1, n + 1))
+def cold_traffic_share(x, E=256):
+    """traffic share of the coldest x (thousandths) of E experts under Zipf(1.0) popularity (rank weights 1/r): rational."""
+    nc = E * x // 1000
+    if nc == 0: return Fraction(0)
+    return (harmonic(E) - harmonic(E - nc)) / harmonic(E)
+def inst_exchange(s, rows, lam):
+    act = rows * s["d"] * 2; logits = rows * s["vocab"] * 4; ids = rows * 4
+    bw = 0
+    for p in range(3): bw += tn(act, F.D2H[POS4[p][1]]) + tn(act, F.H2D[POS4[p + 1][1]])
+    bw += tn(logits, F.D2H[POS4[3][1]]) + tn(ids, F.H2D[POS4[0][1]])
+    return bw + 8 * lam, bw
+def inst_step(s, L, B=1, t=1, xs=None, hot="direct_ser", cold="ovl", pop="uniform", i8=False, nlaunch=None, fam="uniform"):
+    """step time of one 4-die instance. xs = per-die int4 share (thousandths). hot = int8 expert regime
+    ('anchor' = DESIGN-2 serial 122 979, 'direct_ser' = ALT-1 serialised A lift, 'direct_ovl'); cold = W4 vector branch;
+    pop = expert-popularity family deciding which fraction of the *streamed* bytes is W4 ('uniform': x; 'zipf10': coldest-x share)."""
+    rows = B * t
+    a1 = alt1(); T_hot = {"anchor": F.T_SLAB_SER, "direct_ser": a1["ser"], "direct_ovl": a1["ovl"]}[hot]
+    T_cold = T_SLAB_W4_OVL if cold == "ovl" else T_SLAB_W4_SER
+    G, cE, lam = F.G_BR["stream"], F.C_EXP["native"], LAM
+    nl = s["nlaunch"] if nlaunch is None else nlaunch
+    kv, sm, mma = F.attn_parts(s, L, B, t, G, cE, i8)
+    attn_l = max(kv, sm, mma)
+    T = 0; W = 0
+    for pos in range(4):
+        n = LAYERS4[s["name"]][pos]; x = xs[pos]
+        if s["moe"]:
+            D = F.D_of(fam, rows)
+            share = Fraction(x, 1000) if pop == "uniform" else cold_traffic_share(x)
+            per_exp = T_hot * (1 - share) + T_cold * share        # exact rational, floored at the end
+            w_l = tn(s["w_attn"], F.R_GEMM) + 2 * F.F_MOE + int(s["slabs"] * D * per_exp)
+        else:
+            w_l = int(Fraction(s["w_layer"] * 10 * (1000 - x), 1000 * F.R_GEMM) + Fraction(s["w_layer"] * 10 * x, 1000 * w4_dense_rate(cold)))
+        W += n * w_l
+        T += n * (w_l + attn_l + nl * T_LAUNCH)
+    head = tn(s["w_head"], F.R_GEMM); T += head + 2 * T_LAUNCH; W += head
+    xch, xbw = inst_exchange(s, rows, lam); T += xch
+    draft = F.draft_ns(lam, True) if t > 1 else 0; T += draft
+    return T, dict(W=W, KV=s["nL"] * kv, LAUNCH=(s["nL"] * nl + 2) * T_LAUNCH, XCH=xch, DRAFT=draft)
+def tps_card_inst(tok_milli, T, inst=2): return tok_milli * inst * 10 ** 9 // (4 * T)
+
+# ============================================================ ALT-3: per-layer persistent megakernel ==========
+SYNCS_PER_LAYER = {"dense": 4, "moe": 5}    # dense: 2 K-split reductions x (partial exchange + broadcast); MoE: + router logits exchange
+def reduction_bytes(rows, d):               # one cross-core reduction through DDR: 8 partials written+read, x slices written, x read by 8
+    return 8 * rows * d * 4 + 8 * rows * d * 4 + rows * d * 2 + 8 * rows * d * 2
+def alt3(s, L, csync, rows=1):
+    """megakernel: 1 launch per layer; adds per layer SYNCS x csync + 2 reductions' DDR traffic."""
+    nl = s["nlaunch"]; name = s["name"]
+    saved_per_layer = (nl - 1) * T_LAUNCH
+    red = 2 * tn(reduction_bytes(rows, s["d"]), F.R_GEMM)
+    added_per_layer = SYNCS_PER_LAYER[name] * csync + red
+    T0, p0 = F.step(s, L, 1, 1)
+    T1 = T0 - s["nL"] * saved_per_layer + s["nL"] * added_per_layer
+    thresh = saved_per_layer // SYNCS_PER_LAYER[name]            # c_sync at which the megakernel stops paying (red ignored: separate row)
+    thresh_exact = (saved_per_layer - red) // SYNCS_PER_LAYER[name]
+    return dict(T0=T0, T1=T1, saved=s["nL"] * saved_per_layer, red=s["nL"] * red, thresh=thresh, thresh_exact=thresh_exact,
+                syncs=s["nL"] * SYNCS_PER_LAYER[name])
+def draft_token_ns(nlaunch):
+    return tn(F.DRAFT["w"], F.R_GEMM) + tn(F.DRAFT["kv_window"], F.R_GEMM) + nlaunch * T_LAUNCH + tn(128256 * 4, F.D2H[0]) + 2 * LAM
+
+# ============================================================ ALT-4: the quantizing epilogue =================
+QUANT_OPS = 8                                # per element: tree max 6 + Muls scale 1 + Adds bias 1 (extraction is a copy)
+def alt4(s):
+    if s["moe"]:
+        elems = 3 * s["d"] + 8 * s["d"]       # QKV, O, gate/up inputs (d each) + 8 experts' down inputs (N_e = 4096 each)
+    else:
+        elems = 3 * s["d"] + 53248            # QKV, O, gate/up (d) + down (ffn)
+    ops = elems * QUANT_OPS
+    per_layer_ns = ops * 10 // R_VEC          # redundant on every core (each core needs the whole A)
+    bounces_per_layer = 4
+    host_fallback = bounces_per_layer * (2 * LAM + tn(s["d"] * 2, F.D2H[0]) + tn(s["d"], F.H2D[1]))
+    return dict(elems=elems, ops=ops, per_layer_ns=per_layer_ns, host_per_layer=host_fallback)
+def magic_bias_check():
+    """f16 magic bias: y = q + 1280 for q in [-127,127] lies in [1024, 2048) where the f16 ulp is 1, and the low byte of the
+    f16 word (mantissa bits 0..7) equals (q + 256) mod 256 = q as two's complement. Checked exhaustively."""
+    ok = True
+    for q in range(-127, 128):
+        y = q + 1280
+        if not (1024 <= y < 2048): ok = False
+        mant = y - 1024                       # 10-bit mantissa of a value in [1024, 2048)
+        if mant & 0xFF != (q & 0xFF): ok = False
+    return ok
+
+# ============================================================ ALT-5: two-tier KV pages ========================
+def G_tier(L, c_pg, P_e=MiB, P_t=64 * KiB):
+    """aggregate KV rate (tenths) when tokens in whole 4096-token extents are read as 1 MiB pages and the remainder as 64 KiB pages."""
+    tok_e = (L // (P_e // 256)) * (P_e // 256)         # 256 B per token per core -> P_e//256 tokens per extent
+    tok_t = L - tok_e
+    n_e = tok_e // (P_e // 256); n_t = ceil(tok_t, P_t // 256)
+    t_core = n_e * (P_e * 80 // R_CORE_GEMM + c_pg) + n_t * (P_t * 80 // R_CORE_GEMM + c_pg)
+    return 8 * L * 256 * 10 // t_core if t_core else R_CORE_GEMM
+def compaction_ns_per_token_layer():
+    # per (layer, head, K|V) stream: every 4096 tokens read 16 x 64 KiB + write 1 MiB = 2 MiB; 16 streams per layer
+    return tn(16 * 2 * MiB, F.R_GEMM) // 4096
+
+# ============================================================ ALT-6: K-int8 / V-f16 KV ========================
+def attn_k8(L, t, G, cV, rho):
+    s = A.step_parts(L, t, G, cV + 1, rho)             # +1 lane-op per score for the per-token K scale reel
+    ddr = s["ddr"] * 3 // 4
+    c = {"KV stream": ddr, "vector": s["vec"], "MMA": s["mma"], "loader": s["loader"]}
+    return max(c.values()) + s["fixed"], c, max(c, key=c.get)
+def fleet_k8(s, L, B=1, t=1):
+    """fleet.step with KV bytes x 3/4 (K int8, V f16)."""
+    saved = F.attn_parts
+    def ap(s_, L_, B_, t_, G_, cE_, i8_=False):
+        kv, sm, mma = saved(s_, L_, B_, t_, G_, cE_, False)
+        return kv * 3 // 4, sm, mma
+    F.attn_parts = ap
+    try: return F.step(s, L, B, t)
+    finally: F.attn_parts = saved
+def cV_threshold_k8(rho):
+    # DDR-bound iff (8192*(cV+1) + 7000)*rho*10/432 <= 3/4 * 12011
+    blk = A.ddr_block_ns(A.R_GEMM) * 3 // 4
+    best = None
+    for cV in range(0, 200):
+        if (8192 * (cV + 1) + 7000) * rho * 10 // 432 <= blk: best = cV
+    return best, blk
+
+# ============================================================ ALT-7: shared-prefix batched attention ==========
+def prefix_kv_ns(s, L, Ls, B, passes_rows=64):
+    g = s["Hq"] // s["Hkv"]; rows = B * g
+    passes = ceil(rows, passes_rows)
+    full = tn(s["kv_tok"] * L * B, F.R_GEMM)
+    shared = tn(s["kv_tok"] * ((L - Ls) * B + Ls * passes), F.R_GEMM)
+    return full, shared, passes
+
+# ============================================================ ALT-8: lazy-rescale online softmax ==============
+def alt8(L, cV, rho):
+    two, s2, b2 = A.step_ns(L, 16, A.R_GEMM, cV, rho)                       # two passes, mt=4 (DESIGN-3 baseline)
+    s4, s4s, b4 = A.step_ns(L, 16, A.R_GEMM, cV, rho, onepass=True)        # S4 with the merge
+    lz, lzs, bz = A.step_ns(L, 16, A.R_GEMM, cV, rho, onepass=True, merge=0)   # S4 + lazy rescale (no merge, O resident in L0C)
+    return two, s4, lz, b2, b4, bz, lzs
+def lazy_block_bound():
+    # S4 block (128 tokens, mt=8) DDR-bound iff 2048*cV*8*rho*10/432 <= 3002
+    blk = A.ddr_block_ns(A.R_GEMM, 8)
+    res = {}
+    for rho in (1, 2):
+        best = None
+        for cV in range(0, 100):
+            if 2048 * cV * 8 * rho * 10 // 432 <= blk: best = cV
+        res[rho] = best
+    return blk, res
+
+# ============================================================ ALT-9: dominated alternatives, with arithmetic ===
+def dom_ksplit_dense():
+    """dense m=1, K=N=8192: K-split saves A bytes, adds f32 partial traffic + one cross-core sync."""
+    a_now = 8 * 128 * KiB; a_ks = 8 * 16 * KiB
+    saved = tn(a_now - a_ks, F.R_GEMM)
+    partials = 8 * 32 * KiB                       # 8 cores x [1 x 8192] f32
+    added = tn(2 * partials, F.R_GEMM)            # written once, read once
+    return saved, added, saved - added
+def dom_expert_parallel_card(s):
+    T0, _ = F.step(s, 32768); extra = s["nL"] * 2 * LAM
+    return T0, T0 + extra
+def dom_hot_cold_same_fleet(s, x=250):
+    """MoE on the 8-die fleet with the coldest x experts as W4 (no replication): expert time per layer under uniform / Zipf(1.0)."""
+    a1 = alt1(); res = {}
+    for pop in ("uniform", "zipf10"):
+        share = Fraction(x, 1000) if pop == "uniform" else cold_traffic_share(x)
+        per_exp = F.T_SLAB_SER * (1 - share) + T_SLAB_W4_OVL * share
+        T0, p0 = F.step(s, 32768)
+        delta = s["nL"] * int(s["slabs"] * 8 * (per_exp - F.T_SLAB_SER))
+        res[pop] = (T0, T0 + delta)
+    return res
+def dom_rows_cliff(s, L=4096):
+    """what a flat m-curve to 64 would buy at 4k: B=64 rows vs B=16 (same model, rows cap lifted)."""
+    saved = F.ROWS_FLAT; F.ROWS_FLAT = 64
+    try:
+        T16, _ = F.step(s, L, 16, 1); T64, _ = F.step(s, L, 64, 1)
+    finally: F.ROWS_FLAT = saved
+    feas = F.feasible(s, L, 64)
+    return T16, T64, feas
+def dom_token_drop(Dcap=64):
+    T0 = F.F_MOE + 128 * F.T_SLAB_SER; T1 = F.F_MOE + Dcap * F.T_SLAB_SER
+    return T0, T1
+
+# ============================================================ main ============================================
+def main():
+    print("# proof/alt.py -- derived cells of ALTERNATIVES.md\n")
+    D, M = F.DENSE, F.MOE
+    print("## [ALT-0] constants beyond fleet/attn")
+    print(f"[ALT-0-w4v] W4 vector path: {t10(R_W4V_CORE)} GB/s/core of int4 = {t10(R_W4V_DIE)} per die = {t10(R_W4_W8EQ_OVL)} W8-equivalent GB/s "
+          f"(overlapped-unpack branch); serial-chain branch per 2 KiB i4: unpack {tn(2*KiB, R_W4V_CORE)} + US->S1 {tn(4*KiB, R_US_S1)} + loader {tn(4*KiB, R_LOADER)} "
+          f"+ residual {C_RES_T//10} + MMA {C_MMA} = {T_PIECE_W4_SER} ns -> {t10(w4_dense_rate('ser'))} W8-equivalent per die; "
+          f"per-expert-slab per core: {T_SLAB_W4_OVL} ns (ovl) / {T_SLAB_W4_SER} ns (ser) vs int8 anchor {F.T_SLAB_SER}")
+    # ---------------------------------------------------------------- ALT-1
+    a = alt1()
+    print("\n## [ALT-1] MoE expert kernel on the DDR->L0B direct path (headline K=N_e=4096, k=8, t=1, W8)")
+    print(f"[ALT-1-chain] per expert per core: B 2 MiB direct {a['t_b']} ns; A lift 64 KiB via S1->L0A {a['a_lift']} ns (2473 + 32 x 25.4); "
+          f"serialised {a['ser']} / overlapped {a['ovl']} ns; MMA {a['mma']} ns ({t10(pct(a['mma'], a['t_b']))}% of the DDR time); G=2 knob {a['g2']}")
+    print(f"[ALT-1-rate] step 8 x chain + F: serialised {a['step_ser']} ns -> {t10(a['rate_ser'])} GB/s; overlapped {a['step_ovl']} ns -> {t10(a['rate_ovl'])}; "
+          f"DESIGN-2 anchor {t10(a['rate_anchor'])}; gain {spc(pcs(a['rate_ser'], a['rate_anchor']))} / {spc(pcs(a['rate_ovl'], a['rate_anchor']))}; "
+          f"drain 32 KiB hidden iff R_drain >= {t10(a['drain_thresh'])} GB/s/core")
+    for L in (32768, 131072, 1048576):
+        T0, _ = F.step(M, L); Ts, _ = fleet_cell(M, L, tslab=a['ser']); To, _ = fleet_cell(M, L, tslab=a['ovl'])
+        print(f"[ALT-1-fleet-{L}] MoE t=1: today {ms2(T0)} ms -> {t3(F.tps_card(1000, T0))} ; direct serialised {ms2(Ts)} -> {t3(F.tps_card(1000, Ts))} "
+              f"({spc(pcs(F.tps_card(1000, Ts), F.tps_card(1000, T0)))}) ; overlapped {ms2(To)} -> {t3(F.tps_card(1000, To))} ({spc(pcs(F.tps_card(1000, To), F.tps_card(1000, T0)))})")
+    T0, _ = F.step(M, 32768, 16, 1); Ts, _ = fleet_cell(M, 32768, 16, 1, tslab=a['ser'])
+    print(f"[ALT-1-fleet-B16] MoE B=16 32k: today {ms2(T0)} -> {t3(F.tps_card(16000, T0))} ; direct serialised {ms2(Ts)} -> {t3(F.tps_card(16000, Ts))}")
+    # ---------------------------------------------------------------- ALT-2
+    print("\n## [ALT-2] replication: two 4-die instances, minimal W4 (vector-unpack) tier for the fit")
+    for s in (D, M):
+        for L in (32768, 131072, 1048576):
+            for i8 in ((False,) if s["moe"] else (False, True)):
+                xs = [min_x(s, p, L, 1, i8) for p in range(4)]
+                tag = f"{s['name']}-{L}" + ("-kvi8" if i8 else "")
+                if any(x is None for x in xs):
+                    print(f"[ALT-2-fit-{tag}] infeasible even at x=1000 on dies {[p for p, x in enumerate(xs) if x is None]}"); continue
+                T0, _ = F.step(s, L, i8=i8) if (s["moe"] or L < 1048576 or i8) else (None, None)
+                for hot, cold, pop in (("direct_ser", "ovl", "uniform"), ("direct_ser", "ser", "uniform"), ("direct_ser", "ovl", "zipf10"), ("anchor", "ovl", "uniform")):
+                    if not s["moe"] and (pop != "uniform" or hot != "direct_ser"): continue
+                    T, parts = inst_step(s, L, xs=xs, hot=hot, cold=cold, pop=pop, i8=i8)
+                    base = f"today {ms2(T0)} ms -> {t3(F.tps_card(1000, T0))}" if T0 else "today: MEM"
+                    gain = f" ({spc(pcs(tps_card_inst(1000, T), F.tps_card(1000, T0)))})" if T0 else ""
+                    print(f"[ALT-2-{tag}-{hot}-{cold}-{pop}] x per die {xs} (thousandths of candidate bytes as int4); {base} ; "
+                          f"2 instances: step {ms2(T)} ms (W {ms2(parts['W'])}, KV {ms2(parts['KV'])}, launch {ms2(parts['LAUNCH'])}, xch {usR(parts['XCH'])} us) "
+                          f"-> {t3(tps_card_inst(1000, T))} tok/s/card{gain}")
+    # dense with spec decode under replication
+    xs = [min_x(D, p, 32768) for p in range(4)]
+    T, parts = inst_step(D, 32768, 1, 4, xs=xs); T0, _ = F.step(D, 32768, 1, 4)
+    tau = F.tau_milli(700)
+    print(f"[ALT-2-dense-32k-spec] spec k=3 a=0.7: today {ms2(T0)} -> {t3(F.tps_card(tau, T0))} ; 2 instances {ms2(T)} -> {t3(tps_card_inst(tau, T))} "
+          f"({spc(pcs(tps_card_inst(tau, T), F.tps_card(tau, T0)))})")
+    xs = [min_x(M, p, 32768, 16) for p in range(4)]
+    if all(x is not None for x in xs):
+        T, parts = inst_step(M, 32768, 16, 1, xs=xs); T0, _ = F.step(M, 32768, 16, 1)
+        print(f"[ALT-2-moe-32k-B16] B=16: x {xs}; today {ms2(T0)} -> {t3(F.tps_card(16000, T0))} ; 2 instances {ms2(T)} -> {t3(tps_card_inst(16000, T))} "
+              f"({spc(pcs(tps_card_inst(16000, T), F.tps_card(16000, T0)))})")
+    else: print(f"[ALT-2-moe-32k-B16] infeasible: x {xs}")
+    print(f"[ALT-2-zipf-share] coldest x of 256 experts carry (Zipf 1.0 popularity) x=10%: {float(cold_traffic_share(100))*100:.1f}% , 25%: {float(cold_traffic_share(250))*100:.1f}% , "
+          f"50%: {float(cold_traffic_share(500))*100:.1f}% , 75%: {float(cold_traffic_share(750))*100:.1f}% of the expert traffic (EMPIRICAL-class, H9)")
+    print(f"[ALT-2-mindies] int8 residency: DESIGN-4 T_min_dies = 5; with x=1000 (all-W4 candidates) the per-die weights at 4 dies are "
+          f"dense {F.gb1(inst_die_weights(D, 0, 1000))} / {F.gb1(inst_die_weights(D, 3, 1000))} GB, MoE {F.gb1(inst_die_weights(M, 0, 1000))} / {F.gb1(inst_die_weights(M, 3, 1000))} GB (pos 0 / pos 3)")
+    # ---------------------------------------------------------------- ALT-3
+    print("\n## [ALT-3] per-layer persistent megakernel with DDR-flag cross-core sync")
+    for s in (D, M):
+        for csync in (0, 2000, 5000, 20000):
+            r = alt3(s, 32768, csync)
+            print(f"[ALT-3-{s['name']}-csync{csync}] launches/layer {s['nlaunch']} -> 1 saves {ms2(r['saved'])} ms/token; reductions add {ms2(r['red'])} ms; "
+                  f"{r['syncs']} syncs x {csync} ns; step {ms2(r['T0'])} -> {ms2(r['T1'])} ms ; {t3(F.tps_card(1000, r['T0']))} -> {t3(F.tps_card(1000, r['T1']))} tok/s/card "
+                  f"({spc(pcs(F.tps_card(1000, r['T1']), F.tps_card(1000, r['T0'])))})")
+        r = alt3(s, 32768, 0)
+        print(f"[ALT-3-{s['name']}-threshold] megakernel pays iff c_sync <= {r['thresh']} ns per sync (launch savings only); {r['thresh_exact']} ns net of the reduction traffic")
+    for nl in (121, 24, 1):
+        print(f"[ALT-3-draft-{nl}] draft token with {nl} launches: {usR(draft_token_ns(nl))} us; verify step (k=3) {ms2(3*draft_token_ns(nl))} ms")
+    a = alt1(); T0, _ = F.step(M, 32768); Tc = alt3(M, 32768, 5000)["T1"] - (F.step(M, 32768)[0] - fleet_cell(M, 32768, tslab=a['ser'])[0])
+    print(f"[ALT-3+1-moe] ALT-1 (serialised) + ALT-3 (c_sync 5 us): MoE 32k {ms2(T0)} -> {ms2(Tc)} ms ; {t3(F.tps_card(1000, T0))} -> {t3(F.tps_card(1000, Tc))} ({spc(pcs(F.tps_card(1000, Tc), F.tps_card(1000, T0)))})")
+    # ---------------------------------------------------------------- ALT-4
+    print("\n## [ALT-4] quantizing epilogue (f16 -> i8 per-token A without a cast)")
+    print(f"[ALT-4-magic] f16 magic bias 1280: low byte of the f16 word = two's-complement q for every q in [-127,127]: {magic_bias_check()}")
+    for s in (D, M):
+        q = alt4(s); T0, _ = F.step(s, 32768); Th = T0 + s["nL"] * q["host_per_layer"]
+        print(f"[ALT-4-{s['name']}] {q['elems']} elements/layer x {QUANT_OPS} ops = {q['ops']} lane-ops = {usR(q['per_layer_ns'])} us per layer per core (redundant on 8 cores) = "
+              f"{t10(pct(q['per_layer_ns'] * s['nL'], T0))}% of the 32k step; host-quantization fallback 4 bounces/layer = {usR(q['host_per_layer'])} us/layer -> step {ms2(T0)} -> {ms2(Th)} ms "
+              f"({spc(pcs(F.tps_card(1000, Th), F.tps_card(1000, T0)))} tok/s)")
+    print(f"[ALT-4-draft] draft with host quantization: +{4*24} bounces x {usR(2*LAM + tn(2*8192, F.D2H[0]))} us = +{ms2(4*24*(2*LAM + tn(2*8192, F.D2H[0])))} ms per draft token (of {usR(draft_token_ns(121))} us)")
+    r1b = rateT(64 * MiB, tn(64 * MiB + 2 * MiB, R_LOADER // 2 * 8))   # Route 1b class: f16 tiles through the serial loader, 8 cores
+    print(f"[ALT-4-route1b] no quantizer and no host bounce -> f16 A x f16 (vector-cast) W through the 26.5 GB/s/core loader: {t10(rateT(8*64*MiB, tn(64*MiB, R_LOADER)*2))} GB/s-class vs 174.6")
+    # ---------------------------------------------------------------- ALT-5
+    print("\n## [ALT-5] two-tier KV pages: 1 MiB extents + 64 KiB tail pages")
+    for cpg in (0, 100, 500, 2000, 6005):
+        g64 = A.G_page(64 * KiB, cpg); g1m = A.G_page(MiB, cpg)
+        cells = []
+        for L in (32768, 32768 + 2000, 1048576):
+            cells.append(f"L={L}: {t10(G_tier(L, cpg))}")
+        print(f"[ALT-5-G-cpg{cpg}] G(64 KiB) {t10(g64)} ; G(1 MiB) {t10(g1m)} ; two-tier " + " ; ".join(cells) + " (tenths GB/s)")
+    for cpg in (500, 2000):
+        g64 = A.G_page(64 * KiB, cpg); g1m = A.G_page(MiB, cpg)
+        for L in (32768, 1048576):
+            T64, _, _ = A.step_ns(L, 1, g64, 7, 1); T1m, _, _ = A.step_ns(L, 1, G_tier(L, cpg), 7, 1)
+            print(f"[ALT-5-step-cpg{cpg}-{L}] t=1 native corner: 64 KiB pages {usR(T64)} us -> two-tier {usR(T1m)} us ({spc(pcs(T1m, T64))})")
+    print(f"[ALT-5-compaction] compaction traffic {compaction_ns_per_token_layer()} ns per token-layer (16 streams x 2 MiB per 4096 tokens at 174.6); "
+          f"tail waste <= 16 x 64 KiB = 1 MiB per layer-sequence (vs 16 MiB with fixed 1 MiB pages); page-table entries per 1M tokens per stream: {1048576//4096} extents + <= 15 tail pages")
+    # ---------------------------------------------------------------- ALT-6
+    print("\n## [ALT-6] K-int8 / V-f16 KV (bytes x 3/4, P stays f16)")
+    for rho in (1, 2):
+        best, blk = cV_threshold_k8(rho)
+        print(f"[ALT-6-threshold-rho{rho}] t=1 block DDR-bound iff c_V <= {best} (block {blk} ns at 3/4 bytes)")
+    for L in (32768, 1048576):
+        for cvk, rk in (("nat_nat", "full"), ("poly_tree", "half")):
+            T, c, b = attn_k8(L, 1, A.R_GEMM, A.CV_BR[cvk], A.RHO32[rk]); T0, _, _ = A.step_ns(L, 1, A.R_GEMM, A.CV_BR[cvk], A.RHO32[rk])
+            print(f"[ALT-6-attn-{L}-{cvk}-{rk}] t=1 {usR(T0)} us -> {usR(T)} us bind={b} ({spc(pcs(T, T0))})")
+    for s in (D, M):
+        for L in (32768, 131072, 1048576):
+            if not s["moe"] and L == 1048576: continue
+            T0, _ = F.step(s, L); T, _ = fleet_k8(s, L); Ti, _ = F.step(s, L, i8=True)
+            print(f"[ALT-6-fleet-{s['name']}-{L}] t=1: f16 KV {ms2(T0)} -> {t3(F.tps_card(1000, T0))} ; K-int8 {ms2(T)} -> {t3(F.tps_card(1000, T))} ({spc(pcs(F.tps_card(1000, T), F.tps_card(1000, T0)))}) ; "
+                  f"full KV-int8 {ms2(Ti)} -> {t3(F.tps_card(1000, Ti))} ({spc(pcs(F.tps_card(1000, Ti), F.tps_card(1000, T0)))})")
+    # ---------------------------------------------------------------- ALT-7
+    print("\n## [ALT-7] shared-prefix batched attention (prefix KV streamed once per pass)")
+    for s in (D, M):
+        for Ls in (4096, 16384, 28672):
+            full, shared, passes = prefix_kv_ns(s, 32768, Ls, 16)
+            T0, p0 = F.step(s, 32768, 16, 1); T = T0 - s["nL"] * (full - shared)
+            print(f"[ALT-7-{s['name']}-B16-Ls{Ls}] rows {16*(s['Hq']//s['Hkv'])} -> {passes} passes; KV per layer {usR(full)} -> {usR(shared)} us; step {ms2(T0)} -> {ms2(T)} ms ; "
+                  f"{t3(F.tps_card(16000, T0))} -> {t3(F.tps_card(16000, T))} ({spc(pcs(F.tps_card(16000, T), F.tps_card(16000, T0)))})")
+    # ---------------------------------------------------------------- ALT-8
+    print("\n## [ALT-8] lazy-rescale online softmax (O resident in L0C, no per-block merge) at t=16, g=8")
+    blk, res = lazy_block_bound()
+    print(f"[ALT-8-threshold] S4 128-token block {blk} ns DDR-bound without merge iff c_V <= {res[1]} (rho32=1) / {res[2]} (rho32=2)")
+    for L in (32768, 1048576):
+        for cvk, rk in (("nat_nat", "full"), ("nat_tree", "full"), ("poly_tree", "half")):
+            two, s4, lz, b2, b4, bz, lzs = alt8(L, A.CV_BR[cvk], A.RHO32[rk])
+            print(f"[ALT-8-{L}-{cvk}-{rk}] two-pass {usR(two)} us ({b2}) ; S4+merge {usR(s4)} ({b4}) ; S4+lazy {usR(lz)} ({bz}) ; lazy vs two-pass {spc(pcs(lz, two))}, vs S4 {spc(pcs(lz, s4))}")
+    # ---------------------------------------------------------------- ALT-9
+    print("\n## [ALT-9] dominated alternatives")
+    sv, ad, net = dom_ksplit_dense()
+    print(f"[ALT-9-ksplit] dense m=1 8192^2 K-split: A bytes saved {usR(sv)} us, partial traffic added {usR(ad)} us, net {usR(net)} us = {t10(pct(net, 384000))}% of a 384 us kernel before the sync (>= 91 us launch, or c_sync)")
+    T0, T1 = dom_expert_parallel_card(M)
+    print(f"[ALT-9-expert-parallel] experts split over the card's two dies at Pi=1: no concurrency; +2 lambda per layer: {ms2(T0)} -> {ms2(T1)} ms ({spc(pcs(F.tps_card(1000,T1), F.tps_card(1000,T0)))})")
+    for pop, (T0, T1) in dom_hot_cold_same_fleet(M).items():
+        print(f"[ALT-9-hotcold-{pop}] coldest 25% of experts as W4 on the same 8-die fleet (no replication): MoE 32k {ms2(T0)} -> {ms2(T1)} ms ({spc(pcs(F.tps_card(1000,T1), F.tps_card(1000,T0)))})")
+    for s in (D, M):
+        T16, T64, feas = dom_rows_cliff(s)
+        print(f"[ALT-9-rowscliff-{s['name']}] 4k: B=16 {ms2(T16)} ms -> {t3(F.tps_card(16000, T16))} ; B=64 (if m=64 were flat) {ms2(T64)} -> {t3(F.tps_card(64000, T64))} "
+              f"(x{(F.tps_card(64000, T64)*10//F.tps_card(16000, T16))/10:.1f}), memory feasible {feas}; at 32k L_max(64) = {F.Lmax(s, 64)}")
+    T0, T1 = dom_token_drop()
+    print(f"[ALT-9-tokendrop] t=16 uniform D=128 -> cap 64: step {ms2(T0)} -> {ms2(T1)} ms per MoE launch (x{T0*10//T1/10:.1f}), dropping 50% of routed pairs (quality knob)")
+    print(f"[ALT-9-specialization] a DMA core feeding compute cores must hand bytes over through DDR (no inter-core SRAM path): W read + W write + W read = 3x bytes -> <= {t10(F.R_GEMM//3)} GB/s")
+    print(f"[ALT-9-p2p] zero-copy / NUMA / polling: bounded by T_p2p_bound <= T_x = {usR(F.exchange(M,1,LAM)[0])} us MoE / {usR(F.exchange(D,1,LAM)[0])} us dense per token")
+
+
+# ============================================================ extras: combinations and feasibility tables =====
+def extras():
+    D, M = F.DENSE, F.MOE
+    print("\n## [ALT-X] combinations and per-die fit tables")
+    a = alt1()
+    for cpg in (6005,):
+        g64 = A.G_page(64 * KiB, cpg)
+        for L in (32768, 1048576):
+            T64, _, _ = A.step_ns(L, 1, g64, 7, 1); T1m, _, _ = A.step_ns(L, 1, G_tier(L, cpg), 7, 1)
+            print(f"[ALT-5-step-cpg{cpg}-{L}] t=1 native corner: 64 KiB pages {usR(T64)} us -> two-tier {usR(T1m)} us ({spc(pcs(T1m, T64))})")
+    # head-aligned QKV packing: attention fused into the QKV launch (no cross-core sync): 1 launch per layer saved
+    for s in (D, M):
+        T0, _ = F.step(s, 32768); T1, _ = fleet_cell(s, 32768, nlaunch=s["nlaunch"] - 1)
+        print(f"[ALT-3-headaligned-{s['name']}] QKV+attention in one launch (head-aligned column slices, no sync): {ms2(T0)} -> {ms2(T1)} ms ({spc(pcs(F.tps_card(1000, T1), F.tps_card(1000, T0)))})")
+    # replication + megakernel (+ direct-path hot tier), MoE and dense at 32k
+    for s in (D, M):
+        xs = [min_x(s, p, 32768) for p in range(4)]
+        T0, _ = F.step(s, 32768)
+        T, parts = inst_step(s, 32768, xs=xs, nlaunch=1)
+        Tsync = T + s["nL"] * SYNCS_PER_LAYER[s["name"]] * 5000 + s["nL"] * 2 * tn(reduction_bytes(1, s["d"]), F.R_GEMM)
+        print(f"[ALT-2+3-{s['name']}-32k] replication + megakernel (c_sync 5 us): today {ms2(T0)} -> {t3(F.tps_card(1000, T0))} ; 2 instances {ms2(Tsync)} -> {t3(tps_card_inst(1000, Tsync))} "
+              f"({spc(pcs(tps_card_inst(1000, Tsync), F.tps_card(1000, T0)))})")
+    # replication + full KV-int8 for MoE long context
+    for L in (131072, 1048576):
+        xs = [min_x(M, p, L, 1, True) for p in range(4)]
+        T0, _ = F.step(M, L, i8=True); T, parts = inst_step(M, L, xs=xs, i8=True)
+        print(f"[ALT-2+6-moe-{L}] replication + full KV-int8: x {xs}; single instance KV-int8 {ms2(T0)} -> {t3(F.tps_card(1000, T0))} ; 2 instances {ms2(T)} -> {t3(tps_card_inst(1000, T))} "
+              f"({spc(pcs(tps_card_inst(1000, T), F.tps_card(1000, T0)))}); vs f16-KV single {t3(F.tps_card(1000, F.step(M, L)[0]))}")
+    # all-W4 replication (x = 1000) vs minimal x, MoE 32k
+    T0, _ = F.step(M, 32768); Tall, _ = inst_step(M, 32768, xs=[1000] * 4); Tmin, _ = inst_step(M, 32768, xs=[min_x(M, p, 32768) for p in range(4)])
+    print(f"[ALT-2-allw4-moe-32k] all experts W4 (x=1000): 2 instances {ms2(Tall)} ms -> {t3(tps_card_inst(1000, Tall))} ; minimal x: {ms2(Tmin)} -> {t3(tps_card_inst(1000, Tmin))} ; today {t3(F.tps_card(1000, T0))}")
+    # per-die fit tables at the chosen x
+    for s, L in ((M, 32768), (M, 1048576), (D, 32768), (D, 131072)):
+        xs = [min_x(s, p, L) for p in range(4)]
+        rows = []
+        for p in range(4):
+            w = inst_die_weights(s, p, xs[p]); kv = inst_die_kv(s, p, L); tot = w + kv + WS + O_RT
+            rows.append(f"pos{p} c{POS4[p][0]}.d{POS4[p][1]}: x={xs[p]} w={F.gb1(w)} kv={F.gb1(kv)} total={F.gb1(tot)} GB")
+        print(f"[ALT-2-fit-table-{s['name']}-{L}] " + " | ".join(rows) + f" (limit 86.0; overhead {F.gb1(O_RT + WS)} assumed, H8)")
+    # ALT-2 sensitivity: the W4 vector rate bracket (5.3 measured; what if the full kernel realises only 4.0 or 3.0 GB/s/core)
+    global T_SLAB_W4_OVL
+    saved = T_SLAB_W4_OVL
+    for r in (53, 40, 30):
+        T_SLAB_W4_OVL = tn(MiB, r)
+        xs = [min_x(M, p, 32768) for p in range(4)]; T, _ = inst_step(M, 32768, xs=xs)
+        print(f"[ALT-2-sens-w4rate-{r}] W4 unpack at {t10(r)} GB/s/core: MoE 32k 2 instances {ms2(T)} ms -> {t3(tps_card_inst(1000, T))} tok/s/card (today 1.867)")
+    T_SLAB_W4_OVL = saved
+    # ALT-2 break-even: the W4 slab time at which two instances stop beating one (MoE 32k, uniform, direct_ser hot)
+    T0, _ = F.step(M, 32768); xs = [min_x(M, p, 32768) for p in range(4)]
+    lo, hi = 0, 50_000_000
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        T_SLAB_W4_OVL = mid; T, _ = inst_step(M, 32768, xs=xs)
+        if tps_card_inst(1000, T) > F.tps_card(1000, T0): lo = mid
+        else: hi = mid - 1
+    T_SLAB_W4_OVL = saved
+    print(f"[ALT-2-breakeven-moe-32k] two instances beat one for every W4 slab time <= {lo} ns per core-slab (= {t10(rateT(MiB, lo))} GB/s/core of int4; measured 5.3; serial-chain branch {t10(rateT(MiB, T_SLAB_W4_SER))})")
+
+if __name__ == "__main__":
+    main(); extras()
