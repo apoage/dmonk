@@ -25,6 +25,11 @@
 
   Build: `lean proof/attn.lean` (standalone) or `cd proof && lake build` (target `Attn`).
   No `axiom`, no `sorry`, no `native_decide` anywhere.
+
+  ROUND 3 (2026-11-05): the `T3r_*` section at the end of this file re-grounds every moved cell on the season (v1)
+  measurements (HW-MAP commit 8a7079f: E21 gather rates per page size, E22 exp / reduce-max / And / rho32 / sigma_s,
+  R_drain, the merge chain); the round-2 theorems above are kept as the arithmetic of the round-2 model and its retired
+  branches (PROOF-COVERAGE-3.md's round-3 section says which cells they no longer describe).
 -/
 
 namespace Measured
@@ -1049,3 +1054,692 @@ theorem T_harness : 7 * 7 * 128 = 6272 ∧ 512 * 6272 * 7 = 22478848 ∧ 2 ^ 24 
 /-- E21 at P = 1 MiB: 8 cores × 2 048 pages = 16 GiB of visits inside a 4 GiB arena — pages repeat 4×; the per-page
     pattern check still differences every visit (the host sums the visited pages), so the probe stays valid -/
 theorem T_e21_arena : 8 * 2048 * MiB = 16 * 1024 * MiB ∧ 4 * 1024 * MiB < 8 * 2048 * MiB ∧ 8 * 2048 * 65536 = 1024 * MiB := by decide
+
+/-! # ROUND 3 (2026-11-05) — the season (v1) measurements (HW-MAP commit 8a7079f) ground the model
+
+  Every round-2 theorem above is kept (it is the arithmetic of the round-2 model and its branches); the
+  round-3 theorems `T3r_*` re-instantiate every moved cell on the measured constants. The measured
+  quantities enter as `Measured3` constants; the two remaining modelling choices are explicit:
+    `Var`  — the per-block softmax chain: `.rowmax` = DESIGN-3 §3.2 as specified (per-row block max:
+             f32 difference, cast, f16 6-op tree, 16 per-row reduce-max calls, a 20-call shift reel,
+             exp, cast, sum), `.lazy` = the fixed per-row shift with an overflow guard (one reduce-max
+             call per P reel, no per-block row max, no alpha);
+    `Conv` — the op-cost convention: `.T` = throughput (1 lane-op = 1/43.2 ns, f32 at the measured
+             rho32 = 1.37), `.C` = chained-latency bound (every 1024-lane call at its measured chained ns);
+  the merge count stays a hypothesis variable (`m`, lane-eq x100) with the pack's 25 750 as the headline.
+  Units: lane-equivalents x100 inside the chain (1 lane-eq = 10/432 ns), ns elsewhere, as in attn.py `[R3-*]`. -/
+namespace Measured3
+/-- E21 (gather rate, 20/20 reps exact): aggregate tenths GB/s, sequential control / shuffled, at 16 / 64 / 256 KiB -/
+def gSeq16 : Nat := 1652
+def gShuf16 : Nat := 1538
+def gSeq64 : Nat := 1690
+def gShuf64 : Nat := 1670
+def g256 : Nat := 1692
+/-- E21 per-page ns per core, sequential / shuffled -/
+def tPgSeq16 : Nat := 793
+def tPgShuf16 : Nat := 852
+def tPgSeq64 : Nat := 3101
+def tPgShuf64 : Nat := 3140
+def tPgSeq256 : Nat := 12391
+def tPgShuf256 : Nat := 12394
+/-- E22 (softmax op set): chained per-call tenths of ns on 1024 lanes — exp, reduce-max f16 / f32, f16 Mul, f32 Mul/Add, And<int16> -/
+def tExp : Nat := 2728
+def tRm16 : Nat := 1819
+def tRm32 : Nat := 2514
+def tF16 : Nat := 464
+def tF32 : Nat := 636
+def tAnd16 : Nat := 459
+/-- E22: c_exp = 272.8 ns x 43.2 / 1024 = 11.5 lane-eq per element (hundredths); rho32 = 63.6 / 46.4 = 1.37 (hundredths); sigma_s = 19.9 ns (tenths) -/
+def cExp100 : Nat := 1150
+def rho32_100 : Nat := 137
+def sigma3 : Nat := 199
+/-- L0C -> US drain measured at mt = 1..4, tenths GB/s/core -/
+def rDrain1 : Nat := 1528
+def rDrain2 : Nat := 2223
+def rDrain3 : Nat := 2603
+def rDrain4 : Nat := 2855
+/-- the validation pack's merge-chain itemisation, lane-eq per block-fragment (commit 8a7079f message) -/
+def mergePack : Nat := 25750
+/-- the retained "3x slower" what-if (a scattered cache, c_pg ~ 6 us at 64 KiB): no longer a measured branch -/
+def g3x : Nat := 582
+end Measured3
+
+namespace Design3
+open Measured Measured3 Design
+
+/-! ### Units: lane-eq x100 per tenth of a ns; chained call costs -/
+def lanePerNs10 : Nat := 432
+def call100 (t10 : Nat) : Nat := t10 * lanePerNs10
+inductive Conv where
+  | T   -- throughput convention
+  | C   -- chained-latency bound
+  deriving DecidableEq, Repr
+inductive Var where
+  | rowmax   -- DESIGN-3 §3.2 as specified (per-row block max)
+  | lazy     -- fixed per-row shift + overflow guard
+  deriving DecidableEq, Repr
+/-- per-lane cost of one elementwise f16 / f32 op, hundredths of a lane-eq -/
+def unitF16 : Conv → Nat
+  | .T => 100
+  | .C => ceilDiv (tF16 * lanePerNs10) 1024
+def unitF32 : Conv → Nat
+  | .T => rho32_100
+  | .C => ceilDiv (tF32 * lanePerNs10) 1024
+/-- f16 6-op pair-max tree: block·16/1024 reels -> 1 reel (1024 lanes per pair-op), then 1024 -> 256 (512 + 256 lanes) -/
+def treeOps (block : Nat) : Nat := 6 * ((block * 16 / 1024 - 1) * 1024 + 512 + 256)
+/-- rowmax chain per block for mt fragments, lane-eq x100: 6 f32 ops per score (difference 2, cast S 1, shift 1,
+    cast P 1, sum 1) + exp + the f16 tree + 16 per-row reduce-max calls + the shift reel (16 Duplicate + 3 copies
+    = 20 small calls, each costed as one chained f16 call: ASSUMPTION A3) + the merge -/
+def chainRowmax (block mt f16 f32 cexp merge100 : Nat) : Nat :=
+  mt * (block * 16 * (6 * f32 + cexp) + treeOps block * f16 + 16 * call100 tRm16 + 20 * call100 tF16 + merge100)
+/-- lazy chain: 5 f32 ops per score (difference 2, shift 1, cast P 1, sum 1) + exp + one guard reduce-max per P reel + the merge -/
+def chainLazy (block mt f32 cexp merge100 : Nat) : Nat :=
+  mt * (block * 16 * (5 * f32 + cexp) + (block * 16 / 1024) * call100 tRm16 + merge100)
+def chain100 (block mt : Nat) : Var → Conv → Nat → Nat
+  | .rowmax, c, m => chainRowmax block mt (unitF16 c) (unitF32 c) cExp100 m
+  | .lazy, c, m => chainLazy block mt (unitF32 c) cExp100 m
+/-- vector time per block, ns -/
+def vec3 (block mt : Nat) (v : Var) (c : Conv) (m : Nat) : Nat := chain100 block mt v c m * 10 / (rVecCore * 100)
+/-- the itemised merge chain of §3.1 at the measured constants: alpha exp (1 call) + alpha reel (20 small calls) +
+    O (difference Add, snapshot Muls, scale Mul, Add over 2048 lanes) + S (fold 512 + 256, scale 256, add 256);
+    the lazy variant has no alpha: O (difference, snapshot, add) + S (fold, add) -/
+def mergeItem : Var → Conv → Nat
+  | .rowmax, c => call100 tExp + 20 * call100 tF16 + 4 * 2048 * unitF32 c + (512 + 256 + 256 + 256) * unitF32 c
+  | .lazy, c => (3 * 2048 + 512 + 256 + 256) * unitF32 c
+/-- the measured drain rate per fragment count (mt >= 4 uses the mt = 4 figure) -/
+def rDrainM (mt : Nat) : Nat := if mt ≤ 1 then rDrain1 else if mt = 2 then rDrain2 else if mt = 3 then rDrain3 else rDrain4
+def mtS (t : Nat) (onepass : Bool) : Nat := mtSel (rowsOf t gH) onepass
+def pn (L t : Nat) (onepass : Bool) : Nat := pSel (rowsOf t gH) onepass * nblocks L (mtS t onepass)
+def blockMax3 (G : Nat) (v : Var) (c : Conv) (m mt : Nat) : Nat :=
+  max (max (max (ddrBlock G mt dH) (vec3 (blockOf mt) mt v c m)) (mmaBlock mt dH)) (loaderBlock mt)
+/-- fixed cost: pipeline fill + tail = 2 vector blocks + 1 drain at the measured rate + the vector tail -/
+def fixed3 (L : Nat) (v : Var) (c : Conv) (m mt mtAll : Nat) : Nat :=
+  2 * vec3 (blockOf mt) mt v c m + drainBlock mt dH (rDrainM mt) + tailOps L mtAll dH * unitF32 c * 10 / (rVecCore * 100)
+/-- the round-3 step (ns, in-kernel): passes·blocks·max(engines) + fixed; drain hidden (T3r_drain) -/
+def step3 (L t G : Nat) (v : Var) (c : Conv) (m : Nat) (onepass : Bool) : Nat :=
+  pn L t onepass * blockMax3 G v c m (mtS t onepass) + fixed3 L v c m (mtS t onepass) (mtOf (rowsOf t gH))
+/-- the KV-int8 variant: the streamed bytes halve (on the total, as attn.py), nothing else moves -/
+def step3I8 (L t G : Nat) (v : Var) (c : Conv) (m : Nat) : Nat :=
+  max (max (max (pn L t false * ddrBlock G (mtS t false) dH / 2) (pn L t false * vec3 (blockOf (mtS t false)) (mtS t false) v c m))
+      (pn L t false * mmaBlock (mtS t false) dH)) (pn L t false * loaderBlock (mtS t false))
+  + fixed3 L v c m (mtS t false) (mtOf (rowsOf t gH))
+/-- headline shorthand: the pack's merge, two-pass -/
+def step3H (L t G : Nat) (v : Var) (c : Conv) : Nat := step3 L t G v c (mergePack * 100) false
+def step3S4 (L G : Nat) (v : Var) (c : Conv) : Nat := step3 L 16 G v c (mergePack * 100) true
+/-- E21 page model: measured sequential per-page base + an extra per-page cost c -/
+def tPgSeq (P : Nat) : Nat := if P = 16384 then tPgSeq16 else if P = 65536 then tPgSeq64 else tPgSeq256
+def gPage3 (P c : Nat) : Nat := 8 * P * 10 / (tPgSeq P + c)
+/-- two-tier pages (ALTERNATIVES §2.5) on the measured base: 1 MiB extents (4 x the 256 KiB page + c) + 64 KiB tails -/
+def gTier3 (L c : Nat) : Nat :=
+  let nE := L / 4096
+  let nT := ceilDiv (L - nE * 4096) 256
+  let tCore := nE * (4 * tPgSeq256 + c) + nT * (tPgSeq64 + c)
+  if tCore = 0 then g256 else 8 * L * 256 * 10 / tCore
+/-- the vector-dot route ratio at a hundredths rho (T_gqa_matrix at the measured 1.37) -/
+def dotRatioT100 (rows rho100 d : Nat) : Nat := rows * rho100 * 4 * d * rGemm * 10000 / (80 * coreTok d * rVecCore * 100)
+end Design3
+
+open Measured3 Design3
+
+/-! ## T3r_E21 — the measured gather rates (`[R3-E21-*]`) -/
+/-- shuffled − sequential = 59 / 39 / 3 ns at 16 / 64 / 256 KiB; against the round-2 model's 174.6 base the same
+    pages cost 102 / 138 / 383 ns — the 64 KiB shuffled page sits ABOVE the 123 ns flip line of round 2 because the
+    attention choreography itself streams at 169.0 (a 3.2 % gap to the W8 kernel's 174.6), not because of c_pg -/
+theorem T3r_E21 : tPgShuf16 - tPgSeq16 = 59 ∧ tPgShuf64 - tPgSeq64 = 39 ∧ tPgShuf256 - tPgSeq256 = 3 ∧
+    tPgShuf16 - 16384 * 80 / rGemm = 102 ∧ tPgShuf64 - 65536 * 80 / rGemm = 138 ∧ tPgShuf256 - 262144 * 80 / rGemm = 383 ∧
+    123 ≤ 138 ∧ pct (rGemm - gSeq64) rGemm = 32 ∧ pct (rGemm - g256) rGemm = 31 ∧ pct (rGemm - gSeq16) rGemm = 54 ∧
+    gPage pageB 38 = 1724 ∧ 8 * 65536 * 10 / tPgShuf64 = 1669 ∧ 8 * 262144 * 10 / tPgSeq256 = 1692 := by decide
+/-- block DDR times on the measured rates: 12 409 (seq 64 KiB) / 12 557 (shuffled 64 KiB, the design's page) /
+    12 394 (256 KiB) / 13 635 (16 KiB) / 36 033 (3x what-if) against the round-2 12 011 -/
+theorem T3r_E21_block : ddrBlock gSeq64 1 128 = 12409 ∧ ddrBlock gShuf64 1 128 = 12557 ∧ ddrBlock g256 1 128 = 12394 ∧
+    ddrBlock gShuf16 1 128 = 13635 ∧ ddrBlock g3x 1 128 = 36033 ∧ ddrBlock gStream 1 128 = 12011 ∧
+    ddrBlock gShuf64 4 128 = 6278 ∧ ddrBlock gShuf64 8 128 = 3139 := by decide
+
+/-! ## T3r_units, T3r_tree, T3r_chain — the measured softmax chain (`[R3-units]` `[R3-tree-ops]` `[R3-chain-*]`) -/
+theorem T3r_units : call100 tExp / 100 = 11784 ∧ tExp * lanePerNs10 / 1024 = 1150 ∧ call100 tRm16 / 100 = 7858 ∧
+    call100 tRm32 / 100 = 10860 ∧ call100 tF16 / 100 = 2004 ∧ call100 tF32 / 100 = 2747 ∧
+    unitF16 .C = 196 ∧ unitF32 .C = 269 ∧ unitF16 .T = 100 ∧ unitF32 .T = 137 ∧ 636 * 100 / 464 = 137 := by decide
+theorem T3r_tree : treeOps 512 = 47616 ∧ treeOps 256 = 23040 ∧ treeOps 128 = 10752 ∧ treeOps 512 = treeLaneOps ∧
+    treeOps 512 * 10000 / 8192 = 58125 := by decide
+/-- the 12 chain cells (ns per fragment at the pack merge): rowmax 9 276 / 6 837 / 5 618 (T), 11 836 / 8 100 / 6 232 (C);
+    lazy 5 530 / 3 063 / 1 829 (T), 6 782 / 3 689 / 2 142 (C) at blocks 512 / 256 / 128 -/
+theorem T3r_chain : vec3 512 1 .rowmax .T (mergePack * 100) = 9276 ∧ vec3 256 1 .rowmax .T (mergePack * 100) = 6837 ∧
+    vec3 128 1 .rowmax .T (mergePack * 100) = 5618 ∧ vec3 512 1 .rowmax .C (mergePack * 100) = 11836 ∧
+    vec3 256 1 .rowmax .C (mergePack * 100) = 8100 ∧ vec3 128 1 .rowmax .C (mergePack * 100) = 6232 ∧
+    vec3 512 1 .lazy .T (mergePack * 100) = 5530 ∧ vec3 256 1 .lazy .T (mergePack * 100) = 3063 ∧
+    vec3 128 1 .lazy .T (mergePack * 100) = 1829 ∧ vec3 512 1 .lazy .C (mergePack * 100) = 6782 ∧
+    vec3 256 1 .lazy .C (mergePack * 100) = 3689 ∧ vec3 128 1 .lazy .C (mergePack * 100) = 2142 := by decide
+/-- vector share of the block at mt = 1: 77.2 % (rowmax-T) / 98.5 % (rowmax-C) / 46.0 % (lazy-T) / 56.5 % (lazy-C) at 174.6 —
+    round 2's native corner was 12.4 % (c_V = 7); at t = 1 the 8 padding rows need no reduce call: 7 820 ns = 65.1 % -/
+theorem T3r_chain_shares : pct 9276 12011 = 772 ∧ pct 11836 12011 = 985 ∧ pct 5530 12011 = 460 ∧ pct 6782 12011 = 565 ∧
+    pct 9276 12557 = 739 ∧ pct 11836 12557 = 943 ∧ pct 5530 12557 = 440 ∧ pct 6837 6005 = 1139 ∧ pct 5618 3002 = 1871 ∧
+    (chain100 512 1 .rowmax .T (mergePack * 100) - 8 * call100 tRm16) * 10 / (rVecCore * 100) = 7820 ∧ pct 7820 12011 = 651 ∧
+    chain100 512 1 .rowmax .T (mergePack * 100) / 100 = 400731 ∧ 16 * call100 tRm16 / 100 = 125729 ∧ 20 * call100 tF16 / 100 = 40089 ∧
+    8192 * (6 * 137 + 1150) / 100 = 161546 := by decide
+/-- the linear forms behind the iff theorems: chain100 at merge 0 (lane-eq x100) -/
+theorem chain100_rowmax (b mt m : Nat) (c : Conv) : chain100 b mt .rowmax c m = chainRowmax b mt (unitF16 c) (unitF32 c) cExp100 m := rfl
+theorem chain100_lazy (b mt m : Nat) (c : Conv) : chain100 b mt .lazy c m = chainLazy b mt (unitF32 c) cExp100 m := rfl
+theorem unitT16 : unitF16 .T = 100 := rfl
+theorem unitT32 : unitF32 .T = 137 := rfl
+theorem unitC16 : unitF16 .C = 196 := by decide
+theorem unitC32 : unitF32 .C = 269 := by decide
+theorem T3r_lin : chain100 512 1 .rowmax .T 0 = 37498112 ∧ chain100 256 1 .rowmax .T 0 = 26963200 ∧ chain100 128 1 .rowmax .T 0 = 21695744 ∧
+    chain100 512 1 .rowmax .C 0 = 48557312 ∧ chain100 512 1 .lazy .T 0 = 21318784 ∧ chain100 256 1 .lazy .T 0 = 10659392 ∧
+    chain100 128 1 .lazy .T 0 = 5329696 ∧ chain100 512 1 .lazy .C 0 = 26725504 := by decide
+theorem vec3_rowmaxT_512 (m : Nat) : vec3 512 1 .rowmax .T m = (37498112 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_rowmax, unitT16, unitT32]; unfold chainRowmax
+  have ht : treeOps 512 = 47616 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec3_rowmaxC_512 (m : Nat) : vec3 512 1 .rowmax .C m = (48557312 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_rowmax, unitC16, unitC32]; unfold chainRowmax
+  have ht : treeOps 512 = 47616 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec3_lazyT_512 (m : Nat) : vec3 512 1 .lazy .T m = (21318784 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_lazy, unitT32]; unfold chainLazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+theorem vec3_lazyC_512 (m : Nat) : vec3 512 1 .lazy .C m = (26725504 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_lazy, unitC32]; unfold chainLazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+theorem vec3_rowmaxT_256_4 (m : Nat) : vec3 256 4 .rowmax .T m = 4 * (26963200 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_rowmax, unitT16, unitT32]; unfold chainRowmax
+  have ht : treeOps 256 = 23040 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec3_rowmaxT_128_8 (m : Nat) : vec3 128 8 .rowmax .T m = 8 * (21695744 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_rowmax, unitT16, unitT32]; unfold chainRowmax
+  have ht : treeOps 128 = 10752 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec3_lazyT_256_4 (m : Nat) : vec3 256 4 .lazy .T m = 4 * (10659392 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_lazy, unitT32]; unfold chainLazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+theorem vec3_lazyT_128_8 (m : Nat) : vec3 128 8 .lazy .T m = 8 * (5329696 + m) * 10 / 43200 := by
+  unfold vec3; rw [chain100_lazy, unitT32]; unfold chainLazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+
+/-! ## T3r_merge — the merge count as a hypothesis variable (`[R3-merge-*]`): the pack's 25 750, the itemised chains, thresholds -/
+/-- itemised merge chains (lane-eq x100): rowmax 64 851 (T) / 77 354 (C) — 2.5–3.0x the pack's 25 750, the alpha reel's
+    20 small calls being the largest item; lazy 9 820 / 19 281; in ns: 596 (pack) / 1 501 / 1 790 / 227 / 446 -/
+theorem T3r_merge_item : mergeItem .rowmax .T = 6485120 ∧ mergeItem .rowmax .C = 7735424 ∧ mergeItem .lazy .T = 982016 ∧
+    mergeItem .lazy .C = 1928192 ∧ mergePack * 10 / rVecCore = 596 ∧ mergeItem .rowmax .T * 10 / (rVecCore * 100) = 1501 ∧
+    mergeItem .rowmax .C * 10 / (rVecCore * 100) = 1790 ∧ mergeItem .lazy .T * 10 / (rVecCore * 100) = 227 ∧
+    7000 * 10 / rVecCore = 162 ∧ 12128 * 10 / rVecCore = 280 ∧ 20 * call100 tF16 / 100 = 40089 ∧ call100 tExp / 100 = 11784 := by decide
+/-- t = 1 DDR-bound at 174.6 iff merge ≤ 143 937 (rowmax-T) / 33 345 (rowmax-C) / 305 730 (lazy-T) / 251 663 (lazy-C) lane-eq;
+    the pack's 25 750 passes on every chain, the itemised rowmax-C chain (77 354) exceeds its own line -/
+theorem T3r_merge_threshold_rowmaxT (m : Nat) : vec3 512 1 .rowmax .T m ≤ ddrBlock gStream 1 128 ↔ m ≤ 14393727 := by
+  have e : ddrBlock gStream 1 128 = 12011 := by decide
+  rw [e, vec3_rowmaxT_512]; constructor <;> intro h <;> omega
+theorem T3r_merge_threshold_rowmaxC (m : Nat) : vec3 512 1 .rowmax .C m ≤ ddrBlock gStream 1 128 ↔ m ≤ 3334527 := by
+  have e : ddrBlock gStream 1 128 = 12011 := by decide
+  rw [e, vec3_rowmaxC_512]; constructor <;> intro h <;> omega
+theorem T3r_merge_threshold_lazyT (m : Nat) : vec3 512 1 .lazy .T m ≤ ddrBlock gStream 1 128 ↔ m ≤ 30573055 := by
+  have e : ddrBlock gStream 1 128 = 12011 := by decide
+  rw [e, vec3_lazyT_512]; constructor <;> intro h <;> omega
+theorem T3r_merge_threshold_lazyC (m : Nat) : vec3 512 1 .lazy .C m ≤ ddrBlock gStream 1 128 ↔ m ≤ 25166335 := by
+  have e : ddrBlock gStream 1 128 = 12011 := by decide
+  rw [e, vec3_lazyC_512]; constructor <;> intro h <;> omega
+/-- at the design's page (167.0): merge ≤ 167 524 / 56 932 / 329 317 / 275 250 -/
+theorem T3r_merge_threshold_167 (m : Nat) : (vec3 512 1 .rowmax .T m ≤ ddrBlock gShuf64 1 128 ↔ m ≤ 16752447) ∧
+    (vec3 512 1 .rowmax .C m ≤ ddrBlock gShuf64 1 128 ↔ m ≤ 5693247) ∧ (vec3 512 1 .lazy .T m ≤ ddrBlock gShuf64 1 128 ↔ m ≤ 32931775) := by
+  have e : ddrBlock gShuf64 1 128 = 12557 := by decide
+  rw [e, vec3_rowmaxT_512, vec3_rowmaxC_512, vec3_lazyT_512]
+  refine ⟨?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T3r_merge_cells : mergePack * 100 ≤ 14393727 ∧ mergeItem .rowmax .T ≤ 14393727 ∧ 3334527 < mergeItem .rowmax .C ∧
+    mergePack * 100 ≤ 3334527 ∧ mergeItem .lazy .T ≤ 30573055 ∧ 14393727 / 100 = 143937 ∧ 3334527 / 100 = 33345 ∧
+    30573055 / 100 = 305730 ∧ 16752447 / 100 = 167524 := by decide
+/-- the c_exp threshold on the measured chains (hundredths): t = 1 DDR-bound iff c_exp ≤ 25.92 (rowmax-T) / 45.67 (lazy-T) /
+    12.42 (rowmax-C) at 174.6; 28.80 / 48.55 / 15.30 at 167.0 — the measured 11.5 clears every one, and every round-2 line -/
+theorem T3r_cexp_threshold (c : Nat) :
+    (chainRowmax 512 1 100 137 c (mergePack * 100) * 10 / 43200 ≤ 12011 ↔ c ≤ 2592) ∧
+    (chainLazy 512 1 137 c (mergePack * 100) * 10 / 43200 ≤ 12011 ↔ c ≤ 4567) ∧
+    (chainRowmax 512 1 196 269 c (mergePack * 100) * 10 / 43200 ≤ 12011 ↔ c ≤ 1242) ∧
+    (chainRowmax 512 1 100 137 c (mergePack * 100) * 10 / 43200 ≤ 12557 ↔ c ≤ 2880) := by
+  have ht : treeOps 512 = 47616 := by decide
+  unfold chainRowmax chainLazy; rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 mergePack
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T3r_cexp_clears : cExp100 ≤ 2592 ∧ cExp100 ≤ 1242 ∧ cExp100 ≤ 1900 ∧ cExp100 ≤ 2100 ∧ cExp100 / 100 ≤ 19 ∧
+    cExp100 / 100 < polyOps ∧ cVof 12 rNative = 18 ∧ cVof 12 rNative ≤ 62 ∧ cVof 12 rTree = 23 ∧ cVof 12 rTree ≤ 30 := by decide
+
+/-! ## T3r_t1 — the headline cells on the measured constants (`[R3-t1-*]`): L × G ∈ {174.6, 167.0 (64 KiB shuffled,
+    the design's page), 169.2 (256 KiB), 153.8 (16 KiB), 58.2 (3x what-if)} × chain ∈ {rowmax-T (headline), rowmax-C
+    (worst corner), lazy-T (variant)}; every cell is DDR-bound (T3r_t1_binding) -/
+theorem T3r_t1_4k : step3H 4096 1 gStream .rowmax .T = 114908 ∧ step3H 4096 1 gStream .rowmax .C = 120028 ∧ step3H 4096 1 gStream .lazy .T = 107416 ∧
+    step3H 4096 1 gShuf64 .rowmax .T = 119276 ∧ step3H 4096 1 gShuf64 .rowmax .C = 124396 ∧ step3H 4096 1 gShuf64 .lazy .T = 111784 ∧
+    step3H 4096 1 g256 .rowmax .T = 117972 ∧ step3H 4096 1 g256 .rowmax .C = 123092 ∧ step3H 4096 1 g256 .lazy .T = 110480 ∧
+    step3H 4096 1 gShuf16 .rowmax .T = 127900 ∧ step3H 4096 1 gShuf16 .rowmax .C = 133020 ∧ step3H 4096 1 gShuf16 .lazy .T = 120408 ∧
+    step3H 4096 1 g3x .rowmax .T = 307084 ∧ step3H 4096 1 g3x .rowmax .C = 312204 ∧ step3H 4096 1 g3x .lazy .T = 299592 ∧
+    usR 114908 = 115 ∧ usR 119276 = 119 ∧ usR 117972 = 118 ∧ usR 127900 = 128 ∧ usR 120028 = 120 ∧ usR 124396 = 124 ∧
+    usR (wallNs 119276) = 210 ∧ effRate 4096 8 128 1 119276 = 1407 ∧ pct 119276 tGemvUnit = 300 := by decide
+theorem T3r_t1_32k : step3H 32768 1 gStream .rowmax .T = 787524 ∧ step3H 32768 1 gStream .rowmax .C = 792644 ∧ step3H 32768 1 gStream .lazy .T = 780032 ∧
+    step3H 32768 1 gShuf64 .rowmax .T = 822468 ∧ step3H 32768 1 gShuf64 .rowmax .C = 827588 ∧ step3H 32768 1 gShuf64 .lazy .T = 814976 ∧
+    step3H 32768 1 g256 .rowmax .T = 812036 ∧ step3H 32768 1 g256 .rowmax .C = 817156 ∧ step3H 32768 1 g256 .lazy .T = 804544 ∧
+    step3H 32768 1 gShuf16 .rowmax .T = 891460 ∧ step3H 32768 1 gShuf16 .rowmax .C = 896580 ∧ step3H 32768 1 gShuf16 .lazy .T = 883968 ∧
+    step3H 32768 1 g3x .rowmax .T = 2324932 ∧ step3H 32768 1 g3x .rowmax .C = 2330052 ∧ step3H 32768 1 g3x .lazy .T = 2317440 ∧
+    usR 787524 = 788 ∧ usR 792644 = 793 ∧ usR 780032 = 780 ∧ usR 822468 = 822 ∧ usR 827588 = 828 ∧ usR 814976 = 815 ∧
+    usR 812036 = 812 ∧ usR 891460 = 891 ∧ usR 2324932 = 2325 ∧ usR (wallNs 822468) = 913 ∧
+    effRate 32768 8 128 1 822468 = 1632 ∧ effRate 32768 8 128 1 787524 = 1704 ∧ effRate 32768 8 128 1 812036 = 1653 ∧
+    pct 822468 tGemvUnit = 2067 ∧ pct 787524 tGemvUnit = 1979 := by decide
+theorem T3r_t1_128k : step3H 131072 1 gStream .rowmax .T = 3093636 ∧ step3H 131072 1 gStream .rowmax .C = 3098756 ∧ step3H 131072 1 gStream .lazy .T = 3086144 ∧
+    step3H 131072 1 gShuf64 .rowmax .T = 3233412 ∧ step3H 131072 1 gShuf64 .rowmax .C = 3238532 ∧ step3H 131072 1 gShuf64 .lazy .T = 3225920 ∧
+    step3H 131072 1 g256 .rowmax .T = 3191684 ∧ step3H 131072 1 g256 .rowmax .C = 3196804 ∧ step3H 131072 1 g256 .lazy .T = 3184192 ∧
+    step3H 131072 1 gShuf16 .rowmax .T = 3509380 ∧ step3H 131072 1 gShuf16 .rowmax .C = 3514500 ∧ step3H 131072 1 gShuf16 .lazy .T = 3501888 ∧
+    step3H 131072 1 g3x .rowmax .T = 9243268 ∧ step3H 131072 1 g3x .rowmax .C = 9248388 ∧ step3H 131072 1 g3x .lazy .T = 9235776 ∧
+    usR 3093636 = 3094 ∧ usR 3233412 = 3233 ∧ usR 3191684 = 3192 ∧ usR 3509380 = 3509 ∧ usR 3238532 = 3239 ∧
+    effRate 131072 8 128 1 3233412 = 1660 ∧ effRate 131072 8 128 1 3191684 = 1682 ∧ pct 3233412 tGemvUnit = 8124 := by decide
+theorem T3r_t1_1M : step3H 1048576 1 gStream .rowmax .T = 24617348 ∧ step3H 1048576 1 gStream .rowmax .C = 24622468 ∧ step3H 1048576 1 gStream .lazy .T = 24609856 ∧
+    step3H 1048576 1 gShuf64 .rowmax .T = 25735556 ∧ step3H 1048576 1 gShuf64 .rowmax .C = 25740676 ∧ step3H 1048576 1 gShuf64 .lazy .T = 25728064 ∧
+    step3H 1048576 1 g256 .rowmax .T = 25401732 ∧ step3H 1048576 1 g256 .rowmax .C = 25406852 ∧ step3H 1048576 1 g256 .lazy .T = 25394240 ∧
+    step3H 1048576 1 gShuf16 .rowmax .T = 27943300 ∧ step3H 1048576 1 gShuf16 .rowmax .C = 27948420 ∧ step3H 1048576 1 gShuf16 .lazy .T = 27935808 ∧
+    step3H 1048576 1 g3x .rowmax .T = 73814404 ∧ step3H 1048576 1 g3x .rowmax .C = 73819524 ∧ step3H 1048576 1 g3x .lazy .T = 73806912 ∧
+    usR 24617348 = 24617 ∧ usR 25735556 = 25736 ∧ usR 25401732 = 25402 ∧ usR 27943300 = 27943 ∧ usR 25740676 = 25741 ∧
+    effRate 1048576 8 128 1 25735556 = 1669 ∧ effRate 1048576 8 128 1 25401732 = 1691 ∧ effRate 1048576 8 128 1 24617348 = 1745 ∧
+    pct 25735556 tGemvUnit = 64662 ∧ usR (wallNs 25735556) = 25827 := by decide
+/-- every t = 1 cell is DDR-bound: the vector block (9 276 / 11 836 / 5 530 ns) is under the block at every measured G,
+    including the chained-latency bound at 174.6 (11 836 < 12 011 — by 175 ns: the vector unit has no slack there) -/
+theorem T3r_t1_binding : blockMax3 gStream .rowmax .T (mergePack * 100) 1 = ddrBlock gStream 1 dH ∧
+    blockMax3 gStream .rowmax .C (mergePack * 100) 1 = ddrBlock gStream 1 dH ∧ blockMax3 gStream .lazy .T (mergePack * 100) 1 = ddrBlock gStream 1 dH ∧
+    blockMax3 gShuf64 .rowmax .C (mergePack * 100) 1 = ddrBlock gShuf64 1 dH ∧ blockMax3 g256 .rowmax .C (mergePack * 100) 1 = ddrBlock g256 1 dH ∧
+    blockMax3 gShuf16 .rowmax .C (mergePack * 100) 1 = ddrBlock gShuf16 1 dH ∧ 12011 - 11836 = 175 := by decide
+/-- fixed cost: 18 820 (rowmax-T) / 23 940 (rowmax-C) / 11 328 (lazy-T) / 13 832 (lazy-C) = 2 vector blocks + a 268 ns drain
+    (round 2: 7 074 = 2 x 1 489 + 4 096 at the assumed 10 GB/s); the vector tail at L mod 16 = 15 is 3 896 (T) / 7 651 (C) -/
+theorem T3r_fixed : fixed3 32768 .rowmax .T (mergePack * 100) 1 1 = 18820 ∧ fixed3 32768 .rowmax .C (mergePack * 100) 1 1 = 23940 ∧
+    fixed3 32768 .lazy .T (mergePack * 100) 1 1 = 11328 ∧ fixed3 32768 .lazy .C (mergePack * 100) 1 1 = 13832 ∧
+    drainBlock 1 dH (rDrainM 1) = 268 ∧ fixed3 15 .rowmax .T (mergePack * 100) 1 1 = 18820 + 3896 ∧
+    fixed3 15 .rowmax .C (mergePack * 100) 1 1 = 23940 + 7651 ∧ 2 * 9276 + 268 = 18820 := by decide
+/-- the new worst corner (chained-latency bound) overruns the headline by 0.7 % at 32k / 0.0 % at 1M (round 2: +9.8 % / +7.0 %);
+    the lazy variant is 1 % under the headline at t = 1 -/
+theorem T3r_worst_overrun : pct (792644 - 787524) 787524 = 7 ∧ pct (827588 - 822468) 822468 = 6 ∧ pct (24622468 - 24617348) 24617348 = 0 ∧
+    pct 814976 822468 = 991 ∧ pct 780032 787524 = 990 := by decide
+
+/-! ## T3r_t16, T3r_s4 — verify batches on the measured chain (`[R3-t16-*]` `[R3-s4-*]`) -/
+/-- t = 16 two passes (mt = 4, 256-token blocks): 7 057 µs / 224.1 ms (rowmax-T, vector-bound 4.4x), 8 360 / 265.5 (rowmax-C),
+    3 162 / 100.4 (lazy-T, 2.0x) — round 2's 1 554 µs / 49.2 ms native cell was DDR-bound; G no longer enters -/
+theorem T3r_t16 : step3H 32768 16 gStream .rowmax .T = 7056644 ∧ step3H 1048576 16 gStream .rowmax .T = 224106244 ∧
+    step3H 32768 16 gStream .rowmax .C = 8359802 ∧ step3H 1048576 16 gStream .rowmax .C = 265494138 ∧
+    step3H 32768 16 gStream .lazy .T = 3161876 ∧ step3H 1048576 16 gStream .lazy .T = 100409620 ∧
+    step3H 32768 16 gStream .lazy .C = 3807650 ∧ step3H 32768 16 gShuf64 .rowmax .T = 7056644 ∧ step3H 32768 16 gShuf64 .lazy .T = 3161876 ∧
+    usR 7056644 = 7057 ∧ usR 8359802 = 8360 ∧ usR 3161876 = 3162 ∧ 224106244 / 100000 = 2241 ∧ 100409620 / 100000 = 1004 ∧
+    vec3 256 4 .rowmax .T (mergePack * 100) = 27350 ∧ vec3 256 4 .lazy .T (mergePack * 100) = 12254 ∧
+    pct 27350 6005 = 4555 ∧ pct 12254 6005 = 2041 ∧ step3H 4096 16 gStream .rowmax .T = 930244 ∧ step3H 131072 16 gStream .rowmax .T = 28061444 := by decide
+/-- S4 one pass (mt = 8, 128-token blocks) at the pack merge: 11 596 µs / 368.3 ms (rowmax-T), 3 777 / 119.9 (lazy-T) — worse than
+    two passes on every chain (164 % / 154 % / 120 % / 116 %); at the itemised merges 13 464 / 3 016 µs. Per 128-token block the
+    16 per-row reduce calls alone are 23 283 ns against 3 002 ns of DDR -/
+theorem T3r_s4 : step3S4 32768 gStream .rowmax .T = 11596269 ∧ step3S4 1048576 gStream .rowmax .T = 368279789 ∧
+    step3S4 32768 gStream .rowmax .C = 12864597 ∧ step3S4 32768 gStream .lazy .T = 3777063 ∧ step3S4 1048576 gStream .lazy .T = 119944231 ∧
+    step3S4 32768 gStream .lazy .C = 4422837 ∧
+    step3 32768 16 gStream .rowmax .T (mergeItem .rowmax .T) true = 13464447 ∧ step3 32768 16 gStream .lazy .T (mergeItem .lazy .T) true = 3015963 ∧
+    pct 11596269 7056644 = 1643 ∧ pct 12864597 8359802 = 1539 ∧ pct 3777063 3161876 = 1195 ∧ pct 4422837 3807650 = 1162 ∧
+    vec3 128 8 .rowmax .T (mergePack * 100) = 44945 ∧ vec3 128 8 .lazy .T (mergePack * 100) = 14638 ∧ ddrBlock gStream 8 dH = 3002 ∧
+    16 * 8 * tRm16 / 10 = 23283 ∧ pct 44945 3002 = 14972 ∧ pct 14638 3002 = 4876 ∧ usR 11596269 = 11596 ∧ usR 3777063 = 3777 := by decide
+theorem bm3_vec (G : Nat) (v : Var) (c : Conv) (m mt : Nat) (h1 : ddrBlock G mt dH ≤ vec3 (blockOf mt) mt v c m)
+    (h2 : mmaBlock mt dH ≤ vec3 (blockOf mt) mt v c m) (h3 : loaderBlock mt ≤ vec3 (blockOf mt) mt v c m) :
+    blockMax3 G v c m mt = vec3 (blockOf mt) mt v c m := by
+  unfold blockMax3; rw [Nat.max_eq_right h1, Nat.max_eq_left h2, Nat.max_eq_left h3]
+theorem bm3_ddr (G : Nat) (v : Var) (c : Conv) (m mt : Nat) (h1 : vec3 (blockOf mt) mt v c m ≤ ddrBlock G mt dH)
+    (h2 : mmaBlock mt dH ≤ ddrBlock G mt dH) (h3 : loaderBlock mt ≤ ddrBlock G mt dH) :
+    blockMax3 G v c m mt = ddrBlock G mt dH := by
+  unfold blockMax3; rw [Nat.max_eq_left h1, Nat.max_eq_left h2, Nat.max_eq_left h3]
+/-- the 12 128-vs-25 750 question is MOOT: S4 loses to two passes at 32k for EVERY merge count on the rowmax chain (and on the
+    lazy chain) — the 128-token block pays the per-fragment calls twice as often per token as the 256-token block -/
+theorem T3r_s4_dominated_rowmaxT (m : Nat) : step3 32768 16 gStream .rowmax .T m false < step3 32768 16 gStream .rowmax .T m true := by
+  have hm4 : mtS 16 false = 4 := by decide
+  have hm8 : mtS 16 true = 8 := by decide
+  have hp2 : pn 32768 16 false = 256 := by decide
+  have hp1 : pn 32768 16 true = 256 := by decide
+  have hb4 : blockOf 4 = 256 := by decide
+  have hb8 : blockOf 8 = 128 := by decide
+  have hmo : mtOf (rowsOf 16 gH) = 8 := by decide
+  have hd4 : drainBlock 4 dH (rDrainM 4) = 344 := by decide
+  have hd8 : drainBlock 8 dH (rDrainM 8) = 459 := by decide
+  have htl : tailOps 32768 8 dH = 0 := by decide
+  have hddr4 : ddrBlock gStream 4 dH = 6005 := by decide
+  have hddr8 : ddrBlock gStream 8 dH = 3002 := by decide
+  have hmm4 : mmaBlock 4 dH = 1920 := by decide
+  have hmm8 : mmaBlock 8 dH = 1920 := by decide
+  have hl4 : loaderBlock 4 = 1236 := by decide
+  have hl8 : loaderBlock 8 = 1236 := by decide
+  have h4 : blockMax3 gStream .rowmax .T m 4 = vec3 (blockOf 4) 4 .rowmax .T m :=
+    bm3_vec _ _ _ _ _ (by rw [hb4, hddr4, vec3_rowmaxT_256_4]; omega) (by rw [hb4, hmm4, vec3_rowmaxT_256_4]; omega)
+      (by rw [hb4, hl4, vec3_rowmaxT_256_4]; omega)
+  have h8 : blockMax3 gStream .rowmax .T m 8 = vec3 (blockOf 8) 8 .rowmax .T m :=
+    bm3_vec _ _ _ _ _ (by rw [hb8, hddr8, vec3_rowmaxT_128_8]; omega) (by rw [hb8, hmm8, vec3_rowmaxT_128_8]; omega)
+      (by rw [hb8, hl8, vec3_rowmaxT_128_8]; omega)
+  unfold step3
+  rw [hm4, hm8, hp2, hp1, h4, h8]
+  unfold fixed3
+  rw [hb4, hb8, hd4, hd8, hmo, htl, vec3_rowmaxT_256_4, vec3_rowmaxT_128_8, unitT32]
+  unfold rVecCore; omega
+theorem T3r_s4_dominated_lazyT (m : Nat) : step3 32768 16 gStream .lazy .T m false < step3 32768 16 gStream .lazy .T m true := by
+  have hm4 : mtS 16 false = 4 := by decide
+  have hm8 : mtS 16 true = 8 := by decide
+  have hp2 : pn 32768 16 false = 256 := by decide
+  have hp1 : pn 32768 16 true = 256 := by decide
+  have hb4 : blockOf 4 = 256 := by decide
+  have hb8 : blockOf 8 = 128 := by decide
+  have hmo : mtOf (rowsOf 16 gH) = 8 := by decide
+  have hd4 : drainBlock 4 dH (rDrainM 4) = 344 := by decide
+  have hd8 : drainBlock 8 dH (rDrainM 8) = 459 := by decide
+  have htl : tailOps 32768 8 dH = 0 := by decide
+  have hddr4 : ddrBlock gStream 4 dH = 6005 := by decide
+  have hddr8 : ddrBlock gStream 8 dH = 3002 := by decide
+  have hmm4 : mmaBlock 4 dH = 1920 := by decide
+  have hmm8 : mmaBlock 8 dH = 1920 := by decide
+  have hl4 : loaderBlock 4 = 1236 := by decide
+  have hl8 : loaderBlock 8 = 1236 := by decide
+  have h4 : blockMax3 gStream .lazy .T m 4 = vec3 (blockOf 4) 4 .lazy .T m :=
+    bm3_vec _ _ _ _ _ (by rw [hb4, hddr4, vec3_lazyT_256_4]; omega) (by rw [hb4, hmm4, vec3_lazyT_256_4]; omega)
+      (by rw [hb4, hl4, vec3_lazyT_256_4]; omega)
+  have h8 : blockMax3 gStream .lazy .T m 8 = vec3 (blockOf 8) 8 .lazy .T m :=
+    bm3_vec _ _ _ _ _ (by rw [hb8, hddr8, vec3_lazyT_128_8]; omega) (by rw [hb8, hmm8, vec3_lazyT_128_8]; omega)
+      (by rw [hb8, hl8, vec3_lazyT_128_8]; omega)
+  unfold step3
+  rw [hm4, hm8, hp2, hp1, h4, h8]
+  unfold fixed3
+  rw [hb4, hb8, hd4, hd8, hmo, htl, vec3_lazyT_256_4, vec3_lazyT_128_8, unitT32]
+  unfold rVecCore; omega
+
+/-! ## T3r_regime, T3r_rows_star — the regime map at 32k on the measured chain (`[R3-regime-*]` `[R3-rows*-*]`) -/
+/-- at the design's page (167.0): t = 1, 2 are the KV stream on every chain (822 / 828 / 815 / 817 µs); t = 4 is vector-bound on the
+    rowmax chain (1 225 µs, 1.48x) and on lazy-C (896), DDR-bound on lazy-T (826); t = 8 and 16 are vector-bound on every chain -/
+theorem T3r_regime : usR (step3H 32768 1 gShuf64 .rowmax .T) = 822 ∧ usR (step3H 32768 1 gShuf64 .rowmax .C) = 828 ∧
+    usR (step3H 32768 1 gShuf64 .lazy .T) = 815 ∧ usR (step3H 32768 1 gShuf64 .lazy .C) = 817 ∧
+    step3H 32768 2 gShuf64 .rowmax .T = step3H 32768 1 gShuf64 .rowmax .T ∧ step3H 32768 2 gShuf64 .lazy .T = step3H 32768 1 gShuf64 .lazy .T ∧
+    usR (step3H 32768 4 gShuf64 .rowmax .T) = 1225 ∧ usR (step3H 32768 4 gShuf64 .rowmax .C) = 1563 ∧
+    usR (step3H 32768 4 gShuf64 .lazy .T) = 826 ∧ usR (step3H 32768 4 gShuf64 .lazy .C) = 896 ∧
+    usR (step3H 32768 8 gShuf64 .rowmax .T) = 3556 ∧ usR (step3H 32768 8 gShuf64 .rowmax .C) = 4212 ∧
+    usR (step3H 32768 8 gShuf64 .lazy .T) = 1593 ∧ usR (step3H 32768 8 gShuf64 .lazy .C) = 1919 ∧
+    usR (step3H 32768 16 gShuf64 .rowmax .T) = 7057 ∧ usR (step3H 32768 16 gShuf64 .rowmax .C) = 8360 ∧
+    usR (step3H 32768 16 gShuf64 .lazy .T) = 3162 ∧ usR (step3H 32768 16 gShuf64 .lazy .C) = 3808 ∧
+    step3H 32768 4 gStream .rowmax .T = step3H 32768 4 gShuf64 .rowmax .T ∧ usR (step3H 32768 4 gStream .lazy .T) = 791 := by decide
+/-- the binding engine per cell is the per-block comparison: vector / DDR shares 73.9 / 94.3 / 44.0 / 54.0 % (t = 1, 2),
+    147.7 / 188.5 / 88.1 / 108.0 % (t = 4, mt = 2), 435.6 / 516.1 / 195.2 / 235.1 % (t = 8, 16; mt = 4, 256-token blocks) at 167.0 -/
+theorem T3r_regime_binding : pct 593664 803648 = 739 ∧ pct 757504 803648 = 943 ∧ pct 353920 803648 = 440 ∧ pct 434048 803648 = 540 ∧
+    pct 1187328 803648 = 1477 ∧ pct 1515008 803648 = 1885 ∧ pct 707904 803648 = 881 ∧ pct 868160 803648 = 1080 ∧
+    pct 3500800 803584 = 4356 ∧ pct 4147328 803584 = 5161 ∧ pct 1568512 803584 = 1952 ∧ pct 1888896 803584 = 2351 ∧
+    64 * vec3 512 1 .rowmax .T (mergePack * 100) = 593664 ∧ 64 * ddrBlock gShuf64 1 dH = 803648 ∧
+    64 * vec3 512 2 .rowmax .T (mergePack * 100) = 1187328 ∧ 128 * vec3 256 4 .rowmax .T (mergePack * 100) = 3500800 ∧ 128 * ddrBlock gShuf64 4 dH = 803584 := by decide
+/-- rows*: the vector chain reaches the block from mt = 2 (rows* = 32, t ≥ 4 at g = 8) on the rowmax chain at either convention and
+    on lazy-C; from mt = 3 (rows* = 48, t ≥ 6) on lazy-T. Round 2's native corner said 112 (mt = 7) -/
+theorem T3r_rows_star : vec3 (blockOf 1) 1 .rowmax .T (mergePack * 100) < ddrBlock gStream 1 dH ∧ ddrBlock gStream 2 dH ≤ vec3 (blockOf 2) 2 .rowmax .T (mergePack * 100) ∧
+    vec3 (blockOf 1) 1 .rowmax .C (mergePack * 100) < ddrBlock gStream 1 dH ∧ ddrBlock gStream 2 dH ≤ vec3 (blockOf 2) 2 .rowmax .C (mergePack * 100) ∧
+    vec3 (blockOf 1) 1 .lazy .T (mergePack * 100) < ddrBlock gStream 1 dH ∧ vec3 (blockOf 2) 2 .lazy .T (mergePack * 100) < ddrBlock gStream 2 dH ∧
+    ddrBlock gStream 3 dH ≤ vec3 (blockOf 3) 3 .lazy .T (mergePack * 100) ∧
+    vec3 (blockOf 1) 1 .lazy .C (mergePack * 100) < ddrBlock gStream 1 dH ∧ ddrBlock gStream 2 dH ≤ vec3 (blockOf 2) 2 .lazy .C (mergePack * 100) ∧
+    vec3 (blockOf 2) 2 .rowmax .T (mergePack * 100) = 18552 ∧ vec3 (blockOf 2) 2 .lazy .T (mergePack * 100) = 11061 ∧
+    vec3 (blockOf 3) 3 .lazy .T (mergePack * 100) = 9190 ∧ ddrBlock gStream 3 dH = 6005 ∧ 2 * 16 = 32 ∧ 3 * 16 = 48 ∧ ceilDiv 32 8 = 4 ∧ ceilDiv 48 8 = 6 := by decide
+
+/-! ## T3r_form — closed forms of the t = 1 step for every L and every G ≤ 174.6 (the block is DDR-bound on each chain) -/
+theorem T3r_form_rowmaxT (L G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    step3H L 1 G .rowmax .T = ((16 * (L / 16) + 511) / 512) * (20971520 / G) + 18820 + (L % 16) * 8192 * 137 * 10 / 43200 := by
+  have hm : mtS 1 false = 1 := by decide
+  have hp : pSel (rowsOf 1 gH) false = 1 := by decide
+  have hmo : mtOf (rowsOf 1 gH) = 1 := by decide
+  have hbl : blockOf 1 = 512 := by decide
+  have hddr : ddrBlock G 1 dH = 20971520 / G := by unfold ddrBlock tn coreTok dH; rw [hbl]
+  have hge : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  have hv : vec3 (blockOf 1) 1 .rowmax .T (mergePack * 100) = 9276 := by decide
+  have hmm : mmaBlock 1 dH = 960 := by decide
+  have hl : loaderBlock 1 = 618 := by decide
+  have hd : drainBlock 1 dH (rDrainM 1) = 268 := by decide
+  have hmax : blockMax3 G .rowmax .T (mergePack * 100) 1 = 20971520 / G := by
+    rw [← hddr]; exact bm3_ddr _ _ _ _ _ (by rw [hv, hddr]; omega) (by rw [hmm, hddr]; omega) (by rw [hl, hddr]; omega)
+  unfold step3H step3 pn
+  rw [hm, hp, hmax]
+  unfold fixed3
+  rw [hv, hd, hmo, unitT32]
+  unfold nblocks lMatrix ceilDiv tailOps dH rVecCore
+  rw [hbl]
+  simp only [Nat.one_mul, Nat.mul_one]
+  have ha : (16 * (L / 16) + 512 - 1) / 512 = (16 * (L / 16) + 511) / 512 := by omega
+  rw [ha]
+  omega
+theorem T3r_form_rowmaxC (L G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    step3H L 1 G .rowmax .C = ((16 * (L / 16) + 511) / 512) * (20971520 / G) + 23940 + (L % 16) * 8192 * 269 * 10 / 43200 := by
+  have hm : mtS 1 false = 1 := by decide
+  have hp : pSel (rowsOf 1 gH) false = 1 := by decide
+  have hmo : mtOf (rowsOf 1 gH) = 1 := by decide
+  have hbl : blockOf 1 = 512 := by decide
+  have hddr : ddrBlock G 1 dH = 20971520 / G := by unfold ddrBlock tn coreTok dH; rw [hbl]
+  have hge : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  have hv : vec3 (blockOf 1) 1 .rowmax .C (mergePack * 100) = 11836 := by decide
+  have hmm : mmaBlock 1 dH = 960 := by decide
+  have hl : loaderBlock 1 = 618 := by decide
+  have hd : drainBlock 1 dH (rDrainM 1) = 268 := by decide
+  have hmax : blockMax3 G .rowmax .C (mergePack * 100) 1 = 20971520 / G := by
+    rw [← hddr]; exact bm3_ddr _ _ _ _ _ (by rw [hv, hddr]; omega) (by rw [hmm, hddr]; omega) (by rw [hl, hddr]; omega)
+  unfold step3H step3 pn
+  rw [hm, hp, hmax]
+  unfold fixed3
+  rw [hv, hd, hmo, unitC32]
+  unfold nblocks lMatrix ceilDiv tailOps dH rVecCore
+  rw [hbl]
+  simp only [Nat.one_mul, Nat.mul_one]
+  have ha : (16 * (L / 16) + 512 - 1) / 512 = (16 * (L / 16) + 511) / 512 := by omega
+  rw [ha]
+  omega
+theorem T3r_form_lazyT (L G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    step3H L 1 G .lazy .T = ((16 * (L / 16) + 511) / 512) * (20971520 / G) + 11328 + (L % 16) * 8192 * 137 * 10 / 43200 := by
+  have hm : mtS 1 false = 1 := by decide
+  have hp : pSel (rowsOf 1 gH) false = 1 := by decide
+  have hmo : mtOf (rowsOf 1 gH) = 1 := by decide
+  have hbl : blockOf 1 = 512 := by decide
+  have hddr : ddrBlock G 1 dH = 20971520 / G := by unfold ddrBlock tn coreTok dH; rw [hbl]
+  have hge : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  have hv : vec3 (blockOf 1) 1 .lazy .T (mergePack * 100) = 5530 := by decide
+  have hmm : mmaBlock 1 dH = 960 := by decide
+  have hl : loaderBlock 1 = 618 := by decide
+  have hd : drainBlock 1 dH (rDrainM 1) = 268 := by decide
+  have hmax : blockMax3 G .lazy .T (mergePack * 100) 1 = 20971520 / G := by
+    rw [← hddr]; exact bm3_ddr _ _ _ _ _ (by rw [hv, hddr]; omega) (by rw [hmm, hddr]; omega) (by rw [hl, hddr]; omega)
+  unfold step3H step3 pn
+  rw [hm, hp, hmax]
+  unfold fixed3
+  rw [hv, hd, hmo, unitT32]
+  unfold nblocks lMatrix ceilDiv tailOps dH rVecCore
+  rw [hbl]
+  simp only [Nat.one_mul, Nat.mul_one]
+  have ha : (16 * (L / 16) + 512 - 1) / 512 = (16 * (L / 16) + 511) / 512 := by omega
+  rw [ha]
+  omega
+
+/-! ## T3r_crossover — attention = one 398 µs GEMV unit, re-instantiated (`[R3-crossover-*]`) -/
+/-- the stream basis per block (12 011 ns at 174.6) is unchanged, so over the 512-multiples the crossover is k ≥ 33
+    (L_eq = 16 896) iff the fixed cost lies in [1 637, 13 647] ns; round 2's 7 074 passed, the measured rowmax chain's 18 820 does not -/
+theorem T3r_crossover_iff (fixed : Nat) : (∀ k, tGemvUnit ≤ 12011 * k + fixed ↔ 33 ≤ k) ↔ (1637 ≤ fixed ∧ fixed ≤ 13647) := by
+  unfold tGemvUnit; constructor
+  · intro h
+    have h32 := h 32
+    have h33 := (h 33).mpr (Nat.le_refl 33)
+    exact ⟨by omega, Nat.le_of_not_lt (fun hc => by have := h32.mp (by omega); omega)⟩
+  · intro h k; constructor <;> intro hh <;> omega
+theorem T3r_crossover_iff_32 (fixed : Nat) (h1 : 13648 ≤ fixed) (h2 : fixed ≤ 25658) : ∀ k, tGemvUnit ≤ 12011 * k + fixed ↔ 32 ≤ k := by
+  unfold tGemvUnit; intro k; constructor <;> intro hh <;> omega
+/-- CORRECTION (round-2 banner "T_crossover: 16 896 survives"): on the measured per-row-max chain the crossover over the
+    512-multiples moves to k ≥ 32, L_eq = 16 384 (403.2 µs there, 391.2 at 15 872) at the 174.6 basis — the stream term is
+    unchanged, the fixed cost (18 820) is not; the lazy chain (11 328) keeps k ≥ 33 = 16 896 -/
+theorem T3r_crossover_rowmaxT (k : Nat) : (tGemvUnit ≤ step3H (512 * k) 1 gStream .rowmax .T ↔ 32 ≤ k) ∧
+    step3H 16384 1 gStream .rowmax .T = 403172 ∧ step3H 15872 1 gStream .rowmax .T = 391161 ∧ 32 * 512 = 16384 := by
+  refine ⟨?_, by decide, by decide, by decide⟩
+  rw [T3r_form_rowmaxT _ _ (by decide) (by decide)]; unfold tGemvUnit gStream rGemm
+  constructor <;> intro h <;> omega
+theorem T3r_crossover_rowmaxC (k : Nat) : (tGemvUnit ≤ step3H (512 * k) 1 gStream .rowmax .C ↔ 32 ≤ k) ∧
+    step3H 16384 1 gStream .rowmax .C = 408292 ∧ step3H 15872 1 gStream .rowmax .C = 396281 := by
+  refine ⟨?_, by decide, by decide⟩
+  rw [T3r_form_rowmaxC _ _ (by decide) (by decide)]; unfold tGemvUnit gStream rGemm
+  constructor <;> intro h <;> omega
+theorem T3r_crossover_lazyT (k : Nat) : (tGemvUnit ≤ step3H (512 * k) 1 gStream .lazy .T ↔ 33 ≤ k) ∧
+    step3H 16896 1 gStream .lazy .T = 407691 ∧ step3H 16384 1 gStream .lazy .T = 395680 := by
+  refine ⟨?_, by decide, by decide⟩
+  rw [T3r_form_lazyT _ _ (by decide) (by decide)]; unfold tGemvUnit gStream rGemm
+  constructor <;> intro h <;> omega
+/-- on the attention path's own measured rates the crossover is one block lower still: k ≥ 31 (15 872) at 167.0 / 169.0 / 169.2
+    on the rowmax chain, k ≥ 31 / 32 / 32 on the lazy chain -/
+theorem T3r_crossover_meas (k : Nat) : (tGemvUnit ≤ step3H (512 * k) 1 gShuf64 .rowmax .T ↔ 31 ≤ k) ∧
+    (tGemvUnit ≤ step3H (512 * k) 1 gSeq64 .rowmax .T ↔ 31 ≤ k) ∧ (tGemvUnit ≤ step3H (512 * k) 1 g256 .rowmax .T ↔ 31 ≤ k) ∧
+    (tGemvUnit ≤ step3H (512 * k) 1 gShuf64 .lazy .T ↔ 31 ≤ k) ∧ (tGemvUnit ≤ step3H (512 * k) 1 gSeq64 .lazy .T ↔ 32 ≤ k) ∧
+    (tGemvUnit ≤ step3H (512 * k) 1 g256 .lazy .T ↔ 32 ≤ k) := by
+  rw [T3r_form_rowmaxT _ _ (by decide) (by decide), T3r_form_rowmaxT _ _ (by decide) (by decide), T3r_form_rowmaxT _ _ (by decide) (by decide),
+    T3r_form_lazyT _ _ (by decide) (by decide), T3r_form_lazyT _ _ (by decide) (by decide), T3r_form_lazyT _ _ (by decide) (by decide)]
+  unfold tGemvUnit gShuf64 gSeq64 g256
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+/-- over every L: the rowmax chain crosses monotonically at L ≥ 15 888 (the 32nd block charged from its first 16-token group);
+    the lazy chain is NOT monotone between 15 888 and 16 399 (the vector tail decides: L mod 16 ≥ 9) and crosses for good at 16 400 -/
+theorem T3r_crossover_anyL_rowmaxT (L : Nat) : tGemvUnit ≤ step3H L 1 gStream .rowmax .T ↔ 15888 ≤ L := by
+  rw [T3r_form_rowmaxT _ _ (by decide) (by decide)]; unfold tGemvUnit gStream rGemm
+  constructor <;> intro h <;> omega
+theorem T3r_crossover_anyL_lazyT (L : Nat) : tGemvUnit ≤ step3H L 1 gStream .lazy .T ↔ 16400 ≤ L ∨ (15888 ≤ L ∧ 9 ≤ L % 16) := by
+  rw [T3r_form_lazyT _ _ (by decide) (by decide)]; unfold tGemvUnit gStream rGemm
+  constructor <;> intro h <;> omega
+theorem T3r_crossover_anyL_cells : step3H 15888 1 gStream .rowmax .T = 403172 ∧ step3H 15887 1 gStream .rowmax .T = 395057 ∧
+    step3H 15897 1 gStream .lazy .T = 398018 ∧ step3H 15904 1 gStream .lazy .T = 395680 ∧ step3H 16400 1 gStream .lazy .T = 407691 ∧
+    step3H 16399 1 gStream .lazy .T = 399576 := by decide
+
+/-! ## T_gqa_matrix at the measured rho32 = 1.37 (`[R3-gqa-137]`): the general theorem in hundredths, and its cells -/
+theorem T_gqa_matrix_100 (rows rho100 d : Nat) (hd : 0 < d) (h : 200 ≤ rows * rho100) :
+    4 * d * 80 * 432 * 100 < 4 * rows * d * rho100 * 10 * 1746 := by
+  have e1 : 4 * rows * d * rho100 * 10 * 1746 = 4 * d * (rows * rho100 * 10 * 1746) := by ac_rfl
+  have e2 : 4 * d * 80 * 432 * 100 = 4 * d * (80 * 432 * 100) := by ac_rfl
+  rw [e1, e2]
+  apply (Nat.mul_lt_mul_left (by omega)).mpr
+  have := Nat.mul_le_mul_right (10 * 1746) h
+  omega
+/-- the vector-dot route is 69.2 % of the KV stream at rows = 1 (DDR-bound), 138.4 % at rows = 2, 553.7 % at rows = 8 (g = 8, t = 1):
+    T_gqa_matrix survives unchanged — compute-bound for every rows ≥ 2 since 2 x 1.37 ≥ 2 -/
+theorem T3r_gqa_137 : dotRatioT100 1 rho32_100 128 = 692 ∧ dotRatioT100 2 rho32_100 128 = 1384 ∧ dotRatioT100 4 rho32_100 128 = 2768 ∧
+    dotRatioT100 8 rho32_100 128 = 5537 ∧ dotRatioT100 16 rho32_100 128 = 11074 ∧ dotRatioT100 1 rho32_100 128 < 1000 ∧
+    200 ≤ 2 * rho32_100 ∧ 2 * rho32_100 < 400 ∧ 4 * 1 * 128 * 137 * 10 * 1746 < 4 * 128 * 80 * 432 * 100 := by decide
+theorem T3r_gqa_137_g (t g d : Nat) (hd : 0 < d) (hg : 2 ≤ g) (ht : 1 ≤ t) :
+    4 * d * 80 * 432 * 100 < 4 * rowsOf t g * d * rho32_100 * 10 * 1746 := by
+  apply T_gqa_matrix_100 (rowsOf t g) rho32_100 d hd
+  unfold rowsOf rho32_100
+  have h1 : g ≤ t * g := Nat.le_mul_of_pos_left g ht
+  omega
+
+/-! ## T3r_fleet_G — the E21 fleet statement re-instantiated (`[R3-fleet-G-*]`): G* with the measured fixed cost -/
+/-- MoE 128k: attention-bound iff G ≤ 168.3 (rowmax-T) / 167.9 (lazy-T) / 168.6 (rowmax-C) — round 2 said 167.7 at fixed 7 074 -/
+theorem T3r_fleet_G_moe_128k_rowmaxT (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ step3H 131072 1 G .rowmax .T ↔ G ≤ 1683 := by
+  rw [T3r_form_rowmaxT 131072 G h1 h2]; unfold tLayerMoe
+  have key : 12457 ≤ 20971520 / G ↔ G ≤ 1683 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_128k_lazyT (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ step3H 131072 1 G .lazy .T ↔ G ≤ 1679 := by
+  rw [T3r_form_lazyT 131072 G h1 h2]; unfold tLayerMoe
+  have key : 12486 ≤ 20971520 / G ↔ G ≤ 1679 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_128k_rowmaxC (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ step3H 131072 1 G .rowmax .C ↔ G ≤ 1686 := by
+  rw [T3r_form_rowmaxC 131072 G h1 h2]; unfold tLayerMoe
+  have key : 12437 ≤ 20971520 / G ↔ G ≤ 1686 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+/-- the other cells on the headline chain: dense 32k ≤ 7.3, dense 128k ≤ 29.4, MoE 32k ≤ 42.0 (round 2: 41.9); both 1M cells at every G -/
+theorem T3r_fleet_G_dense_32k (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerDense ≤ step3H 32768 1 G .rowmax .T ↔ G ≤ 73 := by
+  rw [T3r_form_rowmaxT 32768 G h1 h2]; unfold tLayerDense
+  have key : 284972 ≤ 20971520 / G ↔ G ≤ 73 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_dense_128k (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerDense ≤ step3H 131072 1 G .rowmax .T ↔ G ≤ 294 := by
+  rw [T3r_form_rowmaxT 131072 G h1 h2]; unfold tLayerDense
+  have key : 71243 ≤ 20971520 / G ↔ G ≤ 294 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_32k (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ step3H 32768 1 G .rowmax .T ↔ G ≤ 420 := by
+  rw [T3r_form_rowmaxT 32768 G h1 h2]; unfold tLayerMoe
+  have key : 49827 ≤ 20971520 / G ↔ G ≤ 420 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_1M (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerDense ≤ step3H 1048576 1 G .rowmax .T ∧ tLayerMoe ≤ step3H 1048576 1 G .rowmax .T := by
+  rw [T3r_form_rowmaxT 1048576 G h1 h2]; unfold tLayerDense tLayerMoe
+  have : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  constructor <;> omega
+/-- THE DESIGN CONSTRAINT (`[R3-fleet-G-*-moe-128k]`): at the design's 64 KiB page (167.0) the MoE-128k cell is ATTENTION-bound
+    on every chain (by 25.7 / 18.2 / 30.8 µs = 0.8 / 0.6 / 1.0 % of the 3.21 ms layer); at 256 KiB (169.2) it is weights-bound
+    (by 16.0 / 23.5 / 10.9 µs = 0.5 / 0.7 / 0.3 %); at 16 KiB attention-bound by 9.4 %; at the W8 ceiling 174.6 weights-bound by 3.6 % -/
+theorem T3r_fleet_moe_128k_cells : tLayerMoe ≤ step3H 131072 1 gShuf64 .rowmax .T ∧ tLayerMoe ≤ step3H 131072 1 gShuf64 .lazy .T ∧
+    tLayerMoe ≤ step3H 131072 1 gShuf64 .rowmax .C ∧ tLayerMoe ≤ step3H 131072 1 gShuf16 .rowmax .T ∧
+    step3H 131072 1 g256 .rowmax .T < tLayerMoe ∧ step3H 131072 1 g256 .lazy .T < tLayerMoe ∧ step3H 131072 1 g256 .rowmax .C < tLayerMoe ∧
+    step3H 131072 1 gSeq64 .rowmax .T < tLayerMoe ∧ step3H 131072 1 gStream .rowmax .T < tLayerMoe ∧
+    3233412 - tLayerMoe = 25693 ∧ 3225920 - tLayerMoe = 18201 ∧ 3238532 - tLayerMoe = 30813 ∧ tLayerMoe - 3191684 = 16035 ∧
+    tLayerMoe - 3184192 = 23527 ∧ tLayerMoe - 3196804 = 10915 ∧ tLayerMoe - 3195524 = 12195 ∧ tLayerMoe - 3093636 = 114083 ∧
+    pct 25693 tLayerMoe = 8 ∧ pct 16035 tLayerMoe = 5 ∧ pct 301661 tLayerMoe = 94 ∧ pct 114083 tLayerMoe = 36 ∧
+    gShuf64 ≤ 1683 ∧ 1683 < gSeq64 ∧ 1683 < g256 ∧ gShuf64 ≤ 1679 ∧ 1679 < g256 ∧ 1686 < g256 := by decide
+/-- CORRECTION of the HW-MAP reading "MoE-128k stays stream-bound at 64 KiB by 0.7 GB/s": the round-2 line (T_fleet_G_moe_128k) is
+    "attention-bound iff G ≤ 167.7", and the measured 167.0 is BELOW it — attention-bound already in the round-2 model, and the
+    bare stream (256 x 12 557 = 3 214 592 ns) exceeds the MoE layer (3 207 719) before any fixed cost -/
+theorem T3r_moe_128k_direction : tLayerMoe ≤ stepH 131072 1 gShuf64 cvNat 1 ∧ gShuf64 ≤ 1677 ∧ 256 * ddrBlock gShuf64 1 128 = 3214592 ∧
+    tLayerMoe < 3214592 ∧ 3214592 - tLayerMoe = 6873 ∧ stepH 131072 1 gShuf64 cvNat 1 = 3221666 :=
+  ⟨(T_fleet_G_moe_128k gShuf64 (by decide) (by decide)).mpr (by decide), by decide, by decide, by decide, by decide, by decide⟩
+
+/-! ## T3r_page — the page-size verdict (`[R3-page-*]`): measured sizes, two-tier on the measured base, the c_pg rule -/
+/-- 16 / 64 / 256 KiB: 153.8 / 167.0 / 169.2 — 64 KiB is 1.3 % under 256 KiB, 16 KiB 7.9 % under 64 KiB and 9.1 % under 256 KiB;
+    tail waste per layer-sequence 0.25 / 1.00 / 4.00 MiB -/
+theorem T3r_page_sizes : pct (g256 - gShuf64) g256 = 13 ∧ pct (gShuf64 - gShuf16) gShuf64 = 79 ∧ pct (g256 - gShuf16) g256 = 91 ∧
+    16 * (16384 - 256) = 258048 ∧ 16 * (65536 - 256) = 1044480 ∧ 16 * (262144 - 256) = 4190208 ∧ 1044480 ≤ MiB ∧ 4190208 ≤ 4 * MiB ∧
+    gPage3 65536 39 = 1669 ∧ gPage3 65536 0 = 1690 ∧ gPage3 262144 0 = 1692 ∧ gPage3 16384 59 = 1538 ∧ gPage3 262144 3 = 1692 := by decide
+/-- two-tier (1 MiB extents + 64 KiB tails) on the measured base, versus 64 KiB and 256 KiB pages at the same extra per-page cost c:
+    c = 0: 169.2 vs 169.0 / 169.2; c = 39 (measured lower bound): 169.1 vs 166.9 / 168.7 (+1.3 %); c = 100: +3.2 %; c = 153: +4.7 %;
+    c = 160: +5.0 %; c = 200: +6.1 %; c = 500: +15.1 %; c = 2 µs: +58.3 % — the ALTERNATIVES verdict (−13.2 % at 0.5 µs) assumed c = 500 -/
+theorem T3r_page_tier : gTier3 32768 0 = 1692 ∧ gTier3 32768 39 = 1691 ∧ gTier3 32768 100 = 1689 ∧ gTier3 32768 153 = 1687 ∧
+    gTier3 32768 160 = 1687 ∧ gTier3 32768 200 = 1685 ∧ gTier3 32768 500 = 1675 ∧ gTier3 32768 2000 = 1626 ∧
+    gTier3 34768 39 = 1687 ∧ gTier3 1048576 39 = 1691 ∧ gTier3 1048576 2000 = 1626 ∧
+    gPage3 65536 100 = 1637 ∧ gPage3 65536 153 = 1611 ∧ gPage3 65536 159 = 1608 ∧ gPage3 65536 160 = 1607 ∧ gPage3 65536 200 = 1588 ∧
+    gPage3 65536 500 = 1455 ∧ gPage3 65536 2000 = 1027 ∧ gPage3 262144 39 = 1687 ∧ gPage3 262144 500 = 1626 ∧ gPage3 262144 2000 = 1457 ∧
+    pct (gTier3 32768 39 - gPage3 65536 39) (gPage3 65536 39) = 13 ∧ pct (gTier3 32768 153 - gPage3 65536 153) (gPage3 65536 153) = 47 ∧
+    pct (gTier3 32768 159 - gPage3 65536 159) (gPage3 65536 159) = 49 ∧ pct (gTier3 32768 160 - gPage3 65536 160) (gPage3 65536 160) = 50 ∧
+    pct (gTier3 32768 500 - gPage3 65536 500) (gPage3 65536 500) = 151 ∧ pct (gTier3 32768 2000 - gPage3 65536 2000) (gPage3 65536 2000) = 583 := by decide
+
+/-! ## T3r_drain, T3r_sigma, T3r_online, T3r_i8 — the remaining measured rows -/
+/-- the measured drain rates satisfy the round-2 iff thresholds (35 / 69 / 123 / 164 tenths) with 43.6x / 32.2x / 21.2x / 17.4x margin:
+    the drain is hidden at every mt (268 / 368 / 283 / 344 ns per block = 2.2 / 3.1 / 4.7 / 5.7 %) -/
+theorem T3r_drain_hidden : drainBlock 1 128 rDrain1 ≤ ddrBlock gStream 1 128 ∧ drainBlock 2 128 rDrain2 ≤ ddrBlock gStream 2 128 ∧
+    drainBlock 3 128 rDrain3 ≤ ddrBlock gStream 3 128 ∧ drainBlock 4 128 rDrain4 ≤ ddrBlock gStream 4 128 :=
+  ⟨(T2_drain_threshold rDrain1 (by decide)).1.mpr (by decide), (T2_drain_threshold rDrain2 (by decide)).2.1.mpr (by decide),
+   (T2_drain_threshold rDrain3 (by decide)).2.2.1.mpr (by decide), (T2_drain_threshold rDrain4 (by decide)).2.2.2.mpr (by decide)⟩
+theorem T3r_drain_cells : x10 rDrain1 35 = 436 ∧ x10 rDrain2 69 = 322 ∧ x10 rDrain3 123 = 211 ∧ x10 rDrain4 164 = 174 ∧
+    drainBlock 1 128 rDrain1 = 268 ∧ drainBlock 2 128 rDrain2 = 368 ∧ drainBlock 3 128 rDrain3 = 283 ∧ drainBlock 4 128 rDrain4 = 344 ∧
+    pct 268 12011 = 22 ∧ pct 368 12011 = 31 ∧ pct 283 6005 = 47 ∧ pct 344 6005 = 57 ∧ rDrainM 1 = rDrain1 ∧ rDrainM 4 = rDrain4 ∧ rDrainM 8 = rDrain4 := by decide
+/-- sigma_s = 19.9 ns: the 256-compare tail is 5 094 ns = 42.4 % of the block (round 2: 512 ns, 4.3 %), under the 47 ns bind line
+    (T2_sigma instantiated at 20); 16 reduce-max calls (2 910 ns, 24.2 %) replace it, 1.7x cheaper; an all-scalar max is 13.5x the block -/
+theorem T3r_sigma : 256 * sigma3 / 10 = 5094 ∧ pct 5094 12011 = 424 ∧ scalarBlock 1 20 < ddrBlock gStream 1 128 ∧ sigma3 / 10 < 47 ∧
+    16 * tRm16 / 10 = 2910 ∧ pct 2910 12011 = 242 ∧ 5094 * 10 / 2910 = 17 ∧ 8192 * sigma3 / 10 = 163020 ∧ x10 163020 12011 = 135 := by decide
+/-- online vs two-pass at the measured merge: re-streaming K costs 6 204 ns per block at 169.0 against 596 (pack) / 1 501 / 1 790 ns
+    (itemised T / C): online wins 10.4x / 4.1x / 3.4x (round 2: 18x at 7 000) -/
+theorem T3r_online : tn (512 * 128 * 2 * 8) gSeq64 = 6204 ∧ 6204 * 10 / 596 = 104 ∧ 6204 * 10 / 1501 = 41 ∧ 6204 * 10 / 1790 = 34 ∧
+    tn (512 * 128 * 2 * 8) gStream = 6005 ∧ 6005 * 10 / 596 = 100 := by decide
+/-- KV-int8 on the measured chain at 167.0: 612 µs / 19.0 ms on the rowmax chain — VECTOR-bound (the halved stream 6 278 ns per block
+    is under the 9 276 ns chain), 413 µs / 12.9 ms DDR-bound on the lazy chain: the KV-int8 lever pays only with the lazy chain -/
+theorem T3r_i8 : step3I8 32768 1 gShuf64 .rowmax .T (mergePack * 100) = 612484 ∧ step3I8 1048576 1 gShuf64 .rowmax .T (mergePack * 100) = 19016068 ∧
+    step3I8 32768 1 gShuf64 .lazy .T (mergePack * 100) = 413152 ∧ step3I8 1048576 1 gShuf64 .lazy .T (mergePack * 100) = 12869696 ∧
+    64 * ddrBlock gShuf64 1 dH / 2 = 401824 ∧ 64 * vec3 512 1 .rowmax .T (mergePack * 100) = 593664 ∧ 401824 < 593664 ∧
+    64 * vec3 512 1 .lazy .T (mergePack * 100) = 353920 ∧ 353920 < 401824 ∧ usR 612484 = 612 ∧ usR 413152 = 413 := by decide
+
+/-! ## T3r_moved — the round-2 headline cells beside their round-3 replacements (`[R3-moved-*]`) -/
+theorem T3r_moved : stepH 32768 1 gStream cvNat 1 = 775778 ∧ step3H 32768 1 gStream .rowmax .T = 787524 ∧ step3H 32768 1 gShuf64 .rowmax .T = 822468 ∧
+    stepH 32768 1 gStream cvWorst 2 = 851470 ∧ step3H 32768 1 gShuf64 .rowmax .C = 827588 ∧
+    stepH 32768 1 gPage64k cvNat 1 = 903650 ∧ stepH 32768 1 gGather3x cvNat 1 = 2313186 ∧ step3H 32768 1 g3x .rowmax .T = 2324932 ∧
+    step3H 32768 1 gShuf16 .rowmax .T = 891460 ∧ stepH 32768 16 gStream cvNat 1 = 1553714 ∧ step3H 32768 16 gShuf64 .rowmax .T = 7056644 ∧
+    stepS4 32768 gStream cvNat 1 = 1032465 ∧ step3S4 32768 gShuf64 .rowmax .T = 11596269 ∧ stepI8H 32768 gStream cvNat 1 = 391426 ∧
+    step3I8 32768 1 gShuf64 .rowmax .T (mergePack * 100) = 612484 ∧
+    stepH 1048576 1 gStream cvNat 1 = 24605602 ∧ step3H 1048576 1 gShuf64 .rowmax .T = 25735556 ∧ step3H 1048576 1 gStream .rowmax .T = 24617348 ∧
+    stepH 1048576 1 gStream cvWorst 2 = 26324046 ∧ step3H 1048576 1 gShuf64 .rowmax .C = 25740676 ∧ stepH 1048576 1 gPage64k cvNat 1 = 28697506 ∧
+    stepH 1048576 16 gStream cvNat 1 = 49209394 ∧ step3H 1048576 16 gShuf64 .rowmax .T = 224106244 ∧
+    pct (822468 - 775778) 775778 = 60 ∧ pct (25735556 - 24605602) 24605602 = 46 ∧ pct (787524 - 775778) 775778 = 15 ∧
+    fixedNs 32768 cvNat 1 rDrainA mergeOps 1 1 128 = 7074 ∧ fixed3 32768 .rowmax .T (mergePack * 100) 1 1 = 18820 := by decide
