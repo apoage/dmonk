@@ -28,7 +28,7 @@ Prior submissions lost points by assuming an unmeasured rate equals its
 best case and by proposing experiments whose failure mode is invisible.
 Skewed routing must come out as a THEOREM over a skew parameter, not prose.
 Deliverable: DESIGN-2.md at repo root, ten numbered sections per
-PROBLEM-2.md. Per-model results are published anonymized. A second session
+PROBLEM-2.md. A second session
 will later demand a machine-checked proof of your derivations (core-Lean,
 integer arithmetic, claim ledger) — write your derivations now the way you
 would want to formalize them, and keep every constant traceable.

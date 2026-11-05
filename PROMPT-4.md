@@ -43,7 +43,7 @@ Prior submissions lost points by assuming unmeasured rates equal their best
 case and by exchange schedules that serialize worse than analyzed — model
 the host bounce as a real contended resource. Deliverable: DESIGN-4.md at
 repo root, ten numbered sections per PROBLEM-4.md. Per-model results are
-published anonymized. A later session will demand a machine-checked proof
+A later session will demand a machine-checked proof
 (core-Lean, integer arithmetic, claim ledger) of the feasibility bounds and
 crossover derivations.
 ```
