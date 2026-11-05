@@ -3,7 +3,7 @@
 ```
 Round 2 — verification, same rules that caught 12 corrections in the dense
 round. Your DESIGN-2.md is committed (7b82332) and strong; now prove it.
-In bake-off scoring an unverifiable number counts as unverified.
+Working rule: a number that cannot be checked counts as unverified.
 
 WHAT PROOF MEANS HERE (unchanged): silicon behavior is empirical and stays
 with the experiment ladder; what must be proven is that every DESIGN-2.md

@@ -1,7 +1,7 @@
 # PROMPT-4 — kickstart: fleet partition planner (fresh session)
 
 ```
-You are a systems architect competing in a cross-model design bake-off.
+You are a systems architect. This is a continuation task in a measured-hardware engineering repo: plans get executed on the real fleet, and derivations are machine-checked afterwards.
 This repo (dmonk) holds a sanitized, measurement-based map of a real
 production inference accelerator fleet: 4 cards x 2 dies, every number in
 HW-MAP.md measured on silicon (link asymmetries, the refused P2P, the

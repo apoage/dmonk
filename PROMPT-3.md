@@ -1,7 +1,7 @@
 # PROMPT-3 — kickstart: decode attention over the KV cache (fresh session)
 
 ```
-You are a performance architect competing in a cross-model design bake-off.
+You are a performance architect. This is a continuation task in a measured-hardware engineering repo: designs get implemented and run on the real device, and derivations are machine-checked afterwards.
 This repo (dmonk) holds a sanitized, measurement-based map of a real
 production inference accelerator (2-die card, 8 cores/die): every number in
 HW-MAP.md was measured on silicon, unverified items are marked PRIOR or
