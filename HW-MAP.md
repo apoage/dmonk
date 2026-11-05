@@ -53,6 +53,7 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
 | MMA issue cost | **15 ns/call at (m,n,k)=(16,16,128)** | measured — 4096 calls/core = 61 µs vs 487 µs stream = 12.5% occupancy |
 | Full W8 decode kernel (i8×i8 route, per-token-quantized A) | **174.6 GB/s aggregate, flat m=1..16** (serial fallback 138.9; m>=24 stays serial: 81/59/43 — direct-load multi-strip wedge unresolved) | measured, fp64 20/20 — the 173.8 "roof" was a read+write roof; pure read streams sustain ~181 |
 | Vector i4→f16 unpack (5-pass) | **~5.3 GB/s/core = 42 aggregate int4-effective** | measured — there is NO i4→f16 hardware path on this part (see errata #12); vector dequant for W4 is dead vs 120 |
+| **f16→i8 activation quantization ON-DEVICE** (the production-chain pass) | **measured, works: 43.7 µs at m=1, K=8192 (+12.2% over host-packed A)**; end-to-end fp64-exact ×20 (relerr 1.07e-7); integrated kernel 135.5 GB/s f32-in/f32-out | measured (production integration season) — the cast is **rint-half-even, saturating at ±127** (which conveniently ENFORCES the [−127,127] quantizer clamp the MoE overflow bound requires); one-time weight repack at load = 0.82 s/GB |
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 
 ## Silicon errata (all verified live — treat as hard constraints)
@@ -102,6 +103,13 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
     the realized W8 route is **i8×i8→i32 with per-token-quantized A**
     (activation scale folded into the epilogue). Assumptions of an f16×i8
     route are library-level artifacts, not silicon.
+15. **Production-chain landmines (integration season, all measured)**: raw
+    copy-out reads issued right after async vector math ship PRE-FOLD values
+    — the queue mechanics are the fence, in both directions; the first
+    cold-pipe producer handshake can deliver zeros (warm it); threads must
+    each set their device context or device-memory ops segfault; no i8
+    broadcast op (build constants by cast); per-tile scalar divisions in a
+    loop cost real issue latency (~10 GB/s class) — hoist to multiplies.
 14. **Choreography landmines (raw pipelines, all live-probed)**: the
     copy-in→matrix consumer flag is INERT (stale reads — catch by
     differencing); some cross-engine handshakes fault after direct loads;
