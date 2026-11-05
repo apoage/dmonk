@@ -186,6 +186,40 @@ the page-table read (kept in US) and the per-tile barrier+MMA.
     Also: a verify variant driven by `reps` must force ≥ 1 work block when
     reps = 0 (a zero-iteration loop silently returns lane 0).
 
+## Concurrency & runtime behavior (all measured, season h)
+
+- **Continuous batching pipelines sequences**: N concurrent decode
+  sequences share ONE compute graph per step (batched rows ride the
+  kernel's flat m<=16 region); aggregate throughput 1.00 / 1.53 / 2.38 /
+  3.26x at 1/2/4/8 clients (queued control = exactly 1.00x). Utilization
+  gaps, not serialization, cap the curve. **Batching == pipelining for
+  weight-bound decode** (weights read once per step regardless of rows).
+- **Two instances on disjoint dies run at FULL solo speed concurrently**
+  (1.99x aggregate, both dies 89% busy) — no driver-level cross-process
+  serialization on separate devices. The instance-parallelism partition
+  (ALTERNATIVES.md) is mechanically unlocked.
+- Layer-split does NOT multiply single-sequence decode: +1.4% only (a
+  single sequence's chain is a serial dependency). Multi-stream throughput
+  comes from concurrency or spec-decode, not layer placement.
+- The STOCK vendor op path aborts on multi-sequence decode (the known
+  non-contiguous-output bug extends to every multi-slot step) — custom
+  kernels are mandatory for any concurrent serving.
+- Decode byte accounting at 100% custom-kernel coverage: GEMM 59.3 ms +
+  non-GEMM 7.7 ms vs 67 ms measured (11.5% residual); at m=8 the step
+  reads the SAME weight bytes (weights-once dividend byte-exact); the
+  per-sequence non-GEMM overhead erodes ~5% at fleet model scale.
+- Lazy softmax (fixed per-row shift + overflow guard): licensed for
+  qk-normalized models (guard trips 0.087-0.22% of steps, non-vacuous);
+  DEAD without qk-norm (scores reach ~1667, drift ~560). Check the target
+  model's normalization class first.
+- **Same-dst MMA chains: SPACING is the binding variable, not depth** —
+  interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
+  bidirectionally at depth >= 256 (filler results leak into chain chunks).
+  Rule: interleave >= 16 licenses any depth; never back-to-back same-dst.
+- Power-sensor witness caveat: card idles ~65 W with a model resident
+  (vs ~41 W cold) — the sensor discriminates per-DIE process activity,
+  not per-sequence batching; use throughput for batching verdicts.
+
 ## Verified layout geometry (for matrix-operand packs)
 
 **SETTLED BY MEASUREMENT (raw-MMA probes):** the i8 L0B fragment is
