@@ -63,9 +63,13 @@ size**:
 | 64 KiB | 169.0 GB/s | **167.0 GB/s** | 3101 / 3140 ns |
 | 256 KiB | 169.2 GB/s | 169.2 GB/s | 12391 / 12394 ns |
 
-**c_pg(64 KiB, shuffled − sequential) = 38 ns/page** — far below the 123 ns flip:
-the MoE-128k cell stays stream-bound at 64 KiB pages, with only 0.7 GB/s of margin
-(167.0 vs the 167.7 line). **MoE-32k (≤ 41.9) and dense (≤ 7.3/29.4) never flip;
+**c_pg(64 KiB, shuffled − sequential) = 38 ns/page.** CORRECTED (P3 round-3
+re-read — the original verdict below read the inequality backwards): the flip
+rule is attention-bound iff G <= 167.7, and shuffled G at 64 KiB is 167.0 <=
+167.7, so **the MoE-128k cell IS attention-bound at 64 KiB pages (by 0.8 %)
+and weights-bound at 256 KiB (by 0.5 %)** — page guidance: 256 KiB default,
+64 KiB where the allocator forces it (-1.3 %), never 16 KiB (-9.1 %).
+**MoE-32k (≤ 41.9) and dense (≤ 7.3/29.4) never flip;
 16 KiB pages DO flip MoE-128k attention-bound** (153.8 ≤ 167.7); both 1M cells
 attention-bound at every G (unchanged). Runtime page-size guidance: **≥ 64 KiB,
 prefer 256 KiB; the usual 4–16 KiB serving page is gather-bound for MoE-128k.**
