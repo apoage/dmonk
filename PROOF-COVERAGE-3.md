@@ -1,4 +1,4 @@
-# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md
+# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05)
 
 How to read a row: **Claim** quotes or paraphrases the DESIGN-3.md statement (section numbers refer to the
 corrected document); **Proof** names the theorem(s) in `proof/attn.lean` that fix the number; **attn.py** names
@@ -22,7 +22,140 @@ flat m = 1..16) as the pure-read roof class — the KV stream is read-only (the 
 recorded as the ceiling the kernel's choreography sits under (`Measured.rGemm`, `rDirect`, `rDdrRW`;
 T1_stream_roof gives the 3.8 % what-if).
 
-## Build status
+## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP commit 8a7079f)
+
+Round 3 adds no new design; it instantiates the round-2 model on the measured constants and proves every moved cell again.
+The round-2 sections below are kept verbatim (they remain true statements about the round-2 model and its branches); this
+section says which of their cells are superseded and by which theorem. Labels `[R3-*]` are printed by `python3 -I
+proof/attn.py` after the round-2 labels (which still print their round-2 values, so `diff` of the two outputs is exactly the
+`[R3-*]` block plus one header line); theorems `T3r_*` are the last 694 lines of `proof/attn.lean`.
+
+### Build status, round 3
+
+| Item | Result |
+|---|---|
+| Toolchain | Lean 4.35.0 (elan), Lake 5.0.0 — unchanged |
+| `lean proof/attn.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 6 s |
+| `cd proof && lake build` | **succeeds** (target `Attn`) |
+| Theorems in attn.lean | **199** = 121 (round 2, kept) + 78 (round 3: 61 `T3r_*` theorems + `T_gqa_matrix_100` + 16 helper lemmas `chain100_rowmax`, `chain100_lazy`, `unitT16/32`, `unitC16/32`, `vec3_rowmaxT_512`, `vec3_rowmaxC_512`, `vec3_lazyT_512`, `vec3_lazyC_512`, `vec3_rowmaxT_256_4`, `vec3_rowmaxT_128_8`, `vec3_lazyT_256_4`, `vec3_lazyT_128_8`, `bm3_vec`, `bm3_ddr`) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0; `#print axioms` over the 78 round-3 declarations: 38 depend on no axiom, 35 on `propext` + `Quot.sound`, 2 on `propext`, 3 on `propext` / `Quot.sound` / `Classical.choice` (the `omega` / `simp` standard set) |
+| Measured namespace `Measured3` | 23 constants, each with its HW-MAP row (E21 rates and per-page times at three sizes, E22 per-call latencies, c_exp, ρ32, σ_s, R_drain at mt = 1..4, the pack's merge count, the retained 3× what-if) |
+| Model `Design3` | `chain100` (the measured chain: `chainRowmax` = §3.2 as specified, `chainLazy` = §3.4), two explicit modelling choices as inductives (`Var` = rowmax / lazy, `Conv` = T throughput / C chained), `vec3`, `blockMax3`, `fixed3`, `step3`, `step3I8`, `gPage3` / `gTier3` on the measured per-page base, `dotRatioT100`; the merge count stays an explicit argument |
+| `python3 -I proof/attn.py` | 190 round-2 lines unchanged (one header line reworded) + 273 `[R3-*]` lines; `[R3-moved-*]` pairs every round-2 headline cell with its replacement |
+
+### The moved cells (round 2 → round 3; `[R3-moved-*]`, T3r_moved)
+
+Headline = the chain as specified (§3.2) at the throughput convention on the design's 64 KiB page (167.0); "174.6" = the same
+W8-kernel basis as round 2; "lazy" = the fixed-shift variant of §3.4.
+
+| Cell | Round 2 | Round 3 at 174.6 | Round 3 at 167.0 (headline) | lazy at 167.0 | Theorem |
+|---|---|---|---|---|---|
+| t = 1, 4k, stream / native | 103 µs | 115 (+11.4 %) | **119** (+15.6 %) | 112 | T3r_t1_4k |
+| t = 1, 32k, stream / native | 776 µs | 788 (+1.5 %) | **822** (+6.0 %) | 815 | T3r_t1_32k |
+| t = 1, 128k, stream / native | 3 082 µs | 3 094 | **3 233** (+4.9 %) | 3 226 | T3r_t1_128k |
+| t = 1, 1M, stream / native | 24 606 µs | 24 617 | **25 736** (+4.6 %) | 25 728 | T3r_t1_1M |
+| t = 1, 32k / 1M worst corner (poly, tree, ρ32 = 2; unreachable) | 851 / 26 324 | 793 / 24 622 (chained-latency corner) | **828 / 25 741** | 817 / 25 731 (lazy chained) | T3r_t1_*, T3r_worst_overrun |
+| t = 1, 32k / 1M page64k (c_pg = 0.5 µs) | 904 / 28 698 | — | **822 / 25 736** (measured 64 KiB); 812 / 25 402 at 256 KiB | | T3r_t1_* |
+| t = 1, 32k / 1M gather3x (c_pg ≈ 6 µs) | 2 313 / 73 803 | 2 325 / 73 814 (what-if at the measured base) | 891 / 27 943 (16 KiB, the measured worst page) | | T3r_t1_* |
+| t = 16, 32k / 1M two passes native | 1 554 / 49 209 (DDR-bound) | 7 057 / 224 106 (vector-bound, G-independent) | **7 057 / 224 106** | 3 162 / 100 410 | T3r_t16 |
+| S4 one pass, 32k / 1M | 1 032 / 32 388 | 11 596 / 368 280 | 11 596 / 368 280 | 3 777 / 119 944 | T3r_s4, T3r_s4_dominated_* |
+| KV-int8, 32k / 1M | 391 / 12 306 (DDR-bound) | 612 / 19 016 (vector-bound) | 612 / 19 016 | 413 / 12 870 (DDR-bound) | T3r_i8 |
+| fixed cost | 7 074 ns (2 × 1 489 + 4 096 drain at 10 GB/s) | 18 820 (2 × 9 276 + 268) | 18 820 | 11 328 | T3r_fixed |
+| vector share of the block at mt = 1 | 12.4 % (c_V = 7) … 106.9 % | 77.2 % spec / 98.5 % chained | 73.9 / 94.3 % | 46.0 / 54.0 % | T3r_chain_shares |
+| rows* (softmax ≥ stream per block) | 112 (native, ρ32 = 1) | 32 (spec, either convention) | 32 | 48 (T) / 32 (C) | T3r_rows_star |
+| regime at 32k, t = 4 / 8 / 16 | 783 / 785 / 1 554 (KV) | 1 225 / 3 556 / 7 057 (vector) | same | 826 (KV) / 1 593 / 3 162 | T3r_regime |
+| crossover L_eq (512-multiples) | 16 896 (k ≥ 33) | **16 384** (k ≥ 32) spec and chained; 16 896 lazy | 15 872 (k ≥ 31) spec; 15 872 lazy | | T3r_crossover_* |
+| crossover over every L | 16 400 | 15 888 spec (monotone); lazy: 16 400, non-monotone from 15 888 (L mod 16 ≥ 9) | | | T3r_crossover_anyL_* |
+| fleet G* MoE-128k | 167.7 | 168.3 spec / 168.6 chained / 167.9 lazy; verdict at 167.0: ATTENTION-bound | | | T3r_fleet_G_moe_128k_*, T3r_fleet_moe_128k_cells |
+| drain threshold vs measured | hidden iff ≥ 3.41 / 6.83 / 12.28 / 16.37 GB/s/core | measured 152.8 / 222.3 / 260.3 / 285.5: hidden, 43.6× / 32.2× / 21.2× / 17.4× | | | T3r_drain_hidden, T3r_drain_cells |
+| scalar tail | 512 ns (σ_s = 2 ns), 4.3 % | 5 094 ns at the measured 19.9 ns (42.4 %), replaced by 16 reduce calls = 2 910 ns | | | T3r_sigma |
+| merge | 7 000 lane-ops (assumption); 12 128 itemised | 25 750 (pack) / 64 851 itemised T / 77 354 itemised C; every verdict insensitive | | 9 820 itemised | T3r_merge_item, T3r_merge_threshold_* |
+| online vs two-pass | 18× (6 005 vs 324 ns) | 10.4× (6 204 vs 596) / 4.1× (vs 1 501) | | | T3r_online |
+| G(P) model | t_page = P/21.825 + c_pg, c_pg ∈ {0, 0.5, 2} µs | measured T_seq(P) + c: 793 / 3 101 / 12 391 ns at 16 / 64 / 256 KiB, c = 59 / 39 / 3 ns; the 174.6 base is 3.2 % too fast for this choreography | | | T3r_E21, T3r_E21_block |
+| two-tier pages (ALTERNATIVES §2.5) | −13.2 % of the step at c_pg = 0.5 µs | +1.3 % of G at the measured c_pg; ≥ 5 % iff c_pg ≥ 160 ns; dominated by 256 KiB pages | | | T3r_page_tier |
+| GEMV fractions 4k / 32k / 128k / 1M | 0.26 / 1.95 / 7.74 / 61.8 | 0.29 / 1.98 / 7.77 / 61.9 | 0.30 / 2.07 / 8.12 / 64.7 | | T3r_t1_* |
+
+### Corrections forced by the measurements (round 2 → round 3)
+
+| # | Where | Round 2 said | Now | Caught by |
+|---|---|---|---|---|
+| 1 | §0, §6.1 headline | 776 µs / 24.6 ms at t = 1 on the stream branch (174.6, c_pg = 0) | **822 µs / 25.7 ms** on the design's 64 KiB page (167.0 measured), 812 / 25.4 at 256 KiB, 788 / 24.6 at the 174.6 basis — the attention choreography streams at 169.0–169.2 (3.2 % under the W8 kernel) and the fixed cost is 18.8 µs | T3r_t1_*, T3r_E21 |
+| 2 | §0, §6.1 worst corner | 851 µs (poly exp + tree max at ρ32 = 2), +9.8 % | that corner is unreachable (both native ops exist, c_exp = 11.5 ≤ every line); the new worst corner is every call at its chained latency: **828 µs, +0.6 %**; at t = 1 the chained chain is 98.5 % of the block (175 ns of slack) | T3r_cexp_clears, T3r_t1_binding, T3r_worst_overrun |
+| 3 | §0, §6.2, §7 | t = 16 two passes 1 554 µs DDR-bound; verify batches DDR-bound up to t = 8 on the native corner; rows* = 112 | **7 057 µs vector-bound 4.5×**; softmax-bound from **t = 4** (1 225 µs); rows* = **32** — the per-row block max (16 reduce calls + tree + reel per fragment) does not shrink with the block | T3r_t16, T3r_regime, T3r_rows_star |
+| 4 | §0, §2.4 S4 | S4 1 032 µs, 1.5× better than two passes on the native branch; "7 000 vs 12 128 vs 25 750" flagged | **S4 is dead**: 11 596 µs at the pack merge, and worse than two passes for EVERY merge count on both chains (∀-merge theorem) — the question is moot | T3r_s4, T3r_s4_dominated_rowmaxT, T3r_s4_dominated_lazyT |
+| 5 | §6.3, round-2 banner | T_crossover survives: L_eq = 16 896 (k ≥ 33); any-L 16 400 | the stream basis (12 011 ns per block) is unchanged, but k ≥ 33 holds iff fixed ∈ [1 637, 13 647]; the measured chain's 18 820 gives **L_eq = 16 384 (k ≥ 32)** at 174.6 and **15 872** on the measured 167.0 / 169.0 / 169.2; any-L 15 888 (monotone); the fixed-shift variant keeps 16 896 at 174.6 and crosses at 16 400 any-L but NOT monotonically (L mod 16 ≥ 9 between 15 888 and 16 399) | T3r_crossover_iff, T3r_crossover_rowmaxT, T3r_crossover_meas, T3r_crossover_anyL_* |
+| 6 | §1.4, §10, HW-MAP E21 sentence | "MoE-128k stays stream-bound at 64 KiB by 0.7 GB/s (167.0 vs the 167.7 line)"; "flips at c_pg ≥ 123 ns" | T_fleet_G_moe_128k says attention-bound **iff G ≤ 167.7**, and 167.0 is below it: the cell is **ATTENTION-bound at 64 KiB** already in the round-2 model (the bare stream 3 214 592 ns > the 3 207 719 ns layer) and on every round-3 chain (by 0.6–1.0 %); weights-bound at 256 KiB by 0.3–0.7 %; the measured 64 KiB page sits 138 ns above the 174.6 base (> 123) because the choreography gap is 99 ns of it | T3r_moe_128k_direction, T3r_fleet_moe_128k_cells, T3r_E21 |
+| 7 | §1.4 G(P) table | G(64 KiB, 0) = 174.6; "3× slower" = c_pg ≈ 6 µs; page64k = 149.7 at 0.5 µs | measured 167.0 / 169.2 / 153.8 at 64 / 256 / 16 KiB; c_pg = 39 / 3 / 59 ns (lower bound); the 0.5 µs and 6 µs branches are retired to what-ifs | T3r_E21, T3r_E21_block, T3r_page_sizes |
+| 8 | ALTERNATIVES §2.5 / §9 gather row | two-tier pages dominate every fixed size (−13.2 % at 0.5 µs) | at the measured c_pg two-tier gains 1.3 %, the same as 256 KiB pages without compaction; ≥ 5 % iff c_pg ≥ 160 ns | T3r_page_tier |
+| 9 | §2.2 drain row, §6, §9 | R_drain assumed 10 GB/s on exposed rows; drain-on-vector corner +43.5 % | measured 152.8–285.5 GB/s/core: hidden at every mt (17–44×), both round-2 corners retired; the drain is 268 ns of the fixed cost | T3r_drain_hidden, T3r_drain_cells |
+| 10 | §2.2 scalar row, §9 | σ_s = 2 ns (512 ns tail); scalar-bound iff σ_s ≥ 47 | measured 19.9 ns: the tail would be 5 094 ns (42 %); the design uses 16 reduce-max calls (2 910 ns) instead; T2_sigma's line is still clear | T3r_sigma |
+| 11 | §3.1 merge, §3.1 online | 7 000 lane-ops (assumption); online wins 18× | 25 750 (pack) / 64 851 (itemised: the α reel's 20 small calls dominate); online wins 10.4× / 4.1× | T3r_merge_item, T3r_online |
+| 12 | §3.2 c_V table | c_V = 7 lane-ops per (score, row) on the native corner | the measured chain is 400 731 lane-eq per 8 192-score fragment (48.9 per score effective: 11.5 exp + 5.8 tree + 15.3 reduce calls + 4.9 reel + 8.2 f32 ops + 3.1 merge) | T3r_chain, T3r_chain_shares |
+| 13 | §0 route 1b, §7 | KV-int8 391 µs DDR-bound | 612 µs VECTOR-bound on the chain as specified; 413 µs DDR-bound only on the fixed-shift variant | T3r_i8 |
+| 14 | §2.2 fixed, §7 launch share | fixed 7 074 ns; launch floor 88 % of the 4k step | fixed 18 820 ns; launch floor 76 % of the 119 µs 4k step, fill/tail 16 % | T3r_fixed |
+| 15 | §3.2 step 2 | f32 tree with And(0x7FFFFFFF) + scalar tail | And<int32> is absent: the tree runs in f16 after a cast; the tail is 16 reduce-max calls | T3r_chain (definition `chainRowmax`) |
+| 16 | §0 "no other unknown moves the headline by more than 9.8 %" | | 0.7 % (the chained corner) at t = 1; the unknowns that matter are above t = 2 | T3r_worst_overrun |
+
+Not corrections (survivals): `T_gqa_matrix` at the measured ρ32 = 1.37 — 69.2 % of the stream at rows = 1, compute-bound for every
+rows ≥ 2 (T_gqa_matrix_100 in hundredths, T3r_gqa_137, T3r_gqa_137_g); the §4 buffers (L-independent, unchanged); the page
+bijections; the online-merge identity (T_online_exact holds for the fixed shift too); the E21 fleet lines for dense 32k / 128k and
+MoE 32k (7.3 / 29.4 / 42.0 — 41.9 in round 2) and both 1M cells (T3r_fleet_G_*).
+
+### The round-3 ledger (every `[R3-*]` label and every round-3 claim of DESIGN-3.md)
+
+Status words as in the round-2 ledger; "INPUT (season v1)" marks a HW-MAP 8a7079f measurement used as given; "A3" is the one
+new assumption (a 16-lane Duplicate / copy costs one chained f16 call, 46.4 ns); "T / C" is the modelling choice (throughput vs
+chained convention), carried as the headline / worst-corner pair, not proved either way.
+
+| # | Claim (round-3 text) | Proof | attn.py | Status |
+|---|---|---|---|---|
+| R1 | E21: shuffled − sequential = 59 / 39 / 3 ns at 16 / 64 / 256 KiB; the same pages against the 174.6 base 102 / 138 / 383 ns (138 > the 123 ns round-2 line); sequential gap 5.4 / 3.2 / 3.1 %; round-2 model G(64 KiB, 38 ns) = 172.4 would have said weights-bound; block DDR time 12 409 / 12 557 / 12 394 / 13 635 / 36 033 ns at 169.0 / 167.0 / 169.2 / 153.8 / 58.2 | T3r_E21, T3r_E21_block | [R3-E21-*] | INPUT (season v1) + PROVED arithmetic |
+| R2 | units: exp 11 784 lane-eq per 1 024-lane call = 11.5 per element; reduce-max 7 858 (f16) / 10 860 (f32) per call; chained f16 op 2 004 per call = 1.96 per lane, f32 2 747 = 2.69; ρ32 = 1.37 | T3r_units | [R3-units] | PROVED (conversion of INPUTs) |
+| R3 | f16 tree lane-ops 47 616 / 23 040 / 10 752 at blocks 512 / 256 / 128 (5.81 per score), = round 2's treeLaneOps | T3r_tree | [R3-tree-ops] | PROVED |
+| R4 | the 12 chain cells: spec 9 276 / 6 837 / 5 618 ns (T), 11 836 / 8 100 / 6 232 (C); lazy 5 530 / 3 063 / 1 829 (T), 6 782 / 3 689 / 2 142 (C); shares 77.2 / 98.5 / 46.0 / 56.5 % of 12 011, 73.9 / 94.3 / 44.0 at 12 557, 113.9 % at the 256-token block; 8-call t = 1 variant 7 820 ns (65.1 %); the item split 161 546 / 47 616 / 125 729 / 40 089 / 25 750 | T3r_chain, T3r_chain_shares | [R3-chain-*] | PROVED (A3 for the reel; T / C: DEFINITION; c_exp, per-call ns: INPUT) |
+| R5 | linear forms chain100(block, 1, merge 0) = 37 498 112 / 26 963 200 / 21 695 744 (spec T), 48 557 312 (spec C), 21 318 784 / 10 659 392 / 5 329 696 (lazy T), 26 725 504 (lazy C), and vec3 as a function of the merge | T3r_lin, vec3_rowmaxT_512, vec3_rowmaxC_512, vec3_lazyT_512, vec3_lazyC_512, vec3_rowmaxT_256_4, vec3_rowmaxT_128_8, vec3_lazyT_256_4, vec3_lazyT_128_8 (∀ merge) | [R3-lin-*] | PROVED ∀ merge |
+| R6 | merge itemisations 64 851 (spec T) / 77 354 (spec C) / 9 820 (lazy T) / 19 281 (lazy C) lane-eq = 1 501 / 1 790 / 227 / 446 ns; the pack's 25 750 = 596 ns; round 2's 7 000 = 162, 12 128 = 280 | T3r_merge_item | [R3-merge-*] | PROVED arithmetic; the pack's 25 750: INPUT (commit 8a7079f message) |
+| R7 | t = 1 DDR-bound at 174.6 iff merge ≤ 143 937 (spec T) / 33 345 (spec C) / 305 730 (lazy T) / 251 663 (lazy C) lane-eq; at 167.0 iff ≤ 167 524 / 56 932 / 329 317; the pack passes every line, the itemised spec-C chain exceeds its own | T3r_merge_threshold_rowmaxT, _rowmaxC, _lazyT, _lazyC, T3r_merge_threshold_167 (∀ merge, iff), T3r_merge_cells | [R3-merge-threshold-*] | PROVED ∀ merge |
+| R8 | t = 1 DDR-bound iff c_exp ≤ 25.92 (spec T) / 45.67 (lazy T) / 12.42 (spec C) at 174.6, 28.80 at 167.0; the measured 11.5 clears every round-3 line and every round-2 line (56 / 51 / 24 / 19; c_V = 18 / 23 at c_exp = 12) | T3r_cexp_threshold (∀ c_exp, iff), T3r_cexp_clears | [R3-cexp-threshold-*] | PROVED ∀ c_exp |
+| R9 | t = 1 cells: 4k 115 / 120 / 107, 119 / 124 / 112, 118 / 123 / 110, 128 / 133 / 120, 307 / 312 / 300 µs; 32k 788 / 793 / 780, 822 / 828 / 815, 812 / 817 / 805, 891 / 897 / 884, 2 325 / 2 330 / 2 317; 128k 3 094 … 9 236; 1M 24 617 … 73 807 (G ∈ {174.6, 167.0, 169.2, 153.8, 58.2} × {spec T, spec C, lazy T}); wall 210 / 913 / 25 827; eff 140.7 / 163.2 / 166.0 / 166.9 (170.4 / 165.3 at 174.6 / 256 KiB); × GEMV 0.30 / 2.07 / 8.12 / 64.7 | T3r_t1_4k, T3r_t1_32k, T3r_t1_128k, T3r_t1_1M | [R3-t1-*] | PROVED |
+| R10 | every t = 1 cell is DDR-bound; the chained chain is under the 174.6 block by 175 ns | T3r_t1_binding | — | PROVED |
+| R11 | fixed cost 18 820 / 23 940 / 11 328 / 13 832 ns (spec T / spec C / lazy T / lazy C) = 2 vector blocks + the 268 ns drain; vector tail at L mod 16 = 15: 3 896 (T) / 7 651 (C) | T3r_fixed | [R3-moved-fixed] | PROVED |
+| R12 | worst-corner overrun +0.7 % / +0.6 % / +0.0 % (32k at 174.6 / 167.0, 1M); lazy = 99.0–99.1 % of the headline | T3r_worst_overrun | [R3-worst-overrun-*] | PROVED |
+| R13 | t = 16 two passes: 7 057 / 224 106 (spec T), 8 360 / 265 494 (spec C), 3 162 / 100 410 (lazy T), 3 808 (lazy C) µs at 32k / 1M, G-independent (the 167.0 and 174.6 cells coincide); per 256-token block 27 350 / 12 254 ns = 455.5 / 204.1 % of 6 005; 4k 930, 128k 28 061 | T3r_t16 | [R3-t16-*] | PROVED |
+| R14 | S4 one pass: 11 596 / 368 280 (spec T), 12 865 (spec C), 3 777 / 119 944 (lazy T), 4 423 (lazy C) µs; at the itemised merges 13 464 / 3 016; S4 / two-pass = 164.3 / 153.9 / 119.5 / 116.2 %; per 128-token block 44 945 / 14 638 ns against 3 002 of DDR, the 16 reduce calls alone 23 283 ns | T3r_s4 | [R3-t16-*] [R3-s4-chain] | PROVED |
+| R15 | S4 loses to two passes at 32k for EVERY merge count on the chain as specified and on the fixed-shift variant (the 12 128-vs-25 750 question is moot) | T3r_s4_dominated_rowmaxT, T3r_s4_dominated_lazyT (∀ merge); helpers bm3_vec, bm3_ddr | [R3-s4-threshold-*] | PROVED ∀ merge |
+| R16 | regime map at 32k (167.0): t = 1, 2: 822 / 828 / 815 / 817 KV; t = 4: 1 225 / 1 563 vector, 826 KV, 896 vector; t = 8: 3 556 / 4 212 / 1 593 / 1 919 vector; t = 16: 7 057 / 8 360 / 3 162 / 3 808; t = 2 equals t = 1; the vector-bound cells equal their 174.6 twins; shares 73.9 / 94.3 / 44.0 / 54.0, 147.7 / 188.5 / 88.1 / 108.0, 435.6 / 516.1 / 195.2 / 235.1 % | T3r_regime, T3r_regime_binding | [R3-regime-*] | PROVED |
+| R17 | rows* = 32 (spec T, spec C, lazy C: mt = 2 binds, mt = 1 does not) and 48 (lazy T: mt = 3 binds, mt ≤ 2 do not); t ≥ 4 / 6 at g = 8 | T3r_rows_star | [R3-rows*-*] | PROVED |
+| R18 | closed forms of the t = 1 step for every L and every 0 < G ≤ 174.6 on the three chains: nb(L)·⌊20 971 520 / G⌋ + 18 820 / 23 940 / 11 328 + the vector tail | T3r_form_rowmaxT, T3r_form_rowmaxC, T3r_form_lazyT (∀ L, G) | — | PROVED ∀ L, G |
+| R19 | over the 512-multiples, k ≥ 33 (L_eq = 16 896) for every k iff the fixed cost lies in [1 637, 13 647] ns; k ≥ 32 for every k if it lies in [13 648, 25 658] | T3r_crossover_iff (∀ fixed, iff), T3r_crossover_iff_32 | [R3-crossover-iff] | PROVED ∀ fixed |
+| R20 | at 174.6: spec T and spec C cross at k ≥ 32 (16 384; 403 172 / 408 292 ns there, 391 161 / 396 281 at 15 872), lazy T at k ≥ 33 (16 896; 407 691, 395 680 at 16 384) | T3r_crossover_rowmaxT, T3r_crossover_rowmaxC, T3r_crossover_lazyT (∀ k, iff) | [R3-crossover-*-stream174] | PROVED ∀ k — CORRECTION of the round-2 survival claim (row 5 above) |
+| R21 | on the measured rates: spec T crosses at k ≥ 31 (15 872) at 167.0 / 169.0 / 169.2; lazy T at k ≥ 31 / 32 / 32 | T3r_crossover_meas (∀ k, iff) | [R3-crossover-*-seq64k] [R3-crossover-*-shuf64k] [R3-crossover-*-p256k] | PROVED ∀ k |
+| R22 | over every L: spec T ⟺ L ≥ 15 888 (monotone); lazy T ⟺ L ≥ 16 400 ∨ (15 888 ≤ L ∧ L mod 16 ≥ 9) — not monotone (398 018 at 15 897, 395 680 at 15 904, 399 576 at 16 399, 407 691 at 16 400) | T3r_crossover_anyL_rowmaxT, T3r_crossover_anyL_lazyT (∀ L, iff), T3r_crossover_anyL_cells | [R3-crossover-*] | PROVED ∀ L |
+| R23 | T_gqa_matrix at the measured ρ32: the general inequality in hundredths (4·d·80·432·100 < 4·rows·d·ρ100·10·1746 for every rows·ρ100 ≥ 200, every d > 0), hence for every g ≥ 2, t ≥ 1; cells 69.2 / 138.4 / 276.8 / 553.7 / 1 107.4 % at rows = 1 / 2 / 4 / 8 / 16; rows = 1 is DDR-bound (69.2 %) | T_gqa_matrix_100 (∀ rows ρ d), T3r_gqa_137, T3r_gqa_137_g (∀ t g d) | [R3-gqa-137] | PROVED (∀) — T_gqa_matrix survives |
+| R24 | fleet lines with the measured fixed cost: MoE-128k attention-bound iff G ≤ 168.3 (spec T) / 167.9 (lazy T) / 168.6 (spec C); dense 32k ≤ 7.3, dense 128k ≤ 29.4, MoE 32k ≤ 42.0; both 1M cells at every G ≤ 174.6 | T3r_fleet_G_moe_128k_rowmaxT, _lazyT, _rowmaxC, T3r_fleet_G_dense_32k, T3r_fleet_G_dense_128k, T3r_fleet_G_moe_32k, T3r_fleet_G_1M (∀ G ≤ 1746, iff) | [R3-fleet-G-*] | PROVED ∀ G (layer times: D4, fleet.lean T_layer) |
+| R25 | MoE-128k verdict cells: attention-bound at 167.0 on every chain (by 25 693 / 18 201 / 30 813 ns = 0.8 / 0.6 / 1.0 %) and at 153.8 (9.4 %); weights-bound at 169.0 (12 195 ns), 169.2 (16 035 / 23 527 / 10 915 = 0.5 / 0.7 / 0.3 %) and 174.6 (114 083 = 3.6 %) | T3r_fleet_moe_128k_cells | [R3-fleet-G-*-moe-128k] | PROVED |
+| R26 | HW-MAP's E21 verdict sentence is inverted: the round-2 theorem instantiated at 167.0 gives attention-bound (3 221 666 ≥ 3 207 719), 167.0 ≤ 167.7, and the bare stream 256 × 12 557 = 3 214 592 exceeds the layer by 6 873 ns | T3r_moe_128k_direction (instantiates T_fleet_G_moe_128k) | [R3-fleet-moe128k-direction] | PROVED — CORRECTION of HW-MAP's reading (the measurement itself stands) |
+| R27 | page sizes: 64 KiB 1.3 % under 256 KiB, 16 KiB 7.9 % under 64 KiB and 9.1 % under 256 KiB; tail waste 258 048 / 1 044 480 / 4 190 208 B (0.25 / 1 / 4 MiB); G_page3 cells 169.0 / 166.9 / 169.2 / 153.8 | T3r_page_sizes | [R3-page-*] | PROVED |
+| R28 | two-tier G on the measured base at c = 0 / 39 / 100 / 153 / 160 / 200 / 500 / 2 000 ns: 169.2 / 169.1 / 168.9 / 168.7 / 168.7 / 168.5 / 167.5 / 162.6 at 32k (and 1M), 168.7 at 34 768 and 39 ns; 64 KiB pages 169.0 / 166.9 / 163.7 / 161.1 / 160.8 / 160.7 / 158.8 / 145.5 / 102.7; 256 KiB 168.7 / 167.1 / 167.0 / 162.6 / 145.7; the gain 1.3 / 4.7 / 4.9 / 5.0 / 15.1 / 58.3 % at 39 / 153 / 159 / 160 / 500 / 2 000 — the "≥ 5 % iff c ≥ 160" rule holds at the 159 / 160 pair and every listed cell (monotonicity in c not formalised) | T3r_page_tier | [R3-page-cpg*] [R3-page-tier-rule] | PROVED (cells) |
+| R29 | the measured drain rates satisfy the round-2 iff thresholds at mt = 1..4 (instantiating T2_drain_threshold); margins 43.6× / 32.2× / 21.2× / 17.4×; 268 / 368 / 283 / 344 ns per block = 2.2 / 3.1 / 4.7 / 5.7 %; rDrainM at mt ≥ 4 uses the mt = 4 figure | T3r_drain_hidden, T3r_drain_cells | [R3-drain] | PROVED (R_drain: INPUT) |
+| R30 | σ_s = 19.9 ns: 256-compare tail 5 094 ns = 42.4 % (round 2: 512 ns), under the 47 ns line (T2_sigma at 20); 16 reduce calls 2 910 ns = 24.2 %, 1.7× cheaper; all-scalar max 163 020 ns = 13.5× the block | T3r_sigma | [R3-sigma] | PROVED (σ_s: INPUT) |
+| R31 | online vs two-pass: re-streamed K 6 204 ns per block at 169.0 (6 005 at 174.6) vs 596 / 1 501 / 1 790 ns → 10.4× / 4.1× / 3.4× | T3r_online | [R3-online] | PROVED |
+| R32 | KV-int8: 612 µs / 19.0 ms (spec T, vector-bound: 64 × 6 278 / 2 = 401 824 < 593 664), 413 µs / 12.9 ms (lazy T, DDR-bound: 353 920 < 401 824) | T3r_i8 | [R3-i8-t1] | PROVED |
+| R33 | the moved-cell pairs (round-2 value beside the round-3 value for 32k and 1M: stream, worst, page64k, gather3x, t = 16, S4, KV-int8, fixed) and the +6.0 % / +4.6 % / +1.5 % deltas | T3r_moved | [R3-moved-*] | PROVED |
+| R34 | the helper lemmas chain100_rowmax, chain100_lazy, unitT16, unitT32, unitC16, unitC32 (definitional unfoldings) and the forms of R5, R15, R18 | — | — | cited above (no claim of their own) |
+
+**Coverage, round 3: 34 rows, 34 with a theorem (100 %); 33 PROVED (18 universally quantified over merge, c_exp, L, G, k, fixed,
+rows, ρ, d, t, g), 1 row of helpers; 0 orphans — every `T3r_*` theorem and every round-3 helper is cited in R1–R34 or in the
+corrections table; every `[R3-*]` label of attn.py is cited (the label families `[R3-t1-*]`, `[R3-t16-*]`, `[R3-regime-*]`,
+`[R3-fleet-G-*]`, `[R3-page-cpg*]`, `[R3-moved-*]`, `[R3-crossover-*]`, `[R3-chain-*]`, `[R3-merge-*]`, `[R3-cexp-threshold-*]`,
+`[R3-lin-*]`, `[R3-rows*-*]`, `[R3-worst-overrun-*]`, `[R3-E21-*]` expand to the 273 printed lines).** The empirical residue after
+round 3: E23 (H-F16 geometry), E24 (the tile mix at the measured rates; S4's exactly-full L0A no longer matters), E25 (c_copy),
+E26 (drift, snapshots), E27 (numerics), E28 (the realised ms), the new **E35** (the fixed-shift variant's exception rate), and
+within E22 the two open items A3 (small-call latency) and T-vs-C (whether independent reels pipeline).
+
+## Round 2 (kept) — build status, corrections and ledger as submitted on 2026-11-04
+
+### Build status (round 2)
 
 | Item | Result |
 |---|---|
@@ -37,7 +170,7 @@ T1_stream_roof gives the 3.8 % what-if).
 | Measured namespace | 20 plain definitions, each with the HW-MAP row it comes from (rates, MMA cost, lane rate, launch floor, SRAM sizes, errata caps), plus PROBLEM-3's 398 µs unit (D1: DESIGN.md route 1, not a measurement — the 384 µs value at the measured 174.6 is carried as a variant) and DESIGN-4's two per-layer times (D4: fleet.lean `T_layer`); none states a DESIGN-3.md conclusion |
 | The t = 16 variant split | explicit: two-pass = `stepH L 16 …` with `pSel = passesOf 128 = 2`, `mtSel = mtPass 128 = 4`, 256-token blocks (T4_t16_passes, T4_t16_*); single-pass S4 = `stepS4` = `stepNs … true` with `pSel = 1`, `mtSel = mtOf 128 = 8`, 128-token blocks, single-buffered P, Q without −Q (T4_s4, T4_s4_chain, T_buffers_s4); the S4 merge sensitivity is T3_merge_itemised |
 
-## Corrections forced by formalization (round 1 → round 2)
+### Corrections forced by formalization (round 1 → round 2)
 
 | # | Where | Round 1 said | Now | Caught by |
 |---|---|---|---|---|
@@ -63,7 +196,7 @@ T1_stream_roof gives the 3.8 % what-if).
 New results found while proving (not corrections): (a) **what gather rate each fleet cell needs** — a DESIGN-4 cell is attention-bound iff G ≤ G*: dense 32k 7.3 GB/s, dense 128k 29.4, MoE 32k 41.9, **MoE 128k 167.7** (so the page64k branch at c_pg = 0.5 µs, and any c_pg ≥ 123 ns at 64 KiB pages, already flips the MoE 128k cell), both 1M cells attention-bound at every G ≤ 174.6 (T_fleet_G_*, iff over every G ≤ 174.6); (b) the vector-dot route theorem holds for every head dim (d cancels exactly) and needs rows·ρ32 ≥ 2 — at rows = 1, ρ32 = 1 (no GQA) the dot route is DDR-bound at 50.5 % like route M, not worse (T3_vecroute_d_cancels, T3_vecroute_rows1); (c) the online merge is exact for any multiplicative exp, proved as a list identity (T_online_exact); (d) the K and V page maps are bijections onto the even bytes of the page with explicit inverses (T_kpage_*, T_vpage_*); (e) the model's partial-block charge and the 384 µs variant of the GEMV unit (row 16 above).
 
 **Load-bearing verdicts.** `T_crossover` **survives unchanged**: attention time equals one 398 µs GEMV unit at L = 16 896 as the smallest 512-multiple (403.4 µs there, 391.4 at 16 384), proved as an iff over k for every 512·k, with the closed form of the step for every L (T_step_t1_form) and the finer any-L crossover 16 400 recorded as a tightening. `T_gqa_matrix` **survives unchanged and in a stronger form**: the vector-dot route costs 0.505·rows·ρ32 of the KV stream time (the 10 cells of `[A3-vecroute-*]`, and d cancels exactly), and the strict inequality "compute-bound" is proved for every rows·ρ32 ≥ 2 — hence for every g ≥ 2 at any t ≥ 1 and either lane rate (T_gqa_matrix, T_gqa_matrix_g); the one shape outside it (rows = 1, ρ32 = 1, no GQA) is a tie at 50.5 %, not a counterexample.
-## The ledger (DESIGN-3.md Appendix A rows 1–27, then the claims the appendix did not list)
+### The round-2 ledger (DESIGN-3.md Appendix A rows 1–27, then the claims the appendix did not list)
 
 | # | Claim | Proof | attn.py | Status |
 |---|---|---|---|---|
