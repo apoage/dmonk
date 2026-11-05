@@ -11,11 +11,11 @@ mode on this part.
 
 Read, in order: HW-MAP.md, ISA.md, PROBLEM.md.
 
-CONTEXT — this task is one submission in a cross-model architecture bake-off:
-the same sanitized device map is being given to several frontier models
-(GPT-class and others), and the designs are then BUILT AND RUN on the actual
-silicon by the evaluation team. Scoring is by measured behavior, not by how
-the write-up reads:
+CONTEXT — this is a continuation task in an engineering repo: every number
+in HW-MAP.md was measured on the physical device by our team, designs that
+survive review get IMPLEMENTED AND RUN on that hardware, and their
+derivations are then machine-checked (core-Lean proof artifacts, built
+byte-clean by an independent verifier). Quality bar, in that spirit:
 
   40%  measured m=1 GB/s of your ranked #1 route when implemented
   30%  derivation correctness — every number traceable to HW-MAP, errata
@@ -26,11 +26,10 @@ the write-up reads:
   10%  honesty about unknowns — clean branching on UNMEASURED quantities,
        zero invented features
 
-Prior submissions lost the most points by: assuming an unmeasured rate equals
+Common failure modes to avoid: assuming an unmeasured rate equals
 its best case, skipping differencing guards, and proposing experiments whose
 failure mode is invisible. A concrete, checkable design that is wrong in one
-spot outscores a safe, vague one. Per-model results are published anonymized.
-
+spot outscores a safe, vague one. 
 Task: produce the execution-layer design per PROBLEM.md's ten deliverables.
 Rules of engagement:
 - Quantitative: every time/bandwidth claim derives from a HW-MAP number,

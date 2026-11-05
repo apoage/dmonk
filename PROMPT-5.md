@@ -55,7 +55,6 @@ DELIVERABLE: ALTERNATIVES.md at repo root: (1) the ranked alternative
 table across all four problems; (2) for each of the top five: the design
 sketch, the arithmetic, the errata-survival argument, the experiment;
 (3) the fusion map (which designs share streams/buffers/launches);
-(4) a claims ledger in the established format. Per-model results are
-published anonymized; a later session will demand proofs of whatever you
+(4) a claims ledger in the established format. a later session will demand proofs of whatever you
 claim, so write derivations you would want to formalize.
 ```
