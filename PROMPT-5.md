@@ -1,7 +1,7 @@
 # PROMPT-5 — cross-problem second-solution search (pattern matching over known solutions)
 
 ```
-You are a performance architect in a cross-model bake-off. This repo now
+You are a performance architect. This repo now
 contains four completed, mostly proof-verified designs for one real device:
 DESIGN.md (dense quant GEMM, 174.6 measured), DESIGN-2.md (MoE grouped GEMM),
 DESIGN-3.md (attention), DESIGN-4.md (fleet planner) — plus the measured map

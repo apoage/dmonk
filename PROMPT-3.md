@@ -33,8 +33,7 @@ each. Scoring, same as prior rounds:
 
 Prior submissions lost points by assuming unmeasured rates equal their best
 case, and by O(L) memory creeping into "streaming" designs. Deliverable:
-DESIGN-3.md at repo root, ten numbered sections per PROBLEM-3.md. Per-model
-results are published anonymized. A later session will demand a
+DESIGN-3.md at repo root, ten numbered sections per PROBLEM-3.md. A later session will demand a
 machine-checked proof of your derivations (core-Lean, integer arithmetic,
 claim ledger) — write derivations you would want to formalize.
 ```
