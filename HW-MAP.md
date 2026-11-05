@@ -22,12 +22,56 @@ inference accelerator card; nothing here is spec-sheet marketing.
 | Unit | Capability | Measured throughput |
 |---|---|---|
 | Matrix unit | native **16×16×16** MAC fragment; f16×f16→f32, i8×i8→i32, f16×i8→f32 | **17.8–26.6 TFLOPS/die** fp16 (n=8k/2k; flat over 8 s+, no throttle) |
-| Vector unit | 128-lane reels, elementwise/tensor ops, casts | **~40 fp16 lanes/cycle/core sustained** (count-mode Mul/Add/Cast uniform — operand/issue bound, not FLOP bound) |
+| Vector unit | 128-lane reels, elementwise/tensor ops, casts | **~40 fp16 lanes/cycle/core sustained in kernel-mixed contexts** (count-mode Mul/Add/Cast uniform — operand/issue bound, not FLOP bound); **isolated chained-op rates ~5× higher — see the E22 table below** |
 | Dedicated dequant | i4→f16 dequant instruction with interleaved packed input + per-group offset/scale | gate passes on this part; **rate UNMEASURED** |
 
 Derived: matrix-unit time per 16³-MAC ≈ 3.7 ns/core (17.8 TFLOPS ÷ 8 cores).
 Effective weight-read of a good f16 batched matmul (M=16..128): **144–148 GB/s/die,
 flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow path: 53.
+
+## E22 vector op set (measured 2026-11-05 — the softmax op menu, U resolved)
+
+| Op | Verdict | Rate (1024-lane count-mode, dependency-chained) |
+|---|---|---|
+| exp (f16) | **EXISTS** (hardware exp; bitwise-matches host on the softmax domain x ≤ 0; overflows f16 above x = 11.1) | **272.8 ns/call → c_exp ≈ 11.5 lane-equiv/elem** |
+| exp (f32) | **EXISTS** (maxRel 6.3e-08 vs host) | ≈ 11.4 lane-equiv/elem |
+| reduce-max (f16/f32) | **EXISTS** (planted max verified at moved positions; f16 result = value in lane 0, lane 1 = index-class) | f16 181.9 ns/call (≈ 0.74 lane-equiv/score), f32 251.4 ns — **beats the 6-op elementwise max tree (6 × 46.4 = 278 ns chained)** |
+| And (bitwise) | **int16/uint16 only**; **int32 And ABSENT** — the f32-tree And route is closed, the f16-tree route is open | And<int16> 45.9 ns/call, bitwise-exact |
+| Mul/Add f32 vs f16 | ρ32 = **1.37** chained per-op (Mul 63.5 / Add 63.7 f32 vs 46.4 f16 ns) — between the modeled 1 and 2 | f16 Mul 46.4 ns/call chained |
+| scalar loop | **σ_s = 19.9 ns per compare** (5.1 µs per 256-read tail) — 10× the 2 ns model, below the 47 ns bind line | — |
+
+**Verdicts:** c_exp = 11.5 ≤ 21 → **native exp beats the 22-op polynomial** and
+clears all four native-exp thresholds (56/51/24/19) → the worst vector corner
+(851 µs @32k) **collapses to the stream branch**; the "ISA-as-written" (poly exp,
+tree max) table row is not reachable on this part — both the native exp and the
+native reduce-max exist. Caveats: chained rates are latency-bound upper bounds on
+cost (conservative); the exp chain reaches inf operands after ~4 iterations
+(exp(inf) = inf, timing unaffected as measured). The ~40 lanes/cycle wall above
+was measured in kernel-mixed contexts; isolated vector ops run faster.
+
+## E21 gather rate G(P) (measured 2026-11-05 — U resolved)
+
+The production B path (DDR→L0B direct load, full barrier per 32 KiB call tile,
+one (16,16,128) MMA per 16-n-chunk into an accumulating C region) driven by a
+US-staged page table over 64 MiB per-core arenas, sequential vs shuffled visit
+order, page-weight multiset hash **verified 20/20 reps exact, both orders, every
+size**:
+
+| P | G seq (agg) | G shuffled (agg) | per-page seq/shuf |
+|---|---|---|---|
+| 16 KiB | 165.2 GB/s | 153.8 GB/s | 793 / 852 ns |
+| 64 KiB | 169.0 GB/s | **167.0 GB/s** | 3101 / 3140 ns |
+| 256 KiB | 169.2 GB/s | 169.2 GB/s | 12391 / 12394 ns |
+
+**c_pg(64 KiB, shuffled − sequential) = 38 ns/page** — far below the 123 ns flip:
+the MoE-128k cell stays stream-bound at 64 KiB pages, with only 0.7 GB/s of margin
+(167.0 vs the 167.7 line). **MoE-32k (≤ 41.9) and dense (≤ 7.3/29.4) never flip;
+16 KiB pages DO flip MoE-128k attention-bound** (153.8 ≤ 167.7); both 1M cells
+attention-bound at every G (unchanged). Runtime page-size guidance: **≥ 64 KiB,
+prefer 256 KiB; the usual 4–16 KiB serving page is gather-bound for MoE-128k.**
+Caveat: shuffle is random-within-contiguous-per-core-arena — a real scattered KV
+cache shows a higher c_pg (38 ns is a lower bound). The per-page numbers include
+the page-table read (kept in US) and the per-tile barrier+MMA.
 
 ## Per-core memory hierarchy
 
@@ -55,6 +99,9 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
 | Vector i4→f16 unpack (5-pass) | **~5.3 GB/s/core = 42 aggregate int4-effective** | measured — there is NO i4→f16 hardware path on this part (see errata #12); vector dequant for W4 is dead vs 120 |
 | **f16→i8 activation quantization ON-DEVICE** (the production-chain pass) | **measured, works: 43.7 µs at m=1, K=8192 (+12.2% over host-packed A)**; end-to-end fp64-exact ×20 (relerr 1.07e-7); integrated kernel 135.5 GB/s f32-in/f32-out | measured (production integration season) — the cast is **rint-half-even, saturating at ±127** (which conveniently ENFORCES the [−127,127] quantizer clamp the MoE overflow bound requires); one-time weight repack at load = 0.82 s/GB |
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
+| L0C → US window drain (copy-out 1 KB chunks, queue-fenced) | **152.8 / 222.3 / 260.3 / 285.5 GB/s/core at mt = 1..4** | measured — **9×–45× above the 3.41/6.83/12.28/16.37 hide thresholds: the drain is HIDDEN at every mt**, content-checked exact |
+| **i32 accumulator overflow semantics** | **SILENT SATURATION at 2³¹−1** (not wrap) | measured: 127² chains exact to 2,147,092,480 (99.98 % of 2³¹); −128² chains hitting 2³¹ exactly clamp at 2,147,483,647 — **the [−127,127] quantizer clamp is REQUIRED; U_max = 32 MoE-shape chains are exact (bound HOLDS)**; L0C has no zero-init (pre-accumulation reads are nondeterministic → drain-before-accumulate required) |
+| **Host bounce λ (die→host→die, 4 KiB sync legs)** | **12.2 / 12.1 µs per direction; bounce 23.8–24.6 µs; unchanged under die-0 saturating D2D load** | measured — 7.6× below the 91 µs launch-floor-class anchor, inside the 10/500 bracket; **bounce share of any step ≈ 0.1 % — negligible for the planner** |
 
 ## Silicon errata (all verified live — treat as hard constraints)
 
@@ -121,6 +168,19 @@ flat** — extra rows ride under the weight stream. M=1..12 on the vendor slow p
     full barriers. m=64 across the full 256 KB accumulator WORKS (the
     earlier "exactly-full" hang was an artifact of a 4-sweep structure).
     k=64 matrix calls are nondeterministically wrong (32/128 exact).
+16. **Back-to-back same-destination MMA accumulate chains lose updates
+    nondeterministically** (probe-pack season, live): a 1024-deep isBias chain
+    into one L0C chunk kept ~50 % of its accumulations in one run and ~99 % in
+    the next; with same-chunk calls spaced 32 matrix calls apart every value is
+    exact, and the production chains (≤ 64 deep, operand lifts interleaved) are
+    the safe class. Never chain > 64 same-dst matrix calls without interleaving.
+17. **Vector-rate loops are silently optimized away**: a count-mode loop into an
+    unconsumed buffer is deleted entire (launch runs at the empty floor);
+    independent identical ops into a queue tensor collapse to one op. Rate
+    loops need a dependency chain plus a periodic scalar read-back, and the
+    number must be validated by an reps-scaling (8×) check before quoting.
+    Also: a verify variant driven by `reps` must force ≥ 1 work block when
+    reps = 0 (a zero-iteration loop silently returns lane 0).
 
 ## Verified layout geometry (for matrix-operand packs)
 
