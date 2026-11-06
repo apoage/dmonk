@@ -1,12 +1,12 @@
 # DESIGN-2 — MoE grouped quant-GEMM decode kernel (one die, 8 cores)
 
-> **ROUND-2 STATUS (proof session, commit after 7b82332)**: every derived number below is checked by
+> **ROUND-2 STATUS (proof session, commit after 81d5184)**: every derived number below is checked by
 > `proof/moe.lean` (189 core-Lean theorems, 0 axioms) and printed by `proof/moe.py`; the claim ledger is
 > `PROOF-COVERAGE-2.md`. Corrections the prover forced are applied in place and listed there (the W4
 > "parity" claim, the regression decomposition, the per-step epilogue, the W-dyn loss range, the §8.2 c_res
 > row units, the A-resident small-shape row, the −128 operand caveat, and smaller ones).
-> **SILICON NOTE**: this design is anchored to HW-MAP@3eaf322's dense row (487 µs / 137.8 GB/s, S1-staged
-> serial loader). The current HW-MAP (f951a5c) lists that path as the "serial fallback 138.9" and a
+> **SILICON NOTE**: this design is anchored to HW-MAP@a6d0ec0's dense row (487 µs / 137.8 GB/s, S1-staged
+> serial loader). The current HW-MAP (7f53dce) lists that path as the "serial fallback 138.9" and a
 > DDR→L0B direct path at 174.6 flat (181.3 direct stream, ~181 pure-read roof). The theorems here are
 > conditionals on the anchor: re-anchored to 138.9 the headline is 136.4 (T_sync_reanchor); the DDR-bound
 > ceiling at the ~181 roof is 178.2 (T_sync_roof); a direct-path MoE kernel (no S1→L0B leg) is not modelled
@@ -15,7 +15,7 @@
 Scope (PROBLEM-2.md): per decode step, t ∈ 1..16 tokens, each routed to k experts (k = 4..10), E = 64..512
 experts, expert slab `W_e [K, N_e]`, K = 2048..7168, N_e = 512..4096, W8 (i8 + per-channel f32 scale s_e[n])
 primary, W4 secondary; `y_τ[n] = Σ_{e ∈ topk(τ)} score_{τ,e} · s_e[n] · Σ_k x_τ[k]·W_e[k,n]`. Everything derives
-from HW-MAP.md (as of commit 3eaf322, the silicon sync) and ISA.md. Status tags: **M** = measured in HW-MAP,
+from HW-MAP.md (as of commit a6d0ec0, the silicon sync) and ISA.md. Status tags: **M** = measured in HW-MAP,
 **D** = derived from measured numbers by arithmetic shown here, **P** = PRIOR, **A** = explicit assumption with
 the experiment that measures it, **U** = UNMEASURED (branched, experiment named).
 

@@ -3,7 +3,7 @@
 ```
 You are the attention architect for round 3. Season (v1) measured every
 quantity DESIGN-3.md carried as a branch (HW-MAP rows through commit
-8a7079f). Ground the design down onto the measured constants:
+e9349c8). Ground the design down onto the measured constants:
 
 NEW MEASURED INPUTS (read them in HW-MAP first — these change your model):
 - vexp EXISTS (bitwise-exact on the softmax domain, c_exp ~= 11.5

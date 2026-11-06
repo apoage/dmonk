@@ -11,7 +11,7 @@ hypothesis carried the 91 µs bounce (T8 thresholds shrink ~7.6x; bounce
 share ~0.1% of any step).
 
 NEW DESIGNS to integrate as first-class partition variants (from
-ALTERNATIVES.md, 1a2fd43, with the steering correction 5fd13dc — the
+ALTERNATIVES.md, dd5f84c, with the steering correction 0915e22 — the
 f16->i8 pass is RESOLVED, measured 43.7 µs on-device, so re-derive any
 alternatives arithmetic that assumed the magic-bias or bounce fallback):
 - INSTANCE-PARALLELISM: two 4-die instances, each with the minimal int4

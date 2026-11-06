@@ -8,7 +8,7 @@ it 1:1 into core Lean:
   usR = (ns+500)//1000 ; pct = tenths of a percent, round half up ; ceil(a,b) = (a+b-1)//b
 Every constant is tagged with its origin: [M] HW-MAP measured, [D2] DESIGN-2 derived, [A] assumption with the
 host experiment (H-number, DESIGN-4.md section 8) that measures it. Run: python3 -I proof/fleet.py
-Round 3 (2026-11-05): the measured re-grounding (HW-MAP 8a7079f) and the ALTERNATIVES variants are the [R3-*] section at the
+Round 3 (2026-11-05): the measured re-grounding (HW-MAP e9349c8) and the ALTERNATIVES variants are the [R3-*] section at the
 end (imports proof/attn.py for the DESIGN-3 round-3 attention chain); every round-2 label keeps printing its round-2 value.
 """
 KiB, MiB, GiB, GB = 1024, 1 << 20, 1 << 30, 10 ** 9
@@ -507,10 +507,10 @@ def main():
 
 
 # ================================================================== ROUND 3 (2026-11-05): measured re-grounding ==========
-# HW-MAP commit 8a7079f (the season (v1) validation pack) measured the quantities this plan carried as assumptions or as
+# HW-MAP commit e9349c8 (the season (v1) validation pack) measured the quantities this plan carried as assumptions or as
 # PROBLEM-3 branches -- the host-bounce latency (12.2 / 12.1 us per direction, idle == under saturating D2D load), the KV
 # gather rate per page size (E21), the softmax op set (E22), the L0C drain, the on-device f16->i8 activation quantization
-# pass (43.7 us) -- and ALTERNATIVES.md (1a2fd43, steering correction 5fd13dc) added three partition variants: two 4-die
+# pass (43.7 us) -- and ALTERNATIVES.md (dd5f84c, steering correction 0915e22) added three partition variants: two 4-die
 # instances with a minimal int4 tier (ALT-2), the MoE expert kernel on the DDR->L0B direct path (ALT-1), and a per-layer
 # persistent megakernel with a DDR-flag cross-core sync (ALT-3). Every round-2 label above keeps printing its round-2
 # value; the [R3-*] labels below re-derive the cells on the measured constants. The attention model is DESIGN-3's round-3
@@ -741,7 +741,7 @@ def inst_step3c(s, L, B=1, t=1, xs=None, hot="direct_ser", cold="ovl", pop="unif
 
 def main3():
     D, M = DENSE, MOE
-    print("\n# ---- ROUND 3 (2026-11-05; HW-MAP 8a7079f measured, ALTERNATIVES 1a2fd43 variants): [R3-*] cells. The [F*] labels above are the round-2 cells, unchanged. ----")
+    print("\n# ---- ROUND 3 (2026-11-05; HW-MAP e9349c8 measured, ALTERNATIVES dd5f84c variants): [R3-*] cells. The [F*] labels above are the round-2 cells, unchanged. ----")
     print(f"[R3-const] lambda {LAM3} ns per direction (measured 12.2 / 12.1 us; bounce {2*LAM3} ns vs measured 23.8-24.6 us; idle == under saturating D2D load); "
           f"T_launch {T_LAUNCH} ns = the kernel launch floor, a different quantity, unchanged; G (tenths) {G3} -- E21: 256 KiB = DESIGN-3's default page (primary), 64 KiB / 16 KiB shuffled, "
           f"174.6 = round 2's W8-kernel basis, gather3x = what-if; c_q {C_Q} ns per on-device A-quant pass x {Q_PASSES} per layer; integrated-chain rate {t10(R_GEMM_INT)}; "

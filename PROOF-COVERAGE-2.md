@@ -64,7 +64,7 @@ any per-core time T to within **≤ 410 ns** (two floors), not "< 410"; at T = 4
 | R_stage = 180 GB/s/die = 22.5 GB/s/core | Measured.rStage, T0_per_core_rates | R_STAGE | PROVED from INPUT |
 | L = 26.5 GB/s/core strict-serial (M); its overlap/ping-pong behaviour and granule dependence U | Measured.lSer; L universally quantified in T_pp_thresh, T_pp_rate_ddr_bound, T_pp_rate_loader_bound, T_pp_target | L_SER | INPUT; regime EMPIRICAL — E13 |
 | c_mma = 15 ns per (16,16,128) call | Measured.cMma | C_MMA | INPUT |
-| T_dense = 487 µs per core = the 137.8 GB/s dense kernel; HW-MAP's "12.5 % occupancy" is 12.6 % exact | Measured.tDense, Measured.rDense, T0_dense_row | T_DENSE | INPUT (HW-MAP@3eaf322) + PROVED self-consistency |
+| T_dense = 487 µs per core = the 137.8 GB/s dense kernel; HW-MAP's "12.5 % occupancy" is 12.6 % exact | Measured.tDense, Measured.rDense, T0_dense_row | T_DENSE | INPUT (HW-MAP@a6d0ec0) + PROVED self-consistency |
 | c_res = (487 000 − 321 497 − 61 440) × 10 / 4096 = 25.4 ns, one consistent decomposition | T_anchor_loader, T_anchor_cres | [M0] | PROVED (E13 splits it) |
 | R_vec = 40 lanes/cycle × 1.08 GHz = 43.2 G lane-ops/s/core | T0_rvec | R_VEC | PROVED from INPUT |
 | T_launch ≈ 91 µs | Measured.tLaunch | T_LAUNCH | INPUT |

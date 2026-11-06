@@ -19,8 +19,8 @@
   theorem here, an alt.py label, an experiment (EMPIRICAL) or an explicit ASSUMPTION.
 
   Inputs applied by steering before proving (PROMPT-5P): the f16→i8 activation pass is MEASURED (HW-MAP
-  5fd13dc: 43.7 µs per pass, rint-half-even saturating ±127) and H10 is GREEN at die scale (HW-MAP
-  08eec08: two instances on disjoint dies at 1.99× aggregate). The unmeasured / assumed quantities are
+  0915e22: 43.7 µs per pass, rint-half-even saturating ±127) and H10 is GREEN at die scale (HW-MAP
+  fa2c24a: two instances on disjoint dies at 1.99× aggregate). The unmeasured / assumed quantities are
   explicit arguments: the W4 core-slab time `Tc`, the A-lift cost `a`, `csync`, `cpg`, `cV`, `rho`, the
   per-die overhead `ort`, the bounce latency `lam`, the concurrency efficiency `eta`, the prefix `Ls`.
 
@@ -49,17 +49,17 @@ def dieMemGB : Nat := 86
 def s1Prior : Nat := 1000000
 /-- HW-MAP: vector i4 → f16 unpack, 5 passes, ~5.3 GB/s/core of int4 bytes (tenths). -/
 def rW4v : Nat := 53
-/-- HW-MAP 5fd13dc (steering input): on-device f16 → i8 activation quantization pass, 43.7 µs at m = 1,
+/-- HW-MAP 0915e22 (steering input): on-device f16 → i8 activation quantization pass, 43.7 µs at m = 1,
     K = 8192 (fixed reading; E38 asks whether it is proportional). ns. -/
 def cQ : Nat := 43700
-/-- HW-MAP 8a7079f: host bounce 12.2 / 12.1 µs per direction (ns); ALTERNATIVES used the 91 µs anchor. -/
+/-- HW-MAP e9349c8: host bounce 12.2 / 12.1 µs per direction (ns); ALTERNATIVES used the 91 µs anchor. -/
 def lamMeas : Nat := 12200
 /-- HW-MAP E21: c_pg(64 KiB, shuffled − sequential) = 38 ns per page (a lower bound); measured per-page
     sequential times 3 101 ns (64 KiB) and 12 391 ns (256 KiB); shuffled aggregate 167.0 at 64 KiB. -/
 def cPgMeas : Nat := 38
 def tPgSeq64 : Nat := 3101
 def tPgSeq256 : Nat := 12391
-/-- HW-MAP 08eec08 (season h): two instances on disjoint dies run at 1.99× aggregate (η = 995 ‰). -/
+/-- HW-MAP fa2c24a (season h): two instances on disjoint dies run at 1.99× aggregate (η = 995 ‰). -/
 def etaH10 : Nat := 995
 /-- HW-MAP: L0C → US drain 152.8 GB/s/core at mt = 1 (tenths); the f16 maximum 65 504. -/
 def rDrainMeas : Nat := 1528
@@ -868,7 +868,7 @@ theorem T_alt_quant_fallback_written : hostBouncePerLayer dense lamMid = 737512 
     today moe 32768 1 1 + 28 * hostBouncePerLayer moe lamMid = 154297847 ∧ tpsCard 1000 154297847 = 1620 ∧ pcsDown 1620 1867 = 132 ∧
     4 * 24 * (2 * lamMid + tn (2 * 8192) d2h0) = 17529600 ∧ ms2 17529600 = 1752 ∧ route1bRate = 1060 ∧
     ms2 2450820709 = 245082 ∧ ms2 154297847 = 15429 := by decide
-/-- RE-DERIVED (HW-MAP 5fd13dc): the pass exists and costs 4 × 43.7 = 174.8 µs per layer — 20.98 ms per dense
+/-- RE-DERIVED (HW-MAP 0915e22): the pass exists and costs 4 × 43.7 = 174.8 µs per layer — 20.98 ms per dense
     token (0.9 %: 0.105 → 0.104), 4.89 ms per MoE token (3.5 %: 1.867 → 1.801), +4.20 ms per draft token
     (+23.1 %); dense spec 0.262 → 0.258 -/
 theorem T_alt_quant_measured : cQ = 43700 ∧ quantPasses * cQ = 174800 ∧ usR 174800 = 175 ∧

@@ -236,7 +236,7 @@ errata #11/#12 as INPUT (KV die-local, no P2P, no tensor-split, int8 residency; 
 
 ---
 
-## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP 8a7079f) and the ALTERNATIVES variants
+## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP e9349c8) and the ALTERNATIVES variants
 
 **What this section is.** DESIGN-4.md round 3 re-derives every λ-, G- and attention-dependent cell on the measured
 constants (host bounce 12.2 / 12.1 µs; E21 gather rate per page size; E22 softmax op set via DESIGN-3's round-3 chain;

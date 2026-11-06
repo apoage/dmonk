@@ -7,7 +7,7 @@ Integer arithmetic only, in the conventions of proof/model.py / moe.py / fleet.p
   lane-ops : vector work units; R_VEC = 43.2 G lane-ops/s/core = 432 tenths -> ns = ops*10 // 432
 Run: python3 -I proof/attn.py   (Python >= 3.8, no dependencies). Labels [A..] are cited in DESIGN-3.md and
 PROOF-COVERAGE-3.md; every label is transcribed 1:1 into proof/attn.lean (round 2).
-Round 3 (2026-11-05): the season (v1) measurements (HW-MAP commit 8a7079f) are added as the [R3-*] section at the end; every
+Round 3 (2026-11-05): the season (v1) measurements (HW-MAP commit e9349c8) are added as the [R3-*] section at the end; every
 round-2 label keeps printing its round-2 value so that `diff` lists exactly what moved (see [R3-moved-*]).
 Round-2 changes: [A4b-drain-threshold] compares the mt=4 drain bytes with the mt=4 block time (164, not 82);
 [A4b-G-threshold] prints the c_V=33 vector time; [A7-us-*] sums the section-4 table rows (the old [A7-sram]
@@ -115,7 +115,7 @@ def l0a_bytes(mt): return 2 * 4 * KiB * mt + 2 * 4 * KiB * mt          # +Q,-Q r
 def s1_bytes(mt):  return 2 * 4 * KiB * mt + (3 * BL_of(mt) * 16 * 4 * mt if mt >= 2 else 0)
 
 # ============================================================ ROUND 3 (2026-11-05): season (v1) measured constants ===
-# HW-MAP commit 8a7079f resolved every U quantity: E21 (gather rate per page size), E22 (exp, reduce-max, And, rho32,
+# HW-MAP commit e9349c8 resolved every U quantity: E21 (gather rate per page size), E22 (exp, reduce-max, And, rho32,
 # sigma_s), R_drain, host bounce. Every round-2 label above still prints its round-2 value (the retired branches are
 # kept so the diff is explicit); the [R3-*] labels below re-derive the headline cells on the measured constants.
 # --- E21: gather rate, measured (aggregate tenths GB/s; per-page ns per core; 20/20 reps exact) ---
@@ -138,7 +138,7 @@ C_EXP100  = 1150        # exp: 272.8 ns x 43.2 / 1024 = 11.51 lane-eq per elemen
 RHO32_100 = 137         # f32 / f16 chained op = 63.6 / 46.4 (round 2 bracketed 1 / 2)
 SIGMA_S3  = 199         # tenths of ns per scalar compare (5.1 us per 256-read tail; round 2 assumed 2 ns)
 R_DRAIN_M = {1: 1528, 2: 2223, 3: 2603, 4: 2855}   # tenths GB/s/core: L0C -> US drain measured at mt = 1..4 (round 2 assumed 10 GB/s)
-MERGE_PACK = 25750      # lane-eq per block-fragment: the validation pack's merge-chain itemisation (commit 8a7079f); round 2 assumed 7 000
+MERGE_PACK = 25750      # lane-eq per block-fragment: the validation pack's merge-chain itemisation (commit e9349c8); round 2 assumed 7 000
 LANE_PER_NS10 = 432     # lane-eq x100 per tenth of a ns (43.2 lane-eq per ns)
 def call100(t10): return t10 * LANE_PER_NS10                                # lane-eq x100 of one chained call of t10 tenths-ns
 # per-lane cost of one elementwise op, hundredths of a lane-eq: "T" = throughput convention (the 40-lane/cycle count-mode
@@ -320,7 +320,7 @@ if __name__ == "__main__":
               f"random-walk hypothesis sqrt({v})*32 = {rw} (ulp 2^{lg(rw)-23} = {2**(lg(rw)-23):.1e}); recovered-score error <= 1 ulp -> {2**(lg(rw)-23)*1e6:.0f} ppm (rw) / {2**(lg(det)-23)*1e6:.0f} ppm (det)")
     print(f"[A9-hkv1] per-core partials at H_kv = 1: 16*mt rows x (1 + 16 + 128) f32 = {16*145*4} B*mt = {16*145*4/KiB:.2f} KiB*mt (9.3 KB)")
     # ======================================================== ROUND 3: the measured constants =========================
-    print("\n# ---- ROUND 3 (season v1 measured, HW-MAP commit 8a7079f): [R3-*] re-derive the headline cells; [A*] above are the round-2 cells ----")
+    print("\n# ---- ROUND 3 (season v1 measured, HW-MAP commit e9349c8): [R3-*] re-derive the headline cells; [A*] above are the round-2 cells ----")
     blk174 = ddr_block_ns(R_GEMM); blk167 = ddr_block_ns(G_SHUF[64*KiB]); blk169 = ddr_block_ns(G_SHUF[256*KiB])
     for P in (16*KiB, 64*KiB, 256*KiB):
         print(f"[R3-E21-{P//KiB}k] G seq {t10(G_SEQ[P])} / shuffled {t10(G_SHUF[P])} GB/s agg; per page {T_PG_SEQ[P]} / {T_PG_SHUF[P]} ns -> c_pg(shuffled - sequential) = {cpg_meas(P)} ns; "

@@ -3,8 +3,8 @@
 > **ROUND-2 (PROOF) STATUS — 2026-11-05, PROMPT-5P.** Every ledger row of Appendix A is now a theorem of
 > `proof/alt.lean` (104 theorems, core Lean 4.35, 0 axioms / sorry / native_decide; `PROOF-COVERAGE-5.md` is the
 > ledger). Two inputs were applied by steering before proving: **the f16 → i8 activation pass is MEASURED**
-> (HW-MAP 5fd13dc: 43.7 µs per pass, rint-half-even saturating ±127) and **H10 is GREEN at die scale** (HW-MAP
-> 08eec08: two instances on disjoint dies at 1.99×). Prover-forced corrections, all applied in place below
+> (HW-MAP 0915e22: 43.7 µs per pass, rint-half-even saturating ±127) and **H10 is GREEN at die scale** (HW-MAP
+> fa2c24a: two instances on disjoint dies at 1.99×). Prover-forced corrections, all applied in place below
 > (`[ALT-P-*]` labels in `proof/alt.py`; every original label still prints its original value):
 > 1. **Serial-chain W4 piece (row 1, §2.1, E30):** a 2 KiB int4 piece is 4 096 values = **8 KiB of f16 and two
 >    (16,16,128) calls**, not 4 KiB and one: 596 → **807 ns**, core-slab 305 152 → **413 184 ns**, 55.2 → **40.8**
@@ -47,7 +47,7 @@ Scope (PROMPT-5.md): take the solution families of acceleration engineering and 
 measured constraints and the four designs (DESIGN.md dense W8 GEMM at the measured 174.6; DESIGN-2.md MoE grouped
 GEMM, 135.3 anchored to the serial-loader regime; DESIGN-3.md matrix-unit attention, 776 µs / 24.6 ms at 32k / 1M;
 DESIGN-4.md fleet planner, 0.105 / 1.867 tokens/s/card at 32k), hunting for alternatives that beat, fuse or
-dominate them. Everything derives from HW-MAP.md (f951a5c), ISA.md and the four designs' ledgered numbers; nothing
+dominate them. Everything derives from HW-MAP.md (7f53dce), ISA.md and the four designs' ledgered numbers; nothing
 assumes a feature ISA.md does not list. Status tags: **M** measured (HW-MAP), **D** derived here by arithmetic
 shown, **D2/D3/D4** a ledgered theorem of the named design used as input, **A** explicit assumption with the
 experiment that measures it, **U** unmeasured and branched. Units: bytes binary, GB decimal, rates GB/s decimal,
@@ -74,7 +74,7 @@ format with the theorem each one becomes.
    a DDR-flag cross-core sync pays whenever a sync costs ≤ 109 µs (MoE) / 114 µs (dense) — a DDR round trip is µs
    class: MoE 32k +12.5 %, the draft token 18.1 → 9.3 ms (`[ALT-3-*]`). Combined with (2): MoE 32k +29.3 %;
    with (1) and (2): **+134 %** (`[ALT-2+3-moe-32k]`).
-4. **The production chain's f16 → i8 pass is RESOLVED (HW-MAP 5fd13dc, applied by the proof round)**: the cast
+4. **The production chain's f16 → i8 pass is RESOLVED (HW-MAP 0915e22, applied by the proof round)**: the cast
    exists (rint-half-even, saturating ±127) and the on-device pass measures 43.7 µs; charged four times per layer it
    costs **174.8 µs per layer = 0.9 % dense (0.105 → 0.104), 3.5 % MoE (1.867 → 1.801), +23 % on the draft**
    (`[ALT-P-quant-*]`). The magic-bias quantizer (19 / 8 µs) and the host-bounce fallback (−2.8 % / −13.2 % / −49 %,
@@ -349,7 +349,7 @@ f16 word equals (q + 256) mod 256 = q in two's complement (checked exhaustively,
 f32 ulp is 1 and the low byte of the word is q mod 256 — the same extraction at stride 4 B, saving the f16 cast.
 Scale sx[τ] (f32) rides to the consumer's epilogue as the 64 B reel DESIGN-2 already carries.
 
-**RE-DERIVED by the proof round (`[ALT-P-quant-*]`, HW-MAP 5fd13dc):** the pass exists and is measured — 43.7 µs
+**RE-DERIVED by the proof round (`[ALT-P-quant-*]`, HW-MAP 0915e22):** the pass exists and is measured — 43.7 µs
 per pass, four passes per layer = 174.8 µs per layer: dense 2 362.31 → 2 383.29 ms (0.104, −0.9 %), MoE 133.84 →
 138.74 ms (1.801, −3.5 %), draft 18.09 → 22.29 ms (+23.1 %), dense spec 0.262 → 0.258. The epilogue estimate and the
 host-bounce fallback below are kept as the record of what was assumed; at the measured λ = 12.2 µs the bounce would
@@ -589,7 +589,7 @@ experiment; U = empirical branch. Proposed names are for `proof/alt.lean`.
 | 16 | megakernel pays iff c_sync ≤ 113 750 / 109 200 ns (launch savings only) and ≤ 109 903 / 108 430 net of the reduction traffic (dense / MoE; dense ties at exactly 109 903 — strictly pays iff ≤ 109 902); step at c_sync = 2 / 5 / 20 µs: dense 2 310.52 / 2 311.96 / 2 319.16 ms (0.108 / 0.108 / 0.107), MoE 118.94 / 119.36 / 121.46 (2.101 / 2.094 / 2.058) | iff | D (∀ c_sync) | [ALT-3-*-threshold] [ALT-3-*-csync*] T_megakernel_dense, T_megakernel_moe, T_alt_mega_threshold_cells, T_alt_mega_cells |
 | 17 | draft token 18 092 / 9 265 / 7 172 µs at 121 / 24 / 1 launches; verify step 54.27 / 27.79 / 21.51 ms | | D | [ALT-3-draft-*] T_alt_draft_launches |
 | 18 | head-aligned QKV packing alone: one launch per layer: dense 2 351.39 ms (+0.9 %), MoE 131.29 (+1.9 %); the attention of KV head c needs only core c's QKV slice (a column permutation of the fused weight) | | D / DEFINITION | [ALT-3-headaligned-*] T_alt_headaligned |
-| 19 | f16 magic bias 1280: for every q ∈ [−127, 127], q + 1280 ∈ [1 024, 2 048) and (q + 1280 − 1024) mod 256 = q mod 256 (two's-complement byte) — exhaustively true; f32 analogue with bias 12 582 912 on [2²³, 2²⁴) — **SUPERSEDED as a mechanism (the cast exists, HW-MAP 5fd13dc); arithmetic kept** | true | D (`decide` over 255 cases) | [ALT-4-magic] T_alt_magic_f16, T_alt_magic_f32 |
+| 19 | f16 magic bias 1280: for every q ∈ [−127, 127], q + 1280 ∈ [1 024, 2 048) and (q + 1280 − 1024) mod 256 = q mod 256 (two's-complement byte) — exhaustively true; f32 analogue with bias 12 582 912 on [2²³, 2²⁴) — **SUPERSEDED as a mechanism (the cast exists, HW-MAP 0915e22); arithmetic kept** | true | D (`decide` over 255 cases) | [ALT-4-magic] T_alt_magic_f16, T_alt_magic_f32 |
 | 20 | quantizer cost as written: 102 400 / 45 056 elements per layer × 8 lane-ops = 819 200 / 360 448 = 19 / 8 µs per core per layer = 0.1 / 0.2 % of the 32k step; **RE-DERIVED: the measured pass is 4 × 43.7 = 174.8 µs per layer = 0.9 % dense (0.105 → 0.104) / 3.5 % MoE (1.867 → 1.801), draft +4.20 ms (+23.1 %), dense spec 0.262 → 0.258** | | M (c_q) → D | [ALT-4-dense] [ALT-4-moe] [ALT-P-quant-*] T_alt_quant_cost_written, T_alt_quant_measured |
 | 21 | host-quantization fallback as written (λ = 91 µs): 4 bounces × (2 λ + 32 KiB at 27.3 + 16 KiB at 13.9) = 738 / 730 µs per layer → dense 2 450.82 ms (−2.8 %), MoE 154.29 (−13.2 %); draft +96 × 183 µs = +17.53 ms per token; Route-1b-class fallback 106.0 GB/s; **RETIRED by the measured pass; at the measured λ = 12.2 µs the bounce would be 107 / 100 µs per layer (0.105 / 1.829), cheaper than the pass** | | D (λ A → M) | [ALT-4-*] [ALT-4-route1b] [ALT-P-quant-*] T_alt_quant_fallback_written, T_alt_quant_bounce_measured_lambda |
 | 22 | two-tier G: at 32k (4096 \| L) 174.2 / 172.8 / 167.6 / 155.2 at c_pg = 0.1 / 0.5 / 2 / 6.005 µs vs 64 KiB pages 169.0 / 149.7 / 104.8 / 58.2; at 34 768: 173.6 / 171.0 / 161.6 / 141.1; at c_pg = 0 all 174.6 | | D (c_pg U — E34) | [ALT-5-G-cpg*] T_alt_tier_cells |

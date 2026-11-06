@@ -1,6 +1,6 @@
 # DESIGN-3 — decode attention over the KV cache (gather → softmax → reduce), one die, 8 cores
 
-> **ROUND-3 STATUS (re-grounding on the season (v1) measurements — HW-MAP commit 8a7079f; `proof/attn.py` `[R3-*]`,
+> **ROUND-3 STATUS (re-grounding on the season (v1) measurements — HW-MAP commit e9349c8; `proof/attn.py` `[R3-*]`,
 > `proof/attn.lean` `T3r_*`, PROOF-COVERAGE-3.md round-3 section).** Every quantity this design carried as a branch is now
 > measured: the gather rate per page size (E21: 153.8 / 167.0 / 169.2 GB/s shuffled at 16 / 64 / 256 KiB; c_pg = 39 ns at
 > 64 KiB as a lower bound; the attention choreography's own sequential rate is 169.0–169.2, 3.2 % under the W8 kernel's 174.6),
@@ -55,8 +55,8 @@
 Scope (PROBLEM-3.md): per decode step and layer, t ∈ 1..16 query tokens attend over L ∈ 1k..1M cached
 tokens; H_q query heads in GQA groups of g = 4..8 over H_kv = H_q/g KV heads, head dim d = 64..128, f16 KV.
 `scores = q_h·k_l/√d`, `p = softmax(scores)`, `out_h = Σ_l p[l]·v_l`. Everything derives from HW-MAP.md (round 3: as of
-commit 8a7079f, the season (v1) validation pack — E21 / E22 / R_drain / σ_s measured; rounds 1–2 were anchored at
-f951a5c, the direct-load silicon sync), ISA.md, DESIGN.md (the dense decode pipeline this design reuses:
+commit e9349c8, the season (v1) validation pack — E21 / E22 / R_drain / σ_s measured; rounds 1–2 were anchored at
+7f53dce, the direct-load silicon sync), ISA.md, DESIGN.md (the dense decode pipeline this design reuses:
 (16,16,128) i8/f16 MMA loop at 15 ns per call, DDR→L0B direct loads with one full barrier per 32 KiB tile at
 174.6 GB/s flat m = 1..16, the A-pack §3.2 and C-drain §3.3 layouts) and DESIGN-2.md (the region-difference
 accumulator reset §3.2, ladder E11–E13). Status tags: **M** measured (HW-MAP), **D** derived here by arithmetic

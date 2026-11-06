@@ -22,7 +22,7 @@ flat m = 1..16) as the pure-read roof class — the KV stream is read-only (the 
 recorded as the ceiling the kernel's choreography sits under (`Measured.rGemm`, `rDirect`, `rDdrRW`;
 T1_stream_roof gives the 3.8 % what-if).
 
-## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP commit 8a7079f)
+## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP commit e9349c8)
 
 Round 3 adds no new design; it instantiates the round-2 model on the measured constants and proves every moved cell again.
 The round-2 sections below are kept verbatim (they remain true statements about the round-2 model and its branches); this
@@ -103,7 +103,7 @@ MoE 32k (7.3 / 29.4 / 42.0 — 41.9 in round 2) and both 1M cells (T3r_fleet_G_*
 
 ### The round-3 ledger (every `[R3-*]` label and every round-3 claim of DESIGN-3.md)
 
-Status words as in the round-2 ledger; "INPUT (season v1)" marks a HW-MAP 8a7079f measurement used as given; "A3" is the one
+Status words as in the round-2 ledger; "INPUT (season v1)" marks a HW-MAP e9349c8 measurement used as given; "A3" is the one
 new assumption (a 16-lane Duplicate / copy costs one chained f16 call, 46.4 ns); "T / C" is the modelling choice (throughput vs
 chained convention), carried as the headline / worst-corner pair, not proved either way.
 
@@ -114,7 +114,7 @@ chained convention), carried as the headline / worst-corner pair, not proved eit
 | R3 | f16 tree lane-ops 47 616 / 23 040 / 10 752 at blocks 512 / 256 / 128 (5.81 per score), = round 2's treeLaneOps | T3r_tree | [R3-tree-ops] | PROVED |
 | R4 | the 12 chain cells: spec 9 276 / 6 837 / 5 618 ns (T), 11 836 / 8 100 / 6 232 (C); lazy 5 530 / 3 063 / 1 829 (T), 6 782 / 3 689 / 2 142 (C); shares 77.2 / 98.5 / 46.0 / 56.5 % of 12 011, 73.9 / 94.3 / 44.0 at 12 557, 113.9 % at the 256-token block; 8-call t = 1 variant 7 820 ns (65.1 %); the item split 161 546 / 47 616 / 125 729 / 40 089 / 25 750 | T3r_chain, T3r_chain_shares | [R3-chain-*] | PROVED (A3 for the reel; T / C: DEFINITION; c_exp, per-call ns: INPUT) |
 | R5 | linear forms chain100(block, 1, merge 0) = 37 498 112 / 26 963 200 / 21 695 744 (spec T), 48 557 312 (spec C), 21 318 784 / 10 659 392 / 5 329 696 (lazy T), 26 725 504 (lazy C), and vec3 as a function of the merge | T3r_lin, vec3_rowmaxT_512, vec3_rowmaxC_512, vec3_lazyT_512, vec3_lazyC_512, vec3_rowmaxT_256_4, vec3_rowmaxT_128_8, vec3_lazyT_256_4, vec3_lazyT_128_8 (∀ merge) | [R3-lin-*] | PROVED ∀ merge |
-| R6 | merge itemisations 64 851 (spec T) / 77 354 (spec C) / 9 820 (lazy T) / 19 281 (lazy C) lane-eq = 1 501 / 1 790 / 227 / 446 ns; the pack's 25 750 = 596 ns; round 2's 7 000 = 162, 12 128 = 280 | T3r_merge_item | [R3-merge-*] | PROVED arithmetic; the pack's 25 750: INPUT (commit 8a7079f message) |
+| R6 | merge itemisations 64 851 (spec T) / 77 354 (spec C) / 9 820 (lazy T) / 19 281 (lazy C) lane-eq = 1 501 / 1 790 / 227 / 446 ns; the pack's 25 750 = 596 ns; round 2's 7 000 = 162, 12 128 = 280 | T3r_merge_item | [R3-merge-*] | PROVED arithmetic; the pack's 25 750: INPUT (commit e9349c8 message) |
 | R7 | t = 1 DDR-bound at 174.6 iff merge ≤ 143 937 (spec T) / 33 345 (spec C) / 305 730 (lazy T) / 251 663 (lazy C) lane-eq; at 167.0 iff ≤ 167 524 / 56 932 / 329 317; the pack passes every line, the itemised spec-C chain exceeds its own | T3r_merge_threshold_rowmaxT, _rowmaxC, _lazyT, _lazyC, T3r_merge_threshold_167 (∀ merge, iff), T3r_merge_cells | [R3-merge-threshold-*] | PROVED ∀ merge |
 | R8 | t = 1 DDR-bound iff c_exp ≤ 25.92 (spec T) / 45.67 (lazy T) / 12.42 (spec C) at 174.6, 28.80 at 167.0; the measured 11.5 clears every round-3 line and every round-2 line (56 / 51 / 24 / 19; c_V = 18 / 23 at c_exp = 12) | T3r_cexp_threshold (∀ c_exp, iff), T3r_cexp_clears | [R3-cexp-threshold-*] | PROVED ∀ c_exp |
 | R9 | t = 1 cells: 4k 115 / 120 / 107, 119 / 124 / 112, 118 / 123 / 110, 128 / 133 / 120, 307 / 312 / 300 µs; 32k 788 / 793 / 780, 822 / 828 / 815, 812 / 817 / 805, 891 / 897 / 884, 2 325 / 2 330 / 2 317; 128k 3 094 … 9 236; 1M 24 617 … 73 807 (G ∈ {174.6, 167.0, 169.2, 153.8, 58.2} × {spec T, spec C, lazy T}); wall 210 / 913 / 25 827; eff 140.7 / 163.2 / 166.0 / 166.9 (170.4 / 165.3 at 174.6 / 256 KiB); × GEMV 0.30 / 2.07 / 8.12 / 64.7 | T3r_t1_4k, T3r_t1_32k, T3r_t1_128k, T3r_t1_1M | [R3-t1-*] | PROVED |
