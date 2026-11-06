@@ -483,5 +483,126 @@ def extras():
     T_SLAB_W4_OVL = saved
     print(f"[ALT-2-breakeven-moe-32k] two instances beat one for every W4 slab time <= {lo} ns per core-slab (= {t10(rateT(MiB, lo))} GB/s/core of int4; measured 5.3; serial-chain branch {t10(rateT(MiB, T_SLAB_W4_SER))})")
 
+
+# ============================================================ PROOF ROUND (2026-11-05): [ALT-P-*] re-derived cells ======
+# Prover-forced corrections and the re-derivations the proof round applied before proving (PROMPT-5P): the on-device
+# f16->i8 activation pass is MEASURED (HW-MAP 5fd13dc: 43.7 us per pass, rint-half-even saturating +-127), so every claim
+# that assumed the magic-bias quantizer or the host-bounce fallback is re-derived; the serial-chain W4 piece carried 4 KiB
+# of f16 per 2 KiB of int4 (it is 8 KiB: two MMA calls); the two-tier dominance is restated with its floor thresholds.
+# Every label above keeps printing its ALTERNATIVES (1a2fd43) value; the [ALT-P-*] labels are the moved / new cells.
+C_Q      = 43_700            # on-device A-quantization pass, ns per pass at m=1, K=8192 (M, HW-MAP 5fd13dc)
+Q_PASSES = 4                 # quantized GEMM inputs per layer: QKV, O, gate/up, down (D, as DESIGN-4 round 3)
+LAM_MEAS = 12_200            # measured host-bounce latency per direction, ns (M, HW-MAP 8a7079f)
+T_PIECE_W4_SER_C = tn(2 * KiB, R_W4V_CORE) + tn(8 * KiB, R_US_S1) + tn(8 * KiB, R_LOADER) + 2 * (C_RES_T // 10) + 2 * C_MMA
+T_SLAB_W4_SER_C  = 512 * T_PIECE_W4_SER_C      # corrected serial-chain core-slab time (f16 legs 8 KiB, 2 MMA calls per 2 KiB i4)
+def quant_per_token(s): return s["nL"] * Q_PASSES * C_Q
+def inst_step_q(s, L, B=1, t=1, **kw):
+    """inst_step + the measured A-quant pass on every layer (and on the draft's 24 layers when t > 1)."""
+    T, parts = inst_step(s, L, B, t, **kw)
+    q = quant_per_token(s) + (3 * 24 * Q_PASSES * C_Q if t > 1 else 0)
+    parts = dict(parts); parts["QUANT"] = q
+    return T + q, parts
+def step_q(s, L, B=1, t=1, **kw):
+    T, parts = F.step(s, L, B, t, **kw)
+    q = quant_per_token(s) + (3 * 24 * Q_PASSES * C_Q if t > 1 else 0)
+    parts = dict(parts); parts["QUANT"] = q
+    return T + q, parts
+def tier_times(L, c, P_e=MiB, P_t=64 * KiB):
+    """(two-tier core time, 64 KiB-page core time) for L tokens at per-page cost c: the time form of G_tier / G_page."""
+    tok_e = (L // 4096) * 4096; n_e = tok_e // 4096; n_t = ceil(L - tok_e, 256)
+    t_tier = n_e * (P_e * 80 // R_CORE_GEMM + c) + n_t * (P_t * 80 // R_CORE_GEMM + c)
+    t_64 = ceil(L, 256) * (P_t * 80 // R_CORE_GEMM + c)
+    return t_tier, t_64
+
+def proofround():
+    global T_SLAB_W4_SER, T_PIECE_W4_SER, T_SLAB_W4_OVL, O_RT
+    D, M = F.DENSE, F.MOE
+    a = alt1()
+    print("\n## [ALT-P] proof-round re-derivations (PROMPT-5P; HW-MAP 5fd13dc / 08eec08 inputs)")
+    # --- P1: the serial-chain W4 piece carries 8 KiB of f16 per 2 KiB of int4 (two (16,16,128) calls), not 4 KiB
+    print(f"[ALT-P-w4ser] serial-chain piece per 2 KiB i4 (4 096 values -> 8 KiB f16): unpack {tn(2*KiB, R_W4V_CORE)} + US->S1 {tn(8*KiB, R_US_S1)} + loader {tn(8*KiB, R_LOADER)} "
+          f"+ 2 x residual {2*(C_RES_T//10)} + 2 x MMA {2*C_MMA} = {T_PIECE_W4_SER_C} ns (as written: {T_PIECE_W4_SER}, 4 KiB legs and one call); "
+          f"core-slab {T_SLAB_W4_SER_C} ns (was {T_SLAB_W4_SER}); {t10(rateT(2*2*KiB, T_PIECE_W4_SER_C)*8)} W8-equivalent GB/s per die (was {t10(w4_dense_rate('ser'))}); "
+          f"{t10(rateT(MiB, T_SLAB_W4_SER_C))} GB/s/core of int4 (was {t10(rateT(MiB, T_SLAB_W4_SER))}); break-even 1 371 124 ns is {t10(1371124*10//T_SLAB_W4_SER_C)}x above it (was {t10(1371124*10//T_SLAB_W4_SER)}x)")
+    savedS, savedP = T_SLAB_W4_SER, T_PIECE_W4_SER
+    T_SLAB_W4_SER, T_PIECE_W4_SER = T_SLAB_W4_SER_C, T_PIECE_W4_SER_C
+    try:
+        for s in (D, M):
+            for L in (32768, 131072, 1048576):
+                for i8 in ((False,) if s["moe"] else (False, True)):
+                    xs = [min_x(s, p, L, 1, i8) for p in range(4)]
+                    if any(x is None for x in xs): continue
+                    T0, _ = F.step(s, L, i8=i8); T, parts = inst_step(s, L, xs=xs, cold="ser", i8=i8)
+                    tag = f"{s['name']}-{L}" + ("-kvi8" if i8 else "")
+                    print(f"[ALT-P-ser-{tag}] corrected ser branch: 2 instances {ms2(T)} ms (W {ms2(parts['W'])}) -> {t3(tps_card_inst(1000, T))} tok/s/card "
+                          f"({spc(pcs(tps_card_inst(1000, T), F.tps_card(1000, T0)))} vs today {t3(F.tps_card(1000, T0))})")
+    finally:
+        T_SLAB_W4_SER, T_PIECE_W4_SER = savedS, savedP
+    # --- P2: the drain iff in tenths
+    print(f"[ALT-P-drain] 32 KiB drain under one expert's DDR time ({a['t_b']} ns): hidden iff R_drain >= 0.4 GB/s/core in tenths "
+          f"(0.3: {tn(32*KiB, 3)} ns > {a['t_b']}; 0.4: {tn(32*KiB, 4)} ns <= {a['t_b']}); exact threshold {32*KiB*10/a['t_b']:.3f} GB/s; the measured 152.8 is {1528//4}x above")
+    # --- P3: the G = 2 knob as a rate
+    r2 = rateT(8 * 16 * MiB, 8 * a['g2'] + F.F_MOE)
+    print(f"[ALT-P-g2] G = 2 (one A lift per expert pair): step {8*a['g2']+F.F_MOE} ns -> {t10(r2)} GB/s = {spc(pcs(r2, a['rate_ser']))} over the serialised 167.1 "
+          f"(time ratio {a['ser']*1000//a['g2']/10:.1f} % as a real)")
+    # --- P4: two-tier pages: floors and the measured c_pg
+    te, t64 = MiB * 80 // R_CORE_GEMM, 64 * KiB * 80 // R_CORE_GEMM
+    first = next(c for c in range(0, 100) if G_tier(32768, c) > A.G_page(64 * KiB, c))
+    print(f"[ALT-P-tier-floor] extent time {te} ns vs 16 x 64 KiB pages {16*t64} ns: the extent floors {te-16*t64} ns per MiB SLOWER at c_pg = 0 "
+          f"(exact arithmetic: both {MiB*80/R_CORE_GEMM:.1f}); per extent the tier saves 15 c_pg - {te-16*t64} ns -> faster iff c_pg >= 1 ns; "
+          f"in tenths G_tier(32k) > G(64 KiB) from c_pg = {first} ns (equal at 0..{first-1})")
+    for c in (38, 114):
+        g64, gt, g1 = A.G_page(64 * KiB, c), G_tier(32768, c), A.G_page(MiB, c)
+        cells = []
+        for L in (32768, 1048576):
+            T64, _, _ = A.step_ns(L, 1, g64, 7, 1); Tt, _, _ = A.step_ns(L, 1, G_tier(L, c), 7, 1)
+            cells.append(f"t=1 {L}: {usR(T64)} -> {usR(Tt)} us ({spc(pcs(Tt, T64))})")
+        print(f"[ALT-P-tier-cpg{c}] c_pg = {c} ns ({'measured lower bound' if c == 38 else '3x the lower bound'}): G(64 KiB) {t10(g64)} ; two-tier {t10(gt)} ({spc(pcs(gt, g64))}) ; G(1 MiB) {t10(g1)} ; " + " ; ".join(cells))
+    # --- P5: the measured A-quantization pass replaces the quantizer-cost and host-bounce rows
+    print(f"[ALT-P-quant-pass] measured on-device pass {C_Q} ns x {Q_PASSES} per layer = {usR(Q_PASSES*C_Q)} us per layer (the 19 / 8 us epilogue estimate and the magic-bias mechanism are retired); "
+          f"per token dense {ms2(quant_per_token(D))} ms, MoE {ms2(quant_per_token(M))} ms, draft {ms2(24*Q_PASSES*C_Q)} ms")
+    for s in (D, M):
+        T0, _ = F.step(s, 32768); Tq, _ = step_q(s, 32768)
+        bm = Q_PASSES * (2 * LAM_MEAS + tn(s["d"] * 2, F.D2H[0]) + tn(s["d"], F.H2D[1])); Tb = T0 + s["nL"] * bm
+        print(f"[ALT-P-quant-{s['name']}] 32k t=1: today {ms2(T0)} ms -> {t3(F.tps_card(1000, T0))} ; + measured pass {ms2(Tq)} -> {t3(F.tps_card(1000, Tq))} "
+              f"({spc(pcs(F.tps_card(1000, Tq), F.tps_card(1000, T0)))}; {t10(pct(quant_per_token(s), T0))}% of the step) ; "
+              f"host-bounce counterfactual at the MEASURED lambda {LAM_MEAS} ns: {usR(bm)} us per layer (was {usR(alt4(s)['host_per_layer'])} at 91 us) -> {ms2(Tb)} -> {t3(F.tps_card(1000, Tb))} ({spc(pcs(F.tps_card(1000, Tb), F.tps_card(1000, T0)))})")
+    d0 = draft_token_ns(121); dq = d0 + 24 * Q_PASSES * C_Q
+    T4, _ = F.step(D, 32768, 1, 4); T4q, _ = step_q(D, 32768, 1, 4); tau = F.tau_milli(700)
+    print(f"[ALT-P-quant-draft] draft token {usR(d0)} -> {usR(dq)} us ({spc(pcs(dq, d0))}); dense spec k=3 a=0.7: {ms2(T4)} -> {ms2(T4q)} ms, {t3(F.tps_card(tau, T4))} -> {t3(F.tps_card(tau, T4q))} tok/s/card")
+    # --- P5b: the load-bearing cells with the pass on both sides
+    for s in (D, M):
+        xs = [min_x(s, p, 32768) for p in range(4)]
+        T0q, _ = step_q(s, 32768); Tiq, parts = inst_step_q(s, 32768, xs=xs)
+        print(f"[ALT-P-inst-{s['name']}-32k] two instances with the pass: {ms2(T0q)} ms -> {t3(F.tps_card(1000, T0q))} ; instance {ms2(Tiq)} -> {t3(tps_card_inst(1000, Tiq))} ({spc(pcs(tps_card_inst(1000, Tiq), F.tps_card(1000, T0q)))})")
+    xs = [min_x(M, p, 32768) for p in range(4)]; T0q, _ = step_q(M, 32768)
+    saved = T_SLAB_W4_OVL; lo, hi = 0, 50_000_000
+    while lo < hi:
+        mid = (lo + hi + 1) // 2; T_SLAB_W4_OVL = mid; T, _ = inst_step_q(M, 32768, xs=xs)
+        if tps_card_inst(1000, T) > F.tps_card(1000, T0q): lo = mid
+        else: hi = mid - 1
+    T_SLAB_W4_OVL = saved
+    print(f"[ALT-P-breakeven-q] with the pass on both sides two instances beat one for every W4 core-slab time <= {lo} ns ({t10(rateT(MiB, lo))} GB/s/core of int4; measured 197 844 is {t10(lo*10//197844)}x inside; corrected ser {T_SLAB_W4_SER_C} {'passes' if T_SLAB_W4_SER_C <= lo else 'FAILS'})")
+    T0, _ = F.step(M, 32768); Ti, _ = inst_step(M, 32768, xs=xs)
+    eta_min = next(e for e in range(0, 1001) if 1000 * 2 * e * 10 ** 9 // (1000 * 4 * Ti) > F.tps_card(1000, T0))
+    print(f"[ALT-P-h10] H10 measured at die scale: 1.99x aggregate (eta = 995 per mille); the instance verdict needs only eta > {eta_min - 1} per mille "
+          f"(two instances at eta: {t3(2 * 995 * 10 ** 9 // (4 * Ti))} tok/s/card at 995, {t3(2 * eta_min * 10 ** 9 // (4 * Ti))} at {eta_min} vs {t3(F.tps_card(1000, T0))})")
+    Ts, _ = fleet_cell(M, 32768, tslab=a['ser']); Tsq = Ts + quant_per_token(M)
+    r3 = alt3(M, 32768, 5000); Tmq = r3["T1"] + quant_per_token(M)
+    print(f"[ALT-P-variants-q] MoE 32k with the pass: direct path {ms2(Tsq)} -> {t3(F.tps_card(1000, Tsq))} ; megakernel (5 us) {ms2(Tmq)} -> {t3(F.tps_card(1000, Tmq))} "
+          f"(thresholds unchanged: the pass is on both sides of the iff); DESIGN-4 round 3 on its fuller basis: 2.035 / 2.012 / 3.720")
+    # --- P6: fit margins in bytes and the x shift per GB of overhead
+    for s, L in ((M, 32768), (D, 32768), (M, 1048576), (D, 131072)):
+        xs = [min_x(s, p, L) for p in range(4)]
+        margins = [DIE_MEM - (inst_die_weights(s, p, xs[p]) + inst_die_kv(s, p, L) + WS + O_RT) for p in range(4)]
+        savedO = O_RT; O_RT = F.O_RT + GB; xs1 = [min_x(s, p, L) for p in range(4)]; O_RT = savedO
+        print(f"[ALT-P-margin-{s['name']}-{L}] exact per-die margin at the minimal x {xs}: {[m // 10**6 for m in margins]} MB ('0.1 GB' was 86.0 - 85.9 in floored tenths); "
+              f"minimal x at +1 GB overhead {xs1} (+{[b - a_ for a_, b in zip(xs, xs1)]} per mille per GB)")
+    # --- P7: draft on the host CPU share
+    print(f"[ALT-P-draft-share] 3 draft tokens {ms2(3*d0)} ms of the verify step {ms2(T4)} ms = {t10(pct(3*d0, T4))}% (the text said 2.3)")
+    # --- P8: the measured sequential basis for the tier question (DESIGN-3 round 3: G_page3 / G_tier3)
+    for c in (38, 114):
+        print(f"[ALT-P-tier3-cpg{c}] measured per-page basis (3 101 ns per 64 KiB page, 4 x 12 391 per extent, + c): G(64 KiB) {t10(A.G_page3(64*KiB, c))} ; two-tier 32k {t10(A.G_tier3(32768, c))} ({spc(pcs(A.G_tier3(32768, c), A.G_page3(64*KiB, c)))}) ; 256 KiB pages {t10(A.G_page3(256*KiB, c))}")
+
 if __name__ == "__main__":
-    main(); extras()
+    main(); extras(); proofround()
