@@ -70,7 +70,7 @@ host-bounce bytes/toker ≤ link budget, thermal envelope 150 W/die class.
    draft's own layers contend for the same dies?)
 7. Rollout plan: which 2-die subset proves the model first (one card),
    scaling path 1 card → 2 → 4 with re-partition steps.
-8. Experiment ladder on the HOST only (no NPU needed): link microbench
+8. Experiment ladder on the HOST only (no device kernel needed): link microbench
    specs, host-bounce latency under concurrent load, KV growth trace.
 9. Risk register: memory infeasibility at 1M context (KV bytes math),
    host-bounce becoming serial bottleneck, layer-split's +2% ceiling.
