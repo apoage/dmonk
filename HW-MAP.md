@@ -236,5 +236,10 @@ copies are the ~7 GB/s software path — never use them on a hot path.
 silently computes only columns 0–15 (the (16,256,64) design tile is
 impossible; the working loop is a 16-chunk (16,16,128) sequence). k=32 and
 k=128 are correct; **k=64 is nondeterministically wrong** (32/128 reps
-exact — erratum #14; open anomaly, cause not isolated). The align/init flags in the MMA parameter struct are
+exact — erratum #14) — **both verdicts measured on the i8×i8 tuple only,
+where a k-fragment is 32 deep; they do NOT transfer to f16 (fragment 16
+deep: f16 k=32 is the two-fragment shape, f16 k=64 the four-fragment shape
+that works in i8 as k=128, f16 k=128 has no i8 analogue) — an f16
+(16,16,k) sweep for k ∈ {16,32,64,128} is REQUIRED before any f16 k-shape
+is trusted** (open anomaly, cause not isolated). The align/init flags in the MMA parameter struct are
 ignored on this part.
