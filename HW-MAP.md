@@ -93,10 +93,11 @@ the page-table read (kept in US) and the per-tile barrier+MMA.
 |---|---|---|
 | DDR → vector SRAM | 173–177 GB/s **aggregate** | full streaming rate |
 | DDR → S1 (plain copies, pre-packed layout) | **180 GB/s aggregate** (≈22.5/core) | DRAM-roof-bound; per-core slabs, 64 MiB working set |
+| **DDR → S1 bulk A staging (ONE pack per launch, 2×32 KiB legs, feeding loader-only S1→L0A lifts)** | **measured — production route** (expert-GEMM kernel) | the pattern ALTERNATIVES.md's S1/S2 rows assume; A stays S1-resident for the whole launch |
 | Vector SRAM → S1 (plain fill, 48–64 KB tiles) | **250–255 GB/s/core** | plateau; ≤32 KB tiles masked by a ~91 µs launch+queue floor |
 | Grouped quant-GEMM, vendor op (MoE decode shape: 8 groups, 1 token/group, K=N=4096, i8 weights) | **24.6 GB/s** effective weight read, relerr 0 | measured — the floor any custom MoE kernel must beat by ~5× |
 | S1 → L0A/L0B (loader) | **26.5 GB/s/core strict-serial** | measured — superseded in production by the direct path below |
-| **DDR → L0B direct load (bypassing S1 entirely)** | **181.3 GB/s aggregate** | measured, byte-exact — now the production B path (beats the S1-staged DataCopy leg at 180.4); with one full barrier per tile and two 32 KiB parity halves the whole kernel runs **174.6 GB/s m=1, flat m=1..16, fp64 20/20** |
+| **DDR → L0B direct load (bypassing S1 entirely)** | **181.3 GB/s aggregate** | measured, byte-exact — now the production B path (beats the S1-staged copy leg at 180.4); with one full barrier per tile and two 32 KiB parity halves the whole kernel runs **174.6 GB/s m=1, flat m=1..16, fp64 20/20** |
 | DDR → L0 direct load instructions | exist in ISA | **UNMEASURED on silicon** (may be a silent no-op — see errata) |
 | MMA issue cost | **15 ns/call at (m,n,k)=(16,16,128)** | measured — 4096 calls/core = 61 µs vs 487 µs stream = 12.5% occupancy |
 | Full W8 decode kernel (i8×i8 route, per-token-quantized A) | **174.6 GB/s aggregate, flat m=1..16** (serial fallback 138.9; m>=24 stays serial: 81/59/43 — direct-load multi-strip wedge unresolved) | measured, fp64 20/20 — the 173.8 "roof" was a read+write roof; pure read streams sustain ~181 |
@@ -104,6 +105,7 @@ the page-table read (kept in US) and the per-tile barrier+MMA.
 | **f16→i8 activation quantization ON-DEVICE** (the production-chain pass) | **measured, works: 43.7 µs at m=1, K=8192 (+12.2% over host-packed A)**; end-to-end fp64-exact ×20 (relerr 1.07e-7); integrated kernel 135.5 GB/s f32-in/f32-out | measured (production integration season) — the cast is **rint-half-even, saturating at ±127** (which conveniently ENFORCES the [−127,127] quantizer clamp the MoE overflow bound requires); one-time weight repack at load = 0.82 s/GB |
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 | L0C → US window drain (copy-out 1 KB chunks, queue-fenced) | **152.8 / 222.3 / 260.3 / 285.5 GB/s/core at mt = 1..4** | measured — **9×–45× above the 3.41/6.83/12.28/16.37 hide thresholds: the drain is HIDDEN at every mt**, content-checked exact |
+| **US → US strided copy (post-PV row extraction, plain strided bytes)** | **works — measured REAL** (production expert-GEMM kernel epilogue, differencing-verified) | no layout transform (the ~7 GB/s transform-copy path is a different route); stride math must follow the fragment-order L0C → US drain below |
 | **i32 accumulator overflow semantics** | **SILENT SATURATION at 2³¹−1** (not wrap) | measured: 127² chains exact to 2,147,092,480 (99.98 % of 2³¹); −128² chains hitting 2³¹ exactly clamp at 2,147,483,647 — **the [−127,127] quantizer clamp is REQUIRED; U_max = 32 MoE-shape chains are exact (bound HOLDS)**; L0C has no zero-init (pre-accumulation reads are nondeterministic → drain-before-accumulate required) |
 | **Host bounce λ (die→host→die, 4 KiB sync legs)** | **12.2 / 12.1 µs per direction; bounce 23.8–24.6 µs; unchanged under die-0 saturating D2D load** | measured — 7.6× below the 91 µs launch-floor-class anchor, inside the 10/500 bracket; **bounce share of any step ≈ 0.1 % — negligible for the planner** |
 
@@ -233,6 +235,6 @@ copies are the ~7 GB/s software path — never use them on a hot path.
 **MMA shape constraints (measured):** per-call **n caps at 16** — n=256
 silently computes only columns 0–15 (the (16,256,64) design tile is
 impossible; the working loop is a 16-chunk (16,16,128) sequence). k=32 and
-k=128 are correct; **k=64 is deterministically wrong** (open anomaly,
-cause not isolated). The align/init flags in the MMA parameter struct are
+k=128 are correct; **k=64 is nondeterministically wrong** (32/128 reps
+exact — erratum #14; open anomaly, cause not isolated). The align/init flags in the MMA parameter struct are
 ignored on this part.
