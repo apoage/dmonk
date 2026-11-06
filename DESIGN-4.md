@@ -1,7 +1,7 @@
 # DESIGN-4 — fleet partition planner (4 cards × 2 dies, no P2P, layer-split-only runtime)
 
-> **ROUND-3 STATUS (re-grounding on the season (v1) measurements — HW-MAP commit 8a7079f; the ALTERNATIVES variants of
-> 1a2fd43 with the steering correction 5fd13dc; `proof/fleet.py` `[R3-*]`, PROOF-COVERAGE-4.md round-3 section).** Three
+> **ROUND-3 STATUS (re-grounding on the season (v1) measurements — HW-MAP commit e9349c8; the ALTERNATIVES variants of
+> dd5f84c with the steering correction 0915e22; `proof/fleet.py` `[R3-*]`, PROOF-COVERAGE-4.md round-3 section).** Three
 > inputs this plan carried as assumptions or as PROBLEM-3 branches are now measured, and three partition variants are
 > first-class: (1) **the host bounce is 12.2 / 12.1 µs per direction** (bounce 23.8–24.6 µs, unchanged under a saturating
 > D2D load on die 0) — 7.5× below the 91 µs anchor round 2 borrowed from the kernel-launch floor, which is a *different*
@@ -47,11 +47,11 @@ Scope (PROBLEM-4.md): place one model (dense-GEMM shape and MoE shape, both para
 residency lands inside the 320..400 GB band that errata #12 forces), its KV cache and a draft model on 8 dies
 of 86 GB, choose the per-token exchange schedule through host memory, and predict tokens/s per card at
 L ∈ {4k, 32k, 128k, 1M} with the binding constraint named per cell. Everything derives from HW-MAP.md (as of
-commit f951a5c, the direct-load silicon sync; **round 3: commit 8a7079f, the season (v1) validation pack**), DESIGN.md (dense decode kernel: the per-die rate inputs),
+commit 7f53dce, the direct-load silicon sync; **round 3: commit e9349c8, the season (v1) validation pack**), DESIGN.md (dense decode kernel: the per-die rate inputs),
 DESIGN-2.md (MoE kernel: the per-expert chain and its two regimes) and PROBLEM-3.md (attention: the two
 unmeasured rates G and E are carried as branches — rounds 1–2 predate DESIGN-3.md and state a minimal branched
 attention model here; **round 3 replaces it with DESIGN-3's measured round-3 chain (§3.5) and adds the ALTERNATIVES.md
-variants (1a2fd43, steering correction 5fd13dc) as first-class partition variants (§1.8, §5′)**). Status tags: **M** measured (HW-MAP), **D2** derived in DESIGN-2,
+variants (dd5f84c, steering correction 0915e22) as first-class partition variants (§1.8, §5′)**). Status tags: **M** measured (HW-MAP), **D2** derived in DESIGN-2,
 **D** derived here by arithmetic shown, **A** explicit assumption with the host experiment (H-number, §8)
 that measures it, **U** unmeasured and branched.
 
@@ -91,7 +91,7 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 | α | draft acceptance per token: 0.5 / **0.7** / 0.9 | A — fleet-only (§8 H9) |
 | Π | sequences in flight across the chain: **1 (measured)**; 8 is the §5 what-if | M / U — H4 |
 
-| **Round 3 — measured (HW-MAP 8a7079f) and the variant inputs** | | |
+| **Round 3 — measured (HW-MAP e9349c8) and the variant inputs** | | |
 | λ (round 3) | **12.2 µs per direction** (12.2 / 12.1 measured; bounce 23.8–24.6 µs; unchanged under a saturating D2D load on die 0) — the round-2 anchor 91 µs was the kernel-launch floor, a different quantity; the 10 / 91 / 500 µs points are kept as what-ifs | **M** (round 3) |
 | T_launch | 91 µs kernel launch + queue floor — unchanged, now split from λ | M |
 | G (round 3) | **169.2 GB/s at 256 KiB pages** (the DESIGN-3 §10 default and this plan's primary; = the sequential rate, c_pg = 3 ns), 167.0 at 64 KiB shuffled (c_pg 39 ns), 153.8 at 16 KiB; the W8 kernel's 174.6 is the ceiling (the attention choreography's per-tile barrier + per-chunk MMA cost 3.2 %); "gather3x" 58.2 is a what-if only | **M** (round 3, E21) |

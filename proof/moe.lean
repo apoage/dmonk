@@ -27,7 +27,7 @@ def rStage : Nat := 1800
 def lSer : Nat := 265
 /-- HW-MAP data-movement table: MMA issue cost 15 ns/call at (m,n,k) = (16,16,128) (measured). ns. -/
 def cMma : Nat := 15
-/-- HW-MAP@3eaf322 "Full W8 decode kernel" row (the design's anchor): 137.8 GB/s aggregate, m=1 = m=16,
+/-- HW-MAP@a6d0ec0 "Full W8 decode kernel" row (the design's anchor): 137.8 GB/s aggregate, m=1 = m=16,
     fp64 20/20; the same table's MMA row quotes the 487 µs per-core stream it ran in. Tenths / ns. -/
 def rDense : Nat := 1378
 def tDense : Nat := 487000
@@ -46,7 +46,7 @@ def rUsS1 : Nat := 2500
 /-- HW-MAP hierarchy table: S1 ~1 MB (PRIOR), taken as decimal 1 000 000 B = 976 KiB; US ≥ 208 KB evidenced. -/
 def s1P : Nat := 1000000
 def usEvidenced : Nat := 208 * 1024
-/-- HW-MAP (current, f951a5c) "Full W8 decode kernel" row: 174.6 GB/s aggregate flat m=1..16 on the
+/-- HW-MAP (current, 7f53dce) "Full W8 decode kernel" row: 174.6 GB/s aggregate flat m=1..16 on the
     DDR → L0B direct path (serial fallback 138.9). Tenths. Not the design's anchor: see T_sync_*. -/
 def rKernelDirect : Nat := 1746
 def rSerialFallback : Nat := 1389

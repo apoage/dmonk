@@ -486,13 +486,13 @@ def extras():
 
 # ============================================================ PROOF ROUND (2026-11-05): [ALT-P-*] re-derived cells ======
 # Prover-forced corrections and the re-derivations the proof round applied before proving (PROMPT-5P): the on-device
-# f16->i8 activation pass is MEASURED (HW-MAP 5fd13dc: 43.7 us per pass, rint-half-even saturating +-127), so every claim
+# f16->i8 activation pass is MEASURED (HW-MAP 0915e22: 43.7 us per pass, rint-half-even saturating +-127), so every claim
 # that assumed the magic-bias quantizer or the host-bounce fallback is re-derived; the serial-chain W4 piece carried 4 KiB
 # of f16 per 2 KiB of int4 (it is 8 KiB: two MMA calls); the two-tier dominance is restated with its floor thresholds.
-# Every label above keeps printing its ALTERNATIVES (1a2fd43) value; the [ALT-P-*] labels are the moved / new cells.
-C_Q      = 43_700            # on-device A-quantization pass, ns per pass at m=1, K=8192 (M, HW-MAP 5fd13dc)
+# Every label above keeps printing its ALTERNATIVES (dd5f84c) value; the [ALT-P-*] labels are the moved / new cells.
+C_Q      = 43_700            # on-device A-quantization pass, ns per pass at m=1, K=8192 (M, HW-MAP 0915e22)
 Q_PASSES = 4                 # quantized GEMM inputs per layer: QKV, O, gate/up, down (D, as DESIGN-4 round 3)
-LAM_MEAS = 12_200            # measured host-bounce latency per direction, ns (M, HW-MAP 8a7079f)
+LAM_MEAS = 12_200            # measured host-bounce latency per direction, ns (M, HW-MAP e9349c8)
 T_PIECE_W4_SER_C = tn(2 * KiB, R_W4V_CORE) + tn(8 * KiB, R_US_S1) + tn(8 * KiB, R_LOADER) + 2 * (C_RES_T // 10) + 2 * C_MMA
 T_SLAB_W4_SER_C  = 512 * T_PIECE_W4_SER_C      # corrected serial-chain core-slab time (f16 legs 8 KiB, 2 MMA calls per 2 KiB i4)
 def quant_per_token(s): return s["nL"] * Q_PASSES * C_Q
@@ -518,7 +518,7 @@ def proofround():
     global T_SLAB_W4_SER, T_PIECE_W4_SER, T_SLAB_W4_OVL, O_RT
     D, M = F.DENSE, F.MOE
     a = alt1()
-    print("\n## [ALT-P] proof-round re-derivations (PROMPT-5P; HW-MAP 5fd13dc / 08eec08 inputs)")
+    print("\n## [ALT-P] proof-round re-derivations (PROMPT-5P; HW-MAP 0915e22 / fa2c24a inputs)")
     # --- P1: the serial-chain W4 piece carries 8 KiB of f16 per 2 KiB of int4 (two (16,16,128) calls), not 4 KiB
     print(f"[ALT-P-w4ser] serial-chain piece per 2 KiB i4 (4 096 values -> 8 KiB f16): unpack {tn(2*KiB, R_W4V_CORE)} + US->S1 {tn(8*KiB, R_US_S1)} + loader {tn(8*KiB, R_LOADER)} "
           f"+ 2 x residual {2*(C_RES_T//10)} + 2 x MMA {2*C_MMA} = {T_PIECE_W4_SER_C} ns (as written: {T_PIECE_W4_SER}, 4 KiB legs and one call); "

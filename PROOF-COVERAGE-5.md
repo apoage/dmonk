@@ -30,17 +30,17 @@ drain rate `R` and η are explicit arguments of the model.
 | `axiom` / `sorry` / `native_decide` | 0 / 0 / 0; `#print axioms` on the umbrellas and the ∀-theorems reports only the standard `propext` / `Classical.choice` / `Quot.sound` that `omega` / `simp` emit; the cell theorems (`decide`) depend on no axiom |
 | `decide +kernel` | 7 (the Zipf traffic shares over D = lcm(1..256), a 110-digit scaled natural; the 255-case Int magic-bias checks; the hot/cold cell) — the elaborator's recursion limit, not the kernel's |
 | Leaf closers | `decide`, `omega`, `rfl`, `simp only` with core lemmas (`Nat.mul_one`, `Nat.add_mul`, `Nat.mul_add`, `Nat.mul_assoc`), `exact`/`apply` of core lemmas (`Nat.le_div_iff_mul_le`, `Nat.div_lt_iff_lt_mul`, `Nat.lt_succ_iff`, `Nat.lt_iff_add_one_le`, `Nat.div_le_div_right`, `Nat.mul_le_mul_left/right`, `Nat.sub_le_sub_left`, `Nat.le_mul_of_pos_right`, `Nat.mul_lt_mul_of_pos_left`, `Nat.mul_left_comm`, `Nat.mul_div_mul_left`, `Nat.div_eq_of_lt`, `Nat.mod_eq_of_lt`, `Nat.div_add_mod`, `Nat.add_lt_add_iff_right`); structure: `unfold`, `rw`, `generalize`, `cases`, `by_cases`, `refine`, `calc` |
-| `python3 -I proof/alt.py` | runs, no dependencies; the 135 original label lines print **byte-identical** to commit 1a2fd43; the proof round appended the `[ALT-P-*]` section (31 labels) |
+| `python3 -I proof/alt.py` | runs, no dependencies; the 135 original label lines print **byte-identical** to commit dd5f84c; the proof round appended the `[ALT-P-*]` section (31 labels) |
 | Model duplication | `Fleet2` = fleet.py `step` at its primary branch with the expert-slab time, launches per layer and λ explicit (`today` = the ledgered cell); `Attn2` = attn.py `step_ns` (drain hidden, R_drain 10 GB/s, merge 7 000) + `G_tier`; `T_alt_baseline_identity` proves the "today" cells equal fleet.lean's 2 362 319 269 / 133 847 319 ns (0.105 / 1.867) and attn.lean's 775 778 / 851 470 / 903 650 / 24 605 602 ns |
 
 ## Inputs applied by steering before proving (PROMPT-5P)
 
 | Input | Where it enters | Effect |
 |---|---|---|
-| **f16 → i8 activation pass MEASURED**: 43.7 µs per pass at m = 1, K = 8192, rint-half-even saturating ±127 (HW-MAP 5fd13dc) | `Measured.cQ`, `quantTok s = n_L × 4 × 43.7 µs`, `quantDraft` | rows 19–21 re-derived (P5–P7); the instance / direct-path / megakernel cells restated with the pass on both sides (P8, P12); T_instance_gain_q, T_megakernel_moe_q |
-| **H10 GREEN at die scale**: two instances on disjoint dies at 1.99× aggregate (HW-MAP 08eec08) | `Measured.etaH10 = 995`, `tpsInstEta` | T_instance_gain_h10: the verdict needs only η ≥ 482 ‰ (P9); the two-card inheritance stays the hypothesis |
+| **f16 → i8 activation pass MEASURED**: 43.7 µs per pass at m = 1, K = 8192, rint-half-even saturating ±127 (HW-MAP 0915e22) | `Measured.cQ`, `quantTok s = n_L × 4 × 43.7 µs`, `quantDraft` | rows 19–21 re-derived (P5–P7); the instance / direct-path / megakernel cells restated with the pass on both sides (P8, P12); T_instance_gain_q, T_megakernel_moe_q |
+| **H10 GREEN at die scale**: two instances on disjoint dies at 1.99× aggregate (HW-MAP fa2c24a) | `Measured.etaH10 = 995`, `tpsInstEta` | T_instance_gain_h10: the verdict needs only η ≥ 482 ‰ (P9); the two-card inheritance stays the hypothesis |
 
-## Corrections forced by formalization (ALTERNATIVES 1a2fd43 → this round)
+## Corrections forced by formalization (ALTERNATIVES dd5f84c → this round)
 
 | # | Where | Round 1 said | Now | Caught by |
 |---|---|---|---|---|
@@ -82,7 +82,7 @@ in the two cold-tier terms (T_instance_form) — the forms behind the iffs.
 | 16 | pays iff c_sync ≤ 113 750 / 109 200 (launch only), ≤ 109 903 / 108 430 net (dense / MoE); cells at 2 / 5 / 20 µs: dense 0.108 / 0.108 / 0.107, MoE 2.101 / 2.094 / 2.058 | **iff for every c_sync, both directions**; dense ties at 109 903 (strict ≤ 109 902); MoE threshold invariant under the measured pass | PROVED (∀ c_sync); **CORRECTED** (dense tie) | [ALT-3-*-threshold] [ALT-3-*-csync*] [ALT-P-variants-q] | T_megakernel_dense, T_megakernel_moe, T_megakernel_moe_q, T_alt_mega_threshold_cells, T_alt_mega_cells, T_megakernel |
 | 17 | draft token 18 092 / 9 265 / 7 172 µs at 121 / 24 / 1 launches; verify step 54.27 / 27.79 / 21.51 ms | as quoted (launch share 60.9 %) | PROVED | [ALT-3-draft-*] | T_alt_draft_launches |
 | 18 | head-aligned QKV packing alone: dense 2 351.39 ms (+0.9 %), MoE 131.29 (+1.9 %); the attention of KV head c needs only core c's slice | cells as quoted; the slice property is a DEFINITION (a host-side column permutation, no number) | PROVED / DEFINITION | [ALT-3-headaligned-*] | T_alt_headaligned, T_alt_launch_table |
-| 19 | f16 magic bias 1280: q + 1280 ∈ [1024, 2048) and low byte = q mod 256 for every q ∈ [−127, 127]; f32 analogue with bias 12 582 912 | true (exhaustive over 255 values; −128 also satisfies it) | PROVED (`decide +kernel` over 255 Int cases); **SUPERSEDED** as a mechanism (HW-MAP 5fd13dc: the cast exists) | [ALT-4-magic] | T_alt_magic_f16, T_alt_magic_f32, T_alt_magic_cells |
+| 19 | f16 magic bias 1280: q + 1280 ∈ [1024, 2048) and low byte = q mod 256 for every q ∈ [−127, 127]; f32 analogue with bias 12 582 912 | true (exhaustive over 255 values; −128 also satisfies it) | PROVED (`decide +kernel` over 255 Int cases); **SUPERSEDED** as a mechanism (HW-MAP 0915e22: the cast exists) | [ALT-4-magic] | T_alt_magic_f16, T_alt_magic_f32, T_alt_magic_cells |
 | 20 | quantizer cost 102 400 / 45 056 elements × 8 lane-ops = 19 / 8 µs per core per layer = 0.1 / 0.2 % | as written ✓ (18 962 / 8 343 ns); **RE-DERIVED: 4 × 43.7 µs = 174.8 µs per layer = 0.9 % / 3.5 %** (9× the estimate) | PROVED (as written, op count ASSUMPTION) → **CORRECTED** by the measured pass | [ALT-4-dense] [ALT-4-moe] [ALT-P-quant-*] | T_alt_quant_cost_written, T_alt_quant_measured |
 | 21 | host-quantization fallback 738 / 730 µs per layer → dense 2 450.82 ms (−2.8 %), MoE 154.29 (−13.2 %); draft +17.52 ms; Route-1b 106.0 | as written ✓ (at λ = 91 µs); **RETIRED**: at the measured λ the bounce is 107 / 100 µs per layer (0.105 / 1.829), cheaper than the pass | PROVED (as written) → **CORRECTED** | [ALT-4-*] [ALT-4-route1b] [ALT-P-quant-*] | T_alt_quant_fallback_written, T_alt_quant_bounce_measured_lambda, T_alt_variants_q |
 | 22 | two-tier G at 32k: 174.2 / 172.8 / 167.6 / 155.2 at c_pg = 0.1 / 0.5 / 2 / 6.005 µs vs 64 KiB 169.0 / 149.7 / 104.8 / 58.2; at 34 768: 173.6 / 171.0 / 161.6 / 141.1; at c_pg = 0 all 174.6 | as quoted (34 768 at c_pg = 0 is 174.3: the eight tail pages) | PROVED (c_pg EMPIRICAL — E34; measured lower bound 38 ns) | [ALT-5-G-cpg*] | T_alt_tier_cells |
@@ -137,7 +137,7 @@ in the two cold-tier terms (T_instance_form) — the forms behind the iffs.
 **32 / 32 ledger rows covered** (all PROVED on the integer model; 8 carry a CORRECTED statement, 1 is SUPERSEDED
 as a mechanism, 1 contains a DEFINITION clause); **13 / 13 re-derived rows proved**; **0 orphans** (every number in
 the corrected ALTERNATIVES.md text is printed by an alt.py label — the original 135 label lines byte-identical to
-1a2fd43 plus the 31 `[ALT-P-*]` lines); **0 uncited labels** in the ledger (`[ALT-2-mindies]` → row 6,
+dd5f84c plus the 31 `[ALT-P-*]` lines); **0 uncited labels** in the ledger (`[ALT-2-mindies]` → row 6,
 `[ALT-4-route1b]` → row 21, `[ALT-9-tokendrop]` / `[ALT-9-specialization]` / `[ALT-9-p2p]` → row 31).
 
 EMPIRICAL rows (no theorem claims them; the theorems take them as hypotheses or branches): H9 (the popularity

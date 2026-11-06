@@ -2,7 +2,7 @@
 
 ```
 Round 2 — verification, same rules as the dense and MoE rounds. DESIGN-4.md
-is committed (5396dd5); prove it. An unverifiable number counts as
+is committed (dd78a8d); prove it. An unverifiable number counts as
 unverified; and this document steers a hardware purchase decision, so its
 arithmetic will be checked harder than most.
 

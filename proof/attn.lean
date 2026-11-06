@@ -27,7 +27,7 @@
   No `axiom`, no `sorry`, no `native_decide` anywhere.
 
   ROUND 3 (2026-11-05): the `T3r_*` section at the end of this file re-grounds every moved cell on the season (v1)
-  measurements (HW-MAP commit 8a7079f: E21 gather rates per page size, E22 exp / reduce-max / And / rho32 / sigma_s,
+  measurements (HW-MAP commit e9349c8: E21 gather rates per page size, E22 exp / reduce-max / And / rho32 / sigma_s,
   R_drain, the merge chain); the round-2 theorems above are kept as the arithmetic of the round-2 model and its retired
   branches (PROOF-COVERAGE-3.md's round-3 section says which cells they no longer describe).
 -/
@@ -1055,7 +1055,7 @@ theorem T_harness : 7 * 7 * 128 = 6272 ∧ 512 * 6272 * 7 = 22478848 ∧ 2 ^ 24 
     pattern check still differences every visit (the host sums the visited pages), so the probe stays valid -/
 theorem T_e21_arena : 8 * 2048 * MiB = 16 * 1024 * MiB ∧ 4 * 1024 * MiB < 8 * 2048 * MiB ∧ 8 * 2048 * 65536 = 1024 * MiB := by decide
 
-/-! # ROUND 3 (2026-11-05) — the season (v1) measurements (HW-MAP commit 8a7079f) ground the model
+/-! # ROUND 3 (2026-11-05) — the season (v1) measurements (HW-MAP commit e9349c8) ground the model
 
   Every round-2 theorem above is kept (it is the arithmetic of the round-2 model and its branches); the
   round-3 theorems `T3r_*` re-instantiate every moved cell on the measured constants. The measured
@@ -1098,7 +1098,7 @@ def rDrain1 : Nat := 1528
 def rDrain2 : Nat := 2223
 def rDrain3 : Nat := 2603
 def rDrain4 : Nat := 2855
-/-- the validation pack's merge-chain itemisation, lane-eq per block-fragment (commit 8a7079f message) -/
+/-- the validation pack's merge-chain itemisation, lane-eq per block-fragment (commit e9349c8 message) -/
 def mergePack : Nat := 25750
 /-- the retained "3x slower" what-if (a scattered cache, c_pg ~ 6 us at 64 KiB): no longer a measured branch -/
 def g3x : Nat := 582

@@ -2,11 +2,11 @@
 
 ```
 Round 2 for the alternatives, same rules as every proof round (they have
-each caught material errors). ALTERNATIVES.md (1a2fd43) carries a 32-claim
+each caught material errors). ALTERNATIVES.md (dd5f84c) carries a 32-claim
 ledger (Appendix A) with alt.py labels. Prove it — with one input change
 already applied by steering: the f16->i8 activation pass is RESOLVED
 (measured 43.7 µs on-device, rint-half-even saturating +-127 — HW-MAP
-5fd13dc), so re-derive every claim that assumed the magic-bias trick or
+0915e22), so re-derive every claim that assumed the magic-bias trick or
 the bounce fallback before proving it.
 
 Load-bearing theorem set:

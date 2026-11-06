@@ -3,7 +3,7 @@
 ```
 Round 2 — verification, same rules as the dense, MoE, and fleet rounds
 (each of which caught material errors: a broken bijection, a false parity
-claim, double-counted latencies). DESIGN-3.md is committed (6363d0e);
+claim, double-counted latencies). DESIGN-3.md is committed (4bc9738);
 prove it. This design carries the fleet's largest open lever (the P4 proof
 round showed the gather-rate branch moves 1M-context MoE cells 2.7x), so
 its arithmetic will be checked as hard as the fleet's.
