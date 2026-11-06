@@ -1,5 +1,48 @@
 # ALTERNATIVES — pattern-matching the known solution families against the measured map (round 5)
 
+> **ROUND-2 (PROOF) STATUS — 2026-11-05, PROMPT-5P.** Every ledger row of Appendix A is now a theorem of
+> `proof/alt.lean` (104 theorems, core Lean 4.35, 0 axioms / sorry / native_decide; `PROOF-COVERAGE-5.md` is the
+> ledger). Two inputs were applied by steering before proving: **the f16 → i8 activation pass is MEASURED**
+> (HW-MAP 5fd13dc: 43.7 µs per pass, rint-half-even saturating ±127) and **H10 is GREEN at die scale** (HW-MAP
+> 08eec08: two instances on disjoint dies at 1.99×). Prover-forced corrections, all applied in place below
+> (`[ALT-P-*]` labels in `proof/alt.py`; every original label still prints its original value):
+> 1. **Serial-chain W4 piece (row 1, §2.1, E30):** a 2 KiB int4 piece is 4 096 values = **8 KiB of f16 and two
+>    (16,16,128) calls**, not 4 KiB and one: 596 → **807 ns**, core-slab 305 152 → **413 184 ns**, 55.2 → **40.8**
+>    W8-equivalent, 3.4 → **2.5 GB/s/core** of int4. The ser-branch cells move: MoE 32k 3.531 → **3.239 (+73.4 %)**,
+>    dense 32k 0.122 → **0.100 (−4.7 %)**, dense 128k −4.2 % → **−25.5 %** — dense replication needs the overlapped
+>    unpack regime (E30 decides it); MoE survives on both branches. Break-even margin 4.4× → **3.3×**
+>    (T_alt_w4_ser_corrected, T_instance_gain_measured).
+> 2. **The quantizer rows (§0 item 4, rank 4, §2.4, rows 19–21) are re-derived on the measured pass:** 4 × 43.7 µs =
+>    **174.8 µs per layer = 0.9 % of the dense step (0.105 → 0.104) / 3.5 % of the MoE step (1.867 → 1.801)**, draft
+>    +4.20 ms (+23 %); the 19 / 8 µs epilogue estimate and the magic-bias mechanism are retired (the bias arithmetic
+>    is still proved, T_alt_magic_f16/f32). The host-bounce fallback (−2.8 % / −13.2 % / −49 %) was priced at
+>    λ = 91 µs — at the measured 12.2 µs it would cost **107 / 100 µs per layer, less than the on-device pass**;
+>    E33 becomes "fuse the pass into the producing epilogue" to recover the 0.9 % / 3.5 % (T_alt_quant_measured,
+>    T_alt_quant_bounce_measured_lambda).
+> 3. **Drain iff (row 4, §2.2):** hidden iff R_drain ≥ **0.4** GB/s/core in tenths (exact 0.341; at 0.3 the drain
+>    is 109 226 ns > 96 089) — the measured 152.8 is 382× above (T_alt_direct_drain).
+> 4. **Two-tier dominance (row 23, §2.5):** in the integer model the floored 1 MiB extent (48 044 ns) is 12 ns per
+>    MiB *slower* than 16 floored 64 KiB pages (48 032) at c_pg = 0; the tier is faster **iff c_pg ≥ 1 ns** (per
+>    extent it saves 15·c_pg − 12 ns), visible in tenths from 3 ns; "G_tier ≤ G(1 MiB) with equality iff 4096 | L"
+>    holds exactly for c_pg ≥ 1. At the measured c_pg = 38 ns the tier buys **+1.1 %** (174.4 vs 172.4; step 786 →
+>    777 µs), at 3× (114 ns) **+3.5 %** — it dominates, by little (T_alt_tier_dominates, T_two_tier_measured;
+>    DESIGN-3 round 3 reads the same on the measured per-page basis: +1.3 %, ≥ 5 % only at c_pg ≥ 160 ns).
+> 5. **Fit margin (row 7, §2.1):** the minimal x leaves **24–40 MB** per die (MoE 32k) / **3–45 MB** (dense 32k),
+>    not "0.1 GB" — that figure was 86.0 − 85.9 in floored tenths; +1 GB of overhead needs x + 22 ‰ (MoE) / + 20–21 ‰
+>    (dense), the 2.2 % / 2.1 % as stated (T_alt_fit_margin, T_alt_fit_dx_per_gb, T_alt_fit_overhead_*).
+> 6. **Megakernel threshold (row 16):** dense is a *tie* at exactly 109 903 ns (pays strictly iff c_sync ≤ 109 902;
+>    MoE 108 430 both forms) — T_megakernel_dense.
+> 7. Minor: G = 2 on the direct path is **+1.6 %** in the pcs convention (169.9 vs 167.1; 1.68 % real), not +1.7 %;
+>    the draft on the host CPU is **2.2 %** of the verify step, not 2.3 % (T_alt_direct_g2, T_dominated_draft_host).
+> **What survives:** T_instance_gain — two 4-die instances beat the chain for every W4 core-slab time ≤ 1 371 124 ns
+> (iff; measured 197 844 is 6.9× inside, the corrected serial chain 3.3×), with the measured pass on both sides
+> ≤ 1 412 631 ns (**3.737 vs 1.801, +107.4 %**; dense 0.155 vs 0.104, +49.0 %), and with H10's concurrency
+> efficiency as a hypothesis the verdict needs only η ≥ 0.482 (measured 0.995 → 3.859). T_direct_path (167.1 /
+> 172.8, the whole A-lift bracket), T_megakernel (both directions), T_two_tier (as restated) and all eight dominated
+> families (as bounds) are proved. The fleet basis of every cell below is still the round-2 DESIGN-4 model
+> (`T_alt_baseline_identity`); DESIGN-4 round 3 re-grounds the same variants on its fuller basis (2.035 / 2.012 /
+> 3.720).
+
 Scope (PROMPT-5.md): take the solution families of acceleration engineering and match each against this device's
 measured constraints and the four designs (DESIGN.md dense W8 GEMM at the measured 174.6; DESIGN-2.md MoE grouped
 GEMM, 135.3 anchored to the serial-loader regime; DESIGN-3.md matrix-unit attention, 776 µs / 24.6 ms at 32k / 1M;
@@ -21,7 +64,8 @@ format with the theorem each one becomes.
    inverts the kernel-level verdict on the dead W4 vector path: a weight path that is 2.06× *slower* per byte but
    halves memory lets the model fit on **4 dies**, and two 4-die instances double the fleet's useful bandwidth.
    With the smallest int4 share that closes the fit, MoE 32k goes **1.867 → 3.878 tokens/s/card (+107.7 %)** and
-   dense 32k **0.105 → 0.156 (+48.5 %)** — robust to a 6.6× slower W4 path than measured (`[ALT-2-*]`).
+   dense 32k **0.105 → 0.156 (+48.5 %)** — robust to a 6.6× slower W4 path than measured (`[ALT-2-*]`; the corrected
+   serial-chain branch, 2.5 GB/s/core, is 3.3× inside the break-even: MoE 3.239, dense 0.100 — `[ALT-P-ser-*]`).
 2. **DESIGN-2 streams experts through the wrong path.** It is anchored to the S1-staged serial loader (135.3);
    the dense kernel's production path (DDR → L0B direct, 174.6 flat) carries the same per-core expert slices at
    **167.1 GB/s (A lift serialised) / 172.8 (overlapped)**, +23.5 % / +27.7 %, with every rate measured
@@ -30,10 +74,12 @@ format with the theorem each one becomes.
    a DDR-flag cross-core sync pays whenever a sync costs ≤ 109 µs (MoE) / 114 µs (dense) — a DDR round trip is µs
    class: MoE 32k +12.5 %, the draft token 18.1 → 9.3 ms (`[ALT-3-*]`). Combined with (2): MoE 32k +29.3 %;
    with (1) and (2): **+134 %** (`[ALT-2+3-moe-32k]`).
-4. **The production chain has an unresolved pass**: per-token f16 → i8 activation quantization between GEMMs
-   (ISA.md lists no f16 → i8 cast; the measured kernels used host-packed A). The fusion "quant + A-pack + GEMM
-   epilogue" costs 19 µs per dense layer (0.1 %) if a magic-bias trick or an unlisted cast works; the fallback is a
-   host bounce per GEMM: **−2.8 % dense, −13.2 % MoE, −49 % on the draft** (`[ALT-4-*]`).
+4. **The production chain's f16 → i8 pass is RESOLVED (HW-MAP 5fd13dc, applied by the proof round)**: the cast
+   exists (rint-half-even, saturating ±127) and the on-device pass measures 43.7 µs; charged four times per layer it
+   costs **174.8 µs per layer = 0.9 % dense (0.105 → 0.104), 3.5 % MoE (1.867 → 1.801), +23 % on the draft**
+   (`[ALT-P-quant-*]`). The magic-bias quantizer (19 / 8 µs) and the host-bounce fallback (−2.8 % / −13.2 % / −49 %,
+   priced at λ = 91 µs; 107 / 100 µs per layer at the measured 12.2 µs) are retired; the remaining lever is fusing
+   the pass into the producing GEMM's epilogue (E33) to recover the 0.9 % / 3.5 %.
 5. **Our pages are the right size only if c_pg = 0.** Two-tier pages (1 MiB extents + 64 KiB tail pages, compacted
    every 4096 tokens at 46 ns per token-layer) dominate every fixed page size for every c_pg > 0: attention at 32k
    904 → 784 µs at c_pg = 0.5 µs, 1 288 → 808 at 2 µs, 2 313 → 872 on the "gather 3×" branch (`[ALT-5-*]`).
@@ -73,7 +119,7 @@ tokens/s/card at L = 32k (DESIGN-4's 40 % cells), kernel = t = 1 GB/s, attn = t 
 | 8 | **Shared-prefix batched attention** (prefix/cache reuse across sequences) | P3, P4 | fleet B = 16 cells | dense +3.8 / +17.3 / +34.8 % at L_s = 4k / 16k / 28k of 32k `[ALT-7-dense-*]`; MoE +2.4 / +10.5 / +19.9 % | 0.8 | ≈ 10 (L_s = L/2) | #2, #9; passes = ⌈B·g/64⌉ | H12 |
 | 9 | **Lazy-rescale online softmax**: O resident in L0C, no per-block merge, rescale only on a max jump > 8 (flash-decoding's merge removed) | P3 | attn t = 16, g = 8 (not a scored cell) | two-pass 1 554 → **787 µs** (−49.3 %), S4 1 032 → 787 `[ALT-8-32768-nat_nat-full]`; −23.7 % / −4.8 % on the tree / worst corners; dominates S4 and two-pass on every corner | 0.7 | — | #5 (P ≤ e⁸ ≪ 65 504), E24's exactly-full L0A/L0C | E35 |
 | 10 | Head-aligned QKV column packing alone (fusion attention + QKV launch, no sync) | P1, P3 | fleet | dense +0.9 %, MoE +1.9 % `[ALT-3-headaligned-*]` | 0.95 | 1.8 | none new | — |
-| 11 | DESIGN-2's expert-pair knob G = 2 on the direct path | P2 | kernel | 99 374 → 97 731 ns per expert (+1.7 %) `[ALT-1-chain]` | 0.9 | 1.5 | A-reg2 pattern (E15) | — |
+| 11 | DESIGN-2's expert-pair knob G = 2 on the direct path | P2 | kernel | 99 374 → 97 731 ns per expert (+1.6 %, 169.9 GB/s) `[ALT-1-chain]` `[ALT-P-g2]` | 0.9 | 1.5 | A-reg2 pattern (E15) | — |
 | 12 | All-W4 replication (x = 1000, no tier) | P4 | fleet MoE 32k | 2.725 (+46 %) — **dominated** by the minimal-x tier (3.878) `[ALT-2-allw4-moe-32k]` | 0.5 | — | — | — |
 | 13 | Rows-cliff repair (flat m-curve to 64) | P1, P4 | fleet 4k B = 64 | dense ×3.2 (5.314), MoE ×1.9 at 4k; **memory-infeasible at 32k** (L_max(64) = 8 613 / 30 090) `[ALT-9-rowscliff-*]` | 0.3 | — (4k only) | the unresolved multi-strip wedge | E37 |
 | 14 | Capacity-factor token dropping (cap D at 64 of 128 at t = 16) | P2 | MoE B = 16 | ×1.9 per launch `[ALT-9-tokendrop]` at the price of 50 % of the routed pairs — a model-quality decision, unranked | — | — | — | — |
@@ -133,20 +179,26 @@ memory is what pins the fleet to one instance.
   exchange 0.75 ms (8 λ + 28 µs) → **T_inst = 128.89 ms** (today's 8-die step: 133.84).
 - tokens/s/card = 2 × 1000 / (4 × 128.89 ms) = **3.878** vs 1.867 (+107.7 %). Zipf(1.0) popularity with the
   coldest 18 % as int4 (they carry 3.2 % of the traffic, `[ALT-2-zipf-share]`): 119.31 ms → **4.190** (+124.4 %).
-  With the serial-chain branch of the unpack (55.2 W8-equivalent GB/s, `[ALT-0-w4v]`): 141.59 ms → 3.531 (+89.1 %).
+  With the serial-chain branch of the unpack (40.8 W8-equivalent GB/s after the proof-round correction of its f16
+  legs, `[ALT-P-w4ser]`): 154.36 ms → 3.239 (+73.4 %) (as written, 55.2 / 596 ns: 141.59 ms → 3.531).
   With DESIGN-2's serial-loader hot kernel instead of §2.2: 3.521 (+88.5 %).
 - Dense 32k: x = 376 / 358 / 332 / 376 ‰; W = 3 039 ms (0.65 of the bytes at 174.6, 0.35 at 84.8 W8-equivalent);
   T_inst = 3 197.94 ms → **0.156 (+48.5 %)**; with spec decode (k = 3, α = 0.7) 0.389 vs 0.262 (+48.4 %); the
-  serial-chain branch +16.1 %. Per-sequence latency is +35 % worse for dense and 4 % *better* for MoE (128.89 <
+  corrected serial-chain branch **loses: 0.100 (−4.7 %)** (`[ALT-P-ser-dense-32768]`; +16.1 % as written) — the dense
+  gain needs the overlapped unpack regime, which E30 decides. Per-sequence latency is +35 % worse for dense and 4 % *better* for MoE (128.89 <
   133.84: the direct-path hot tier and 8 fewer λ outweigh the int4 bytes).
 - Long context: MoE 128k 2.530 (+100.9 %), 1M 0.596 (+91.0 %, x = 83 %); with full KV-int8 (#6) MoE 1M 1.058 and
   128k 3.294 (`[ALT-2+6-moe-*]`). Dense 128k 0.123 (+30.8 %); **dense 1M cannot replicate** (KV alone 128.8 GB f16
   / 64.4 GB int8 per 4-die position): the 8-die KV-int8 layout of DESIGN-4 stays.
-- Robustness (`[ALT-2-breakeven-moe-32k]`): two instances beat one for every W4 core-slab time ≤ 1 371 124 ns,
-  i.e. any unpack rate ≥ 0.8 GB/s/core — 6.6× below the measured 5.3 and 4.4× below the serial-chain branch (3.4).
+- Robustness (`[ALT-2-breakeven-moe-32k]`, T_instance_gain — an iff over every T_cold): two instances beat one for
+  every W4 core-slab time ≤ 1 371 124 ns, i.e. any unpack rate ≥ 0.8 GB/s/core — 6.6× below the measured 5.3 and
+  3.3× below the corrected serial-chain branch (2.5; 4.4× / 3.4 as written). With the measured A-quant pass on both
+  sides the break-even is 1 412 631 ns and the cell 3.737 vs 1.801 (+107.4 %, `[ALT-P-breakeven-q]`); with H10's
+  concurrency efficiency as a hypothesis the verdict needs only η ≥ 0.482 (measured 0.995, `[ALT-P-h10]`).
   At 4.0 / 3.0 GB/s/core the cell is 3.662 / 3.405 (`[ALT-2-sens-w4rate-*]`).
-- Memory margin: the minimal x leaves 0.1 GB per die at the assumed overhead; each GB of extra overhead needs
-  Δx = 1 GB / (7 × 6.44 GB) = 2.2 % (MoE) / 1 GB / (30 × 1.59 GB) = 2.1 % (dense); each 1 % of x costs 0.66 ms of
+- Memory margin: the minimal x leaves 24–40 MB per die (MoE 32k; dense 32k 3–45 MB, `[ALT-P-margin-*]` — "0.1 GB"
+  was 86.0 − 85.9 in floored tenths) at the assumed overhead; each GB of extra overhead needs
+  Δx = 1 GB / (7 × 6.44 GB) = 2.2 % (MoE) / 1 GB / (30 × 1.59 GB) = 2.1 % (dense) (+22 / +20–21 ‰ in the minimal x); each 1 % of x costs 0.66 ms of
   the MoE 32k step (24 × 985 ns × 28). Ship x + 3 % (1 GB margin): 130.9 ms → 3.82.
 - Dominance: all-W4 replication (x = 1) gives 2.725 (`[ALT-2-allw4-moe-32k]`) — the minimal tier dominates it by
   42 %; a hot/cold tier on the single 8-die instance *loses* 8.5 % (`[ALT-9-hotcold-uniform]`): the gain is the
@@ -171,7 +223,7 @@ diverges (cross-talk), or throughput(2) = throughput(1). **E30** (kernel): the c
 power-of-two scales and integer offsets through the fractal nibble order → f16 tiles content-compared to the host
 (exact); differencing (a second i4 pattern through the same US/S1/L0B addresses); then the chain regime: 10⁴
 pieces with an E13-style accumulating oracle (f32-exact small integers), the per-piece time classifies ovl (386 ns)
-vs ser (596 ns); positive control with the US→S1 barrier removed must corrupt. **H11**: per-die fit at the chosen x
+vs ser (807 ns; 596 as first written — the f16 legs are 8 KiB per 2 KiB of int4); positive control with the US→S1 barrier removed must corrupt. **H11**: per-die fit at the chosen x
 with H8's measured overhead (free memory after load ≥ KV(L) + 64 MiB); failure = the die refuses the allocation or
 H5's KV slope exceeds 7 × 4 KiB per token.
 
@@ -195,8 +247,8 @@ block (2 KiB per 128-k chunk, re-lifted per expert because each expert reuses it
 cadence → 99 374 ns per expert; overlapped (the loader is a different engine and runs between barriers, as it does
 at the dense kernel's 2 KiB-per-128 KiB cadence) → 96 089. Step = 8 × chain + F (8 µs): **802 992 ns → 167.1 GB/s
 (+23.5 %)** / 776 712 → 172.8 (+27.7 %) against 135.3. The 32 KiB drain per expert is hidden for any R_drain ≥
-0.3 GB/s/core (one expert's DDR time), so the E12/E16 drain question disappears. G = 2 (one A lift per expert
-pair, DESIGN-2 §5.6): 97 731 ns (+1.7 %). Fleet (`[ALT-1-fleet-*]`): T_slab 122 979 → 99 374 ns gives MoE 32k
+0.4 GB/s/core in tenths (exact 0.341; one expert's DDR time — the measured 152.8 is 382× above), so the E12/E16
+drain question disappears. G = 2 (one A lift per expert pair, DESIGN-2 §5.6): 97 731 ns → 169.9 GB/s (+1.6 %). Fleet (`[ALT-1-fleet-*]`): T_slab 122 979 → 99 374 ns gives MoE 32k
 133.84 → **117.98 ms, 2.118 tokens/s/card (+13.4 %)**, 128k +8.7 %, 1M +1.9 % (KV-bound), B = 16 2.357 → 2.772.
 DESIGN-4's "ping-pong regime" branch (116.39 ms, 2.147) is reproduced within 1.4 % by a measured path instead of
 an unmeasured choreography.
@@ -297,7 +349,13 @@ f16 word equals (q + 256) mod 256 = q in two's complement (checked exhaustively,
 f32 ulp is 1 and the low byte of the word is q mod 256 — the same extraction at stride 4 B, saving the f16 cast.
 Scale sx[τ] (f32) rides to the consumer's epilogue as the 64 B reel DESIGN-2 already carries.
 
-**Arithmetic (`[ALT-4-*]`).** Elements per layer: dense 3 × 16 384 (QKV, O, gate/up inputs) + 53 248 (down) =
+**RE-DERIVED by the proof round (`[ALT-P-quant-*]`, HW-MAP 5fd13dc):** the pass exists and is measured — 43.7 µs
+per pass, four passes per layer = 174.8 µs per layer: dense 2 362.31 → 2 383.29 ms (0.104, −0.9 %), MoE 133.84 →
+138.74 ms (1.801, −3.5 %), draft 18.09 → 22.29 ms (+23.1 %), dense spec 0.262 → 0.258. The epilogue estimate and the
+host-bounce fallback below are kept as the record of what was assumed; at the measured λ = 12.2 µs the bounce would
+cost 107 / 100 µs per layer (less than the pass), and E33's job is now to fuse the pass into the producing epilogue.
+
+**Arithmetic as written (`[ALT-4-*]`).** Elements per layer: dense 3 × 16 384 (QKV, O, gate/up inputs) + 53 248 (down) =
 102 400; MoE 3 × 4 096 + 8 × 4 096 (the eight active experts' down inputs) = 45 056. At 8 lane-ops per element
 (tree 6 + Muls + Adds; the extraction is a copy): 819 200 / 360 448 lane-ops = **19 / 8 µs per layer per core**,
 redundant on all 8 cores → 0.1 % / 0.2 % of the 32k step. The stake if no mechanism works: a host bounce per GEMM
@@ -351,8 +409,11 @@ L = 34 768 (2 000 tail tokens): 173.6 / 171.0 / 161.6 / 141.1. Attention t = 1, 
 4 096 tokens per layer = 46 ns per token-layer (5.5 µs per dense token, 0.0002 %). Tail waste ≤ 16 × 64 KiB =
 1 MiB per layer-sequence — the same as 64 KiB pages and 16× less than 1 MiB pages (at B = 8 contexts on a dense
 die: 15 layers × 8 × 1 MiB = 120 MiB instead of 1.9 GiB, which matters against the 1.66 GB margin of the 1M
-KV-int8 layout). Dominance (T_tier_dom): for every c_pg ≥ 0, G_tier ≥ G(64 KiB) with equality iff c_pg = 0, and
-G_tier ≤ G(1 MiB) with equality iff 4096 | L; the fleet cells move only on the paged branches (MoE 32k on the
+KV-int8 layout). Dominance (T_alt_tier_dominates, time form): with at least one extent the tier is faster than 64 KiB pages iff
+c_pg ≥ 1 ns (per extent it saves 15·c_pg − 12 ns: at c_pg = 0 the floored extent is 12 ns per MiB slower, equal in
+tenths up to 2 ns) and identical below one extent; G_tier ≤ G(1 MiB) with equality iff 4096 | L holds exactly for
+c_pg ≥ 1 (T_alt_tier_le_1MiB); at the measured c_pg = 38 ns the tier buys +1.1 % (174.4 vs 172.4), at 114 ns +3.5 %
+(`[ALT-P-tier-cpg*]`); the fleet cells move only on the paged branches (MoE 32k on the
 page64k branch 1.819 → 1.864).
 
 **Errata survival.** #2: extents are read as 32 × 32 KiB tiles (no transfer > 64 KiB); the compaction moves 64 KiB
@@ -464,11 +525,11 @@ prefix-sharing histogram) decides whether any cell moves.
 | **Expert-parallel across the card's two dies** | layer-split-only runtime, Π = 1 | no concurrency (dies alternate) and +2 λ per MoE layer = +5.1 ms: 133.84 → 138.94 ms (**−3.6 %**); concurrent streaming = the measured runtime fault | dead |
 | **Hot/cold expert tiers on the same 8-die fleet** | §2.1 without replication | coldest 25 % of experts as int4: MoE 32k 133.84 → 146.42 ms (**−8.5 %**) uniform, −1.7 % Zipf(1.0): memory is not binding at 32k, so the tier only pays its 2.06× byte cost | dominated by §2.1 (the tier is worth paying only for the second instance) |
 | **Capacity-factor token dropping** | DESIGN-2 Z3: step = F + D·T_S | capping D at 64 of 128 (t = 16, uniform) halves the step (15.74 → 7.87 ms, ×1.9) by discarding half the routed pairs — a model-quality decision outside this scoring | unranked |
-| **Grouped-GEMM per-group tiles; fused gather-GEMM-scatter; expert-pair scheduling** | DESIGN-2 §1.3, §3, §5.6 | N_e is uniform (one tile shape); there is no gather (shared A fragment) and the scatter-add is core-local; pairs = the G knob (+1.0 %, +1.7 % on the direct path) | already done |
+| **Grouped-GEMM per-group tiles; fused gather-GEMM-scatter; expert-pair scheduling** | DESIGN-2 §1.3, §3, §5.6 | N_e is uniform (one tile shape); there is no gather (shared A fragment) and the scatter-add is core-local; pairs = the G knob (+1.0 %, +1.6 % on the direct path) | already done |
 | **Command-graph capture / launch pipelining** | DESIGN-4's H6 branch | if the runtime pipelines launches: dense 2 296.61 ms (+3 %), MoE 115.82 (+16 %) — a host experiment, not a design; §2.3 obtains the same without the runtime and adds the in-kernel fusions | = H6 |
 | **Zero-copy host bounce, NUMA-aware placement, polling vs interrupt** | DESIGN-4 T_p2p_bound: any exchange improvement ≤ T_x | ≤ 1 497 µs dense / 1 480 µs MoE per token = ≤ 0.06 % / 1.1 % (λ = 10 µs cells: 0.105 / 1.886) | dominated (≤ 1.1 %) |
 | **Sequence pipelining Π = 8** | DESIGN-4 §5, H4 | 7.7× / 7.1× — the one lever above §2.1, runtime-dependent; §2.1 is its Π = 1 substitute (1.5–2.3×) and must be reverted if H4 passes | not ours to build |
-| **Draft model on the host CPU** | DESIGN-4 §6.1 (launch-bound draft) | ≤ 54 ms per verify step = 2.3 % of the dense spec step; with §2.3 the draft is 27.8 ms anyway | dominated |
+| **Draft model on the host CPU** | DESIGN-4 §6.1 (launch-bound draft) | ≤ 54 ms per verify step = 2.2 % of the dense spec step; with §2.3 the draft is 27.8 ms anyway | dominated |
 | **Rows-cliff repair** (flat m-curve to 64) | the unresolved m ≥ 24 multi-strip wedge (HW-MAP: 81/59/43) | would buy B = 64 at 4k only: dense 1.629 → 5.314 (×3.2), MoE 2.866 → 5.618 (×1.9); at 32k memory-infeasible (L_max(64) = 8 613 / 30 090); mechanism unknown — E37 bisects it (barrier count per strip vs L0A double-buffer vs loader cadence) | real but outside the scored cells |
 
 ---
@@ -510,37 +571,37 @@ experiment; U = empirical branch. Proposed names are for `proof/alt.lean`.
 
 | # | claim | value | status | alt.py label / theorem |
 |---|---|---|---|---|
-| 1 | W4 vector path: 5.3 GB/s/core of int4 = 42.4 per die = 84.8 W8-equivalent; per core-slab (1 MiB int4) 197 844 ns; serial-chain piece 386 + 16 + 154 + 25 + 15 = 596 ns per 2 KiB → 305 152 ns per core-slab, 55.2 W8-equivalent per die | | M → D | [ALT-0-w4v] T_alt_w4_rates |
+| 1 | W4 vector path: 5.3 GB/s/core of int4 = 42.4 per die = 84.8 W8-equivalent; per core-slab (1 MiB int4) 197 844 ns; serial-chain piece as written 386 + 16 + 154 + 25 + 15 = 596 ns per 2 KiB → 305 152 ns per core-slab, 55.2 W8-equivalent per die; **CORRECTED: 386 + 32 + 309 + 50 + 30 = 807 ns (8 KiB f16, two calls) → 413 184 ns, 40.8 W8-equivalent, 2.5 GB/s/core** | | M → D | [ALT-0-w4v] [ALT-P-w4ser] T_alt_w4_rates, T_alt_w4_ser_corrected |
 | 2 | direct-path expert chain per core: B 96 089 ns (2 MiB at 1746/8), A lift 2 473 + 812 = 3 285 ns, MMA 15 360 = 16.0 %; serialised 99 374, overlapped 96 089; G = 2: 97 731 | | D | [ALT-1-chain] T_alt_direct_chain |
 | 3 | step 8 × chain + 8 000: 802 992 ns → 167.1 GB/s; 776 712 → 172.8; anchor 135.3; +23.5 % / +27.7 %; rate(a) for every A-lift cost a ∈ [0, 3 285] lies in [167.1, 172.8] | | D (∀ a) | [ALT-1-rate] T_alt_direct_rate, T_alt_direct_bracket |
-| 4 | 32 KiB drain per expert hidden iff R_drain ≥ 0.3 GB/s/core | iff | D (∀ R_drain) | [ALT-1-rate] T_alt_direct_drain |
+| 4 | 32 KiB drain per expert hidden iff R_drain ≥ 0.4 GB/s/core in tenths (exact 0.341; 0.3 does not hide it) | iff | D (∀ R_drain) | [ALT-1-rate] [ALT-P-drain] T_alt_direct_drain |
 | 5 | fleet MoE t = 1 with T_slab = 99 374 / 96 089: 32k 117.98 / 115.77 ms → 2.118 / 2.159 (+13.4 / +15.6 %); 128k 1.369 / 1.386; 1M 0.318 / 0.319; B = 16 32k 2.772 | | D (D4 model) | [ALT-1-fleet-*] T_alt_direct_fleet |
-| 6 | 4-die instance fit: minimal x (‰ of candidate bytes as int4) MoE 32k 182/170/170/182, 128k 244/232/232/244, 1M 827/816/816/827; dense 32k 376/358/332/376, 128k 629/610/585/629; dense 1M infeasible at x = 1000 (KV alone 128.8 / 64.4 GB per position); weights(x) is non-increasing in x, so the minimal x is an iff | | D (overhead A — H8) | [ALT-2-fit-*] [ALT-2-fit-table-*] T_alt_fit_minx, T_alt_fit_dense_1M_infeasible |
-| 7 | per-die totals at the minimal x: 85.9 GB on every position (MoE 32k: weights 82.8 + KV 0.9 + 2.2); margin 0.1 GB; Δx per GB of overhead = 2.2 % (MoE) / 2.1 % (dense) | | D | [ALT-2-fit-table-*] T_alt_fit_margin |
-| 8 | instance step, MoE 32k uniform, hot = direct serialised, cold = ovl: W 88.60 + KV 21.52 + launch 18.01 + xch 0.75 = 128.89 ms; 2 instances → 3.878 tokens/s/card = +107.7 % over 1.867; cold = ser 141.59 → 3.531 (+89.1 %); hot = anchor 141.97 → 3.521; Zipf(1.0) 119.31 → 4.190 | | D (D4 model; popularity U — H9) | [ALT-2-moe-32768-*] T_alt_rep_moe_32k |
-| 9 | dense 32k: W 3 039.24 ms (0.65 of bytes at 174.6, 0.35 at 84.8), step 3 197.94 → 0.156 (+48.5 %); ser branch 4 069.94 → 0.122 (+16.1 %); KV-int8 0.163; spec k = 3 α = 0.7: 3 252.30 → 0.389 (+48.4 %) | | D | [ALT-2-dense-32768-*] [ALT-2-dense-32k-spec] T_alt_rep_dense_32k |
-| 10 | long context: MoE 128k 2.530 (+100.9 %), 1M 0.596 (+91.0 %); dense 128k 0.123 (+30.8 %), ser −4.2 %; MoE B = 16 32k 4.084 (+73.2 %) | | D | [ALT-2-moe-131072-*] [ALT-2-moe-1048576-*] [ALT-2-dense-131072-*] [ALT-2-moe-32k-B16] T_alt_rep_cells |
-| 11 | two instances beat one (MoE 32k, uniform) for every W4 core-slab time ≤ 1 371 124 ns (≥ 0.8 GB/s/core of int4); 6.6× below the measured 5.3; at 4.0 / 3.0 GB/s/core 3.662 / 3.405 | iff | D (∀ T_cold) | [ALT-2-breakeven-moe-32k] [ALT-2-sens-w4rate-*] T_alt_rep_breakeven |
+| 6 | 4-die instance fit: minimal x (‰ of candidate bytes as int4) MoE 32k 182/170/170/182, 128k 244/232/232/244, 1M 827/816/816/827; dense 32k 376/358/332/376, 128k 629/610/585/629; dense 1M infeasible at x = 1000 (KV alone 128.8 / 64.4 GB per position); weights(x) is non-increasing in x, so the minimal x is an iff | | D (overhead A — H8) | [ALT-2-fit-*] [ALT-2-fit-table-*] T_alt_fit_minx_moe_32k, T_alt_fit_minx_dense_32k, T_alt_fit_minx_cells, T_alt_fit_monotone, T_alt_fit_dense_1M_infeasible |
+| 7 | per-die totals at the minimal x: 85.9 GB on every position (MoE 32k: weights 82.8 + KV 0.9 + 2.2); margin 24–40 MB (MoE 32k) / 3–45 MB (dense 32k), not 0.1 GB; Δx per GB of overhead = 2.2 % (MoE, +22 ‰) / 2.1 % (dense, +20–21 ‰) | | D (∀ ort) | [ALT-2-fit-table-*] [ALT-P-margin-*] T_alt_fit_margin, T_alt_fit_overhead_moe, T_alt_fit_dx_per_gb |
+| 8 | instance step, MoE 32k uniform, hot = direct serialised, cold = ovl: W 88.60 + KV 21.52 + launch 18.01 + xch 0.75 = 128.89 ms; 2 instances → 3.878 tokens/s/card = +107.7 % over 1.867; cold = ser 141.59 → 3.531 (+89.1 %) as written, **154.36 → 3.239 (+73.4 %) corrected**; hot = anchor 141.97 → 3.521; Zipf(1.0) 119.31 → 4.190 | | D (D4 model; popularity U — H9) | [ALT-2-moe-32768-*] [ALT-P-ser-moe-32768] T_alt_rep_moe_32k, T_alt_rep_zipf |
+| 9 | dense 32k: W 3 039.24 ms (0.65 of bytes at 174.6, 0.35 at 84.8), step 3 197.94 → 0.156 (+48.5 %); ser branch 4 069.94 → 0.122 (+16.1 %) as written, **4 951.64 → 0.100 (−4.7 %) corrected**; KV-int8 0.163; spec k = 3 α = 0.7: 3 252.30 → 0.389 (+48.4 %) | | D | [ALT-2-dense-32768-*] [ALT-2-dense-32k-spec] [ALT-P-ser-dense-32768] T_alt_rep_dense_32k |
+| 10 | long context: MoE 128k 2.530 (+100.9 %), 1M 0.596 (+91.0 %); dense 128k 0.123 (+30.8 %), ser −4.2 % as written (−25.5 % corrected); MoE B = 16 32k 4.084 (+73.2 %) | | D | [ALT-2-moe-131072-*] [ALT-2-moe-1048576-*] [ALT-2-dense-131072-*] [ALT-2-moe-32k-B16] T_alt_rep_cells |
+| 11 | two instances beat one (MoE 32k, uniform) for every W4 core-slab time ≤ 1 371 124 ns (≥ 0.8 GB/s/core of int4); 6.6× below the measured 5.3 (6.9× in time); corrected ser branch 3.3× inside; at 4.0 / 3.0 GB/s/core 3.662 / 3.405; with the measured pass on both sides ≤ 1 412 631 ns (3.737 vs 1.801); H10 efficiency η ≥ 0.482 suffices (measured 0.995) | iff | D (∀ T_cold, ∀ η) | [ALT-2-breakeven-moe-32k] [ALT-2-sens-w4rate-*] [ALT-P-breakeven-q] [ALT-P-h10] T_instance_gain, T_instance_gain_measured, T_instance_gain_q, T_instance_gain_h10 |
 | 12 | all-W4 replication 2.725 < minimal tier 3.878; the tier on the single 8-die instance loses: 146.42 ms (−8.5 %) uniform, 136.20 (−1.7 %) Zipf | | D | [ALT-2-allw4-moe-32k] [ALT-9-hotcold-*] T_alt_rep_dominates_allw4, T_alt_hotcold_loses |
 | 13 | Zipf(1.0) popularity: the coldest 10 / 25 / 50 / 75 % of 256 experts carry 1.7 / 4.7 / 11.3 / 22.5 % of the traffic (harmonic-number ratio) | | D (rational; the family itself U — H9) | [ALT-2-zipf-share] T_alt_zipf_share (ℚ or scaled Nat) |
 | 14 | combinations: §2.2 + §2.3 (c_sync 5 µs) MoE 32k 103.50 ms → 2.415 (+29.3 %); §2.1 + §2.2 + §2.3 → 114.41 ms → 4.369 (+134.0 %), dense 3 147.59 → 0.158 (+50.4 %); §2.1 + KV-int8: MoE 1M 472.40 → 1.058, 128k 151.78 → 3.294 | | D | [ALT-3+1-moe] [ALT-2+3-*] [ALT-2+6-moe-*] T_alt_combos |
 | 15 | megakernel savings: (nlaunch − 1) × 91 µs × n_L = 54.60 ms (dense) / 15.28 (MoE); reduction traffic 82·rows·d B = 1 343 488 B → 7 694 ns dense (1.84 ms per token), 335 872 B MoE (0.10 ms); syncs 480 / 140 per token | | D | [ALT-3-*] T_alt_mega_savings |
-| 16 | megakernel pays iff c_sync ≤ 113 750 / 109 200 ns (launch savings only) and ≤ 109 903 / 108 430 net of the reduction traffic (dense / MoE); step at c_sync = 2 / 5 / 20 µs: dense 2 310.52 / 2 311.96 / 2 319.16 ms (0.108 / 0.108 / 0.107), MoE 118.94 / 119.36 / 121.46 (2.101 / 2.094 / 2.058) | iff | D (∀ c_sync) | [ALT-3-*-threshold] [ALT-3-*-csync*] T_alt_mega_threshold, T_alt_mega_cells |
+| 16 | megakernel pays iff c_sync ≤ 113 750 / 109 200 ns (launch savings only) and ≤ 109 903 / 108 430 net of the reduction traffic (dense / MoE; dense ties at exactly 109 903 — strictly pays iff ≤ 109 902); step at c_sync = 2 / 5 / 20 µs: dense 2 310.52 / 2 311.96 / 2 319.16 ms (0.108 / 0.108 / 0.107), MoE 118.94 / 119.36 / 121.46 (2.101 / 2.094 / 2.058) | iff | D (∀ c_sync) | [ALT-3-*-threshold] [ALT-3-*-csync*] T_megakernel_dense, T_megakernel_moe, T_alt_mega_threshold_cells, T_alt_mega_cells |
 | 17 | draft token 18 092 / 9 265 / 7 172 µs at 121 / 24 / 1 launches; verify step 54.27 / 27.79 / 21.51 ms | | D | [ALT-3-draft-*] T_alt_draft_launches |
 | 18 | head-aligned QKV packing alone: one launch per layer: dense 2 351.39 ms (+0.9 %), MoE 131.29 (+1.9 %); the attention of KV head c needs only core c's QKV slice (a column permutation of the fused weight) | | D / DEFINITION | [ALT-3-headaligned-*] T_alt_headaligned |
-| 19 | f16 magic bias 1280: for every q ∈ [−127, 127], q + 1280 ∈ [1 024, 2 048) and (q + 1280 − 1024) mod 256 = q mod 256 (two's-complement byte) — exhaustively true; f32 analogue with bias 12 582 912 on [2²³, 2²⁴) | true | D (`decide` over 255 cases) | [ALT-4-magic] T_alt_magic_f16, T_alt_magic_f32 |
-| 20 | quantizer cost: 102 400 / 45 056 elements per layer × 8 lane-ops = 819 200 / 360 448 = 19 / 8 µs per core per layer = 0.1 / 0.2 % of the 32k step | | D (op count A) | [ALT-4-dense] [ALT-4-moe] T_alt_quant_cost |
-| 21 | host-quantization fallback: 4 bounces × (2 λ + 32 KiB at 27.3 + 16 KiB at 13.9) = 738 / 730 µs per layer → dense 2 450.82 ms (−2.8 %), MoE 154.29 (−13.2 %); draft +96 × 183 µs = +17.52 ms per token; Route-1b-class fallback 106.0 GB/s | | D (λ A) | [ALT-4-*] [ALT-4-route1b] T_alt_quant_fallback |
+| 19 | f16 magic bias 1280: for every q ∈ [−127, 127], q + 1280 ∈ [1 024, 2 048) and (q + 1280 − 1024) mod 256 = q mod 256 (two's-complement byte) — exhaustively true; f32 analogue with bias 12 582 912 on [2²³, 2²⁴) — **SUPERSEDED as a mechanism (the cast exists, HW-MAP 5fd13dc); arithmetic kept** | true | D (`decide` over 255 cases) | [ALT-4-magic] T_alt_magic_f16, T_alt_magic_f32 |
+| 20 | quantizer cost as written: 102 400 / 45 056 elements per layer × 8 lane-ops = 819 200 / 360 448 = 19 / 8 µs per core per layer = 0.1 / 0.2 % of the 32k step; **RE-DERIVED: the measured pass is 4 × 43.7 = 174.8 µs per layer = 0.9 % dense (0.105 → 0.104) / 3.5 % MoE (1.867 → 1.801), draft +4.20 ms (+23.1 %), dense spec 0.262 → 0.258** | | M (c_q) → D | [ALT-4-dense] [ALT-4-moe] [ALT-P-quant-*] T_alt_quant_cost_written, T_alt_quant_measured |
+| 21 | host-quantization fallback as written (λ = 91 µs): 4 bounces × (2 λ + 32 KiB at 27.3 + 16 KiB at 13.9) = 738 / 730 µs per layer → dense 2 450.82 ms (−2.8 %), MoE 154.29 (−13.2 %); draft +96 × 183 µs = +17.53 ms per token; Route-1b-class fallback 106.0 GB/s; **RETIRED by the measured pass; at the measured λ = 12.2 µs the bounce would be 107 / 100 µs per layer (0.105 / 1.829), cheaper than the pass** | | D (λ A → M) | [ALT-4-*] [ALT-4-route1b] [ALT-P-quant-*] T_alt_quant_fallback_written, T_alt_quant_bounce_measured_lambda |
 | 22 | two-tier G: at 32k (4096 \| L) 174.2 / 172.8 / 167.6 / 155.2 at c_pg = 0.1 / 0.5 / 2 / 6.005 µs vs 64 KiB pages 169.0 / 149.7 / 104.8 / 58.2; at 34 768: 173.6 / 171.0 / 161.6 / 141.1; at c_pg = 0 all 174.6 | | D (c_pg U — E34) | [ALT-5-G-cpg*] T_alt_tier_cells |
-| 23 | G_tier(L, c_pg) ≥ G(64 KiB, c_pg) for every c_pg ≥ 0, L ≥ 1, with equality iff c_pg = 0; G_tier ≤ G(1 MiB, c_pg) with equality iff 4096 \| L | | D (∀ c_pg, ∀ L) | T_alt_tier_dominates |
+| 23 | **CORRECTED:** below one extent the tier is the 64 KiB stream; with ≥ 1 extent t_tier < t_64KiB iff c_pg ≥ 1 ns (and t_64KiB < t_tier iff c_pg = 0: the floored extent is 12 ns per MiB slower); G_tier ≤ G(1 MiB) with equality iff 4096 \| L holds exactly for c_pg ≥ 1; in tenths G_tier(32k) = G(64 KiB) for c_pg ≤ 2 ns; at c_pg = 38 / 114 ns +1.1 % / +3.5 % (step 786 → 777 µs, 805 → 778) | | D (∀ c_pg, ∀ L) | [ALT-P-tier-*] T_alt_tier_dominates, T_alt_tier_below_extent, T_alt_tier_le_1MiB, T_alt_tier_tenths, T_two_tier_measured |
 | 24 | attention t = 1 native corner: 32k 904 → 784 µs (−13.2 %) at 0.5 µs, 1 288 → 808 (−37.2 %) at 2 µs, 2 313 → 872 (−62.3 %) at 6.005 µs; 1M 28 698 → 24 862, 40 988 → 25 632, 73 803 → 27 680 | | D (D3 model) | [ALT-5-step-*] T_alt_tier_steps |
 | 25 | compaction 16 × 2 MiB per 4 096 tokens per layer = 46 ns per token-layer; tail waste ≤ 1 MiB per layer-sequence; ≤ 15 tail pages + 256 extents per 1M-token stream | | D | [ALT-5-compaction] T_alt_tier_overhead |
 | 26 | K-int8/V-f16: t = 1 block DDR-bound iff c_V ≤ 45 (ρ32 = 1) / 21 (ρ32 = 2) at 3/4 bytes (block 9 008 ns); attention 32k 776 → 584 µs (−24.7 %), worst corner 851 → 876 (+2.9 %); 1M 24 606 → 18 456 | iff | D (∀ c_V) | [ALT-6-threshold-*] [ALT-6-attn-*] T_alt_k8_threshold, T_alt_k8_steps |
 | 27 | fleet K-int8: dense 32k 0.106 (+0.9 %), 128k 0.098 (+4.2 %); MoE 32k 1.946 (+4.2 %), 128k 1.413 (+12.2 %), 1M 0.397 (+27.2 %); full KV-int8 0.107 / 0.101 / 2.031 / 1.609 / 0.547 (+75.3 % at 1M) | | D (D4 model) | [ALT-6-fleet-*] T_alt_k8_fleet |
 | 28 | shared prefix: KV per layer = kv_tok·((L − L_s)·B + L_s·passes)/R with passes = ⌈B·g/64⌉; dense B = 16 (4 passes): 12 299 → 11 146 / 7 687 / 4 228 µs at L_s = 4k / 16k / 28k → 1.108 / 1.252 / 1.439 (+3.8 / +17.3 / +34.8 %); MoE (1 pass) 2.414 / 2.605 / 2.828; gain iff passes < B | | D (L_s U — H12) | [ALT-7-*] T_alt_prefix_cells, T_alt_prefix_iff |
-| 29 | lazy rescale: S4 block (128 tokens, mt = 8) DDR-bound without the merge iff c_V ≤ 7 (ρ32 = 1) / 3 (ρ32 = 2); t = 16 32k: two-pass 1 554 / S4 1 032 / lazy 787 µs (native), 1 558 / 1 522 / 1 187 (native exp, tree), 6 802 / 7 140 / 6 471 (worst); 1M 49 209 / 32 388 / 24 611 …; lazy ≤ S4 and lazy ≤ two-pass on every corner | iff | D (∀ c_V; D3 model) | [ALT-8-*] T_alt_lazy_threshold, T_alt_lazy_dominates |
+| 29 | lazy rescale: S4 block (128 tokens, mt = 8) DDR-bound without the merge iff c_V ≤ 7 (ρ32 = 1) / 3 (ρ32 = 2); t = 16 32k: two-pass 1 554 / S4 1 032 / lazy 787 µs (native), 1 558 / 1 522 / 1 187 (native exp, tree), 6 802 / 7 140 / 6 471 (worst); 1M 49 209 / 32 388 / 24 611 …; lazy ≤ S4 and lazy ≤ two-pass on every corner | iff | D (∀ c_V; D3 model) | [ALT-8-*] T_alt_lazy_threshold, T_alt_lazy_dominates_S4, T_alt_lazy_dominates_twopass |
 | 30 | lazy-rescale margin: P ≤ exp(μ) with μ = 8 → ≤ 2 981 < 65 504 (f16 max); L0C with one O region = 3 × 64 + 64 = 256 KiB at mt = 8 | | A (exp is transcendental: DEFINITION of μ; the L0C sum D) | T_alt_lazy_l0c |
-| 31 | dominated: dense K-split net +2 µs (0.6 %) before any sync; specialization ≤ 58.2 GB/s (3× bytes); expert-parallel across dies −3.6 % (138.94 ms); zero-copy/NUMA/polling ≤ T_x = 1 497 / 1 480 µs; token dropping ×1.9 at 50 % pairs; rows-cliff B = 64 at 4k: dense 5.314 (×3.2), MoE 5.618 (×1.9), L_max(64) at 32k = 8 613 / 30 090 | | D | [ALT-9-*] T_alt_dom_ksplit, T_alt_dom_specialization, T_alt_dom_expert_parallel, T_alt_dom_p2p, T_alt_dom_rowscliff |
+| 31 | dominated: dense K-split net +2 µs (0.6 %) before any sync; specialization ≤ 58.2 GB/s (3× bytes); expert-parallel across dies −3.6 % (138.94 ms); zero-copy/NUMA/polling ≤ T_x = 1 497 / 1 480 µs; token dropping ×1.9 at 50 % pairs; rows-cliff B = 64 at 4k: dense 5.314 (×3.2), MoE 5.618 (×1.9), L_max(64) at 32k = 8 613 / 30 090; draft on the host 2.2 % (not 2.3) | | D | [ALT-9-*] [ALT-P-draft-share] T_dominated_ksplit, T_dominated_specialization, T_dominated_weight_stationary, T_dominated_l2, T_dominated_expert_parallel, T_dominated_hotcold, T_dominated_p2p, T_dominated_tokendrop, T_dominated_rowscliff, T_dominated_draft_host, T_dominated_gqa_padding |
 | 32 | the 8-die primary cells are unchanged by every alternative that is switched off (every alternative is the D4/D3 model with one term changed; the "today" columns reproduce fleet.lean / attn.lean's numbers exactly: 2362.31 / 133.84 ms, 776 / 24 606 µs) | identity | D | (all labels) T_alt_baseline_identity |
 
 Hypothesis variables carried explicitly (both endpoints to be proved): the W4 core-slab time T_cold ∈ [197 844,
@@ -549,6 +610,10 @@ Hypothesis variables carried explicitly (both endpoints to be proved): the W4 co
 primary); λ = 91 µs (DESIGN-4's bracket 10 / 500 carries over: the instance exchange is 8 λ + 28 µs); the
 popularity family (uniform / Zipf(1.0)); the prefix length L_s ∈ [0, L]; the quantizer op count 8; the W4 int4
 share x ∈ [0, 1000] ‰ (the fit theorems are iffs in x).
+
+**Proof status (2026-11-05):** all 32 rows are theorems of `proof/alt.lean` (names in the last column; the
+proposed `T_alt_*` names were kept where the statement survived and renamed where it was corrected); the ledger
+with build status, hypothesis brackets and the re-derived rows is `PROOF-COVERAGE-5.md`.
 
 **Formalizable for the Lean round (threshold or bound theorems):** rows 3, 4, 6, 11, 16, 19, 23, 26, 28, 29 are
 iffs or ∀-bounds over a single explicit variable and close by `omega`/`decide` on the integer model (row 19 is a
