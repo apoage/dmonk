@@ -920,7 +920,7 @@ not a KV move. Everything else in §7 (per-layer host oracle, KV move costs) is 
 
 ---
 
-## 8. Experiment ladder — host only (the runtime API and the host clock; no custom NPU kernel)
+## 8. Experiment ladder — host only (the runtime API and the host clock; no custom device kernel)
 
 Harness rules: every device buffer is pre-filled with a sentinel and every transfer is **content-checked** on
 the receiving side (a transfer that "completes" without changing the destination is the host-side analogue
