@@ -111,7 +111,8 @@ inherit this — erratum #19).
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 | L0C → US window drain (copy-out 1 KB chunks, queue-fenced) | **152.8 / 222.3 / 260.3 / 285.5 GB/s/core at mt = 1..4** | measured — **9×–45× above the 3.41/6.83/12.28/16.37 hide thresholds: the drain is HIDDEN at every mt**, content-checked exact |
 | **US → US strided copy (post-PV row extraction, plain strided bytes)** | **works — measured REAL** (production expert-GEMM kernel epilogue, differencing-verified) | no layout transform (the ~7 GB/s transform-copy path is a different route); stride math must follow the fragment-order L0C → US drain below |
-| **Gather at the attention kernel's own choreography (fresh-path tile-mix loop)** | **~138 GB/s aggregate, page-size-insensitive** (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) | 18 % under the E21 169 basis — barrier density of the 2-kind diagnostic loop; the production loop halves barriers per byte; c_pg ≈ 0 at ≥ 64 KiB confirmed. **Session 2 re-run: the production kernel's own stream runs 176 GB/s (the 138 was the tile-mix diagnostic). Full-pipeline effective KV at L=4k, t=1: 390-422 GB/s aggregate (39.7-43 µs) — the t×L sweep pends the mask fix.** |
+| **Gather at the attention kernel's own choreography (fresh-path tile-mix loop)** | **~138 GB/s aggregate, page-size-insensitive** (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) | 18 % under the E21 169 basis — barrier density of the 2-kind diagnostic loop; c_pg ≈ 0 at ≥ 64 KiB confirmed |
+| **PRODUCTION attention kernel (causal flags incl. guard, session 3)** | **t=1 effective KV: 78.6 / 88.6 / 91.7 / 92.7 GB/s at L=4k/32k/128k/1M; t≥4: 99.6-103.4** (32k t=1 = 1513.6 µs) | **UNGUARDED at 32k t=1 = 938.8 µs = 143.0 GB/s — within 2.9 % of the round-4 legs-2 cell (912 µs): the choreography model is VALIDATED; the guard's per-block scalar scan is the entire remaining gap (+572 µs — erratum #29).** Realised bounce legs = 2 (~51 µs; 2 MB vs 134 MB KV). Per-engine at 32k: stream 770.8 of 1513.1 µs (K+V stream phase ≈ 174-176 GB/s, at the 169.2 basis) — DDR ~47 % idle, the chain binds. (An earlier "4k = 390-422 GB/s" is VOID — its rung gates skipped PV+softmax.) |
 | **i32 accumulator overflow semantics** | **SILENT SATURATION at 2³¹−1** (not wrap) | measured: 127² chains exact to 2,147,092,480 (99.98 % of 2³¹); −128² chains hitting 2³¹ exactly clamp at 2,147,483,647 — **the [−127,127] quantizer clamp is REQUIRED; U_max = 32 MoE-shape chains are exact (bound HOLDS)**; L0C has no zero-init (pre-accumulation reads are nondeterministic → drain-before-accumulate required) |
 | **Host bounce λ (die→host→die, 4 KiB sync legs)** | **12.2 / 12.1 µs per direction; bounce 23.8–24.6 µs; unchanged under die-0 saturating D2D load** | measured — 7.6× below the 91 µs launch-floor-class anchor, inside the 10/500 bracket; **bounce share of any step ≈ 0.1 % — negligible for the planner** |
 
@@ -229,13 +230,28 @@ inherit this — erratum #19).
     only the first block's worth (stale bytes past it).
 24. **Element-form copies above 4 KiB per single block land partially**
     (an 8-KiB element copy landed 4 KiB).
-25. **A 16-KiB DDR → S1-A-slot single block ZEROES A rows ≥ 2** — stage in
-    4-KiB legs.
+25. **DDR → S1-A-slot staging is offset-fragile**: a 16-KiB single block
+    ZEROES A rows ≥ 2, and plain-copy dst offsets ≥ 4 KiB corrupt — only
+    offset-0 4-KiB blocks are proven (32-KiB-granularity offsets also
+    worked). Stage per-strip/per-tile 4-KiB blocks at offset 0.
 26. **Scalar set/get loops deeper than ~256 are unreliable** (re-confirmed).
 27. **Queue → vector-buffer staging of a full 32-KiB block hangs
     intermittently** — read the drained queue tensor directly instead.
 28. **A surplus per-block event arm (an extra SetFlag after the handshake
     already armed it) = intermittent deadlock** — arm once per handshake.
+29. **ANY per-block scalar crossing serialises the vector pipe**: a queue
+    round trip or a full barrier before a scalar read drains in-flight
+    vector work by ~10-20 µs per crossing, and reduce-max with a scalar
+    destination costs ≈ 1.1 µs/call (microcode-slow, 1024 lanes). Cost
+    models treating per-block scalar scans as free are WRONG — compute
+    scalar decisions as vector side-products and cross in batches (the
+    production attention kernel's guard scan cost +572 µs at 32k; tree +
+    queue and tree + barrier alternatives measured WORSE at +1250/+1400).
+30. **B-slot K-tile ping-pong state carries across loop nests** — every
+    consumer that expects "tile 0 preloaded" must reset the state itself;
+    and loop bounds over per-core regions must be per-region, not
+    strips-multiples (a strips*2 bound wrote past the region into a
+    neighbor core).
 
 ## Concurrency & runtime behavior (all measured, season h)
 
@@ -271,7 +287,10 @@ inherit this — erratum #19).
   P exact; needle = switch fires with P exact; padded tail = 0 trips); and
   the kernel-true f32 online-chain drift at 1M tokens is 1.2e-6 rel
   (512-token blocks) / 1.8e-6 (256) — ~500× inside the 1e-3 ship line
-  (fresh-f64-within-block: 1.5e-8 / 7.7e-8).**
+  (fresh-f64-within-block: 1.5e-8 / 7.7e-8).** **Session 3: CAUSAL-EXACT
+  end-to-end — 12/12 causal-matrix cells at 32k (t 2-16 × tail residues)
+  bad 0, relerr 9.8e-11; real-exp rung-0 bad-0 at 4k/32k/128k/1M; with
+  rescale-at-every-raise the output IS the true final-m softmax.**
 - **Same-dst MMA chains: SPACING is the binding variable, not depth** —
   interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
   bidirectionally at depth >= 256 (filler results leak into chain chunks).
