@@ -76,6 +76,11 @@ prefer 256 KiB; the usual 4–16 KiB serving page is gather-bound for MoE-128k.*
 Caveat: shuffle is random-within-contiguous-per-core-arena — a real scattered KV
 cache shows a higher c_pg (38 ns is a lower bound). The per-page numbers include
 the page-table read (kept in US) and the per-tile barrier+MMA.
+Structure note (settled by the attention session): E21 accumulated per
+n-chunk across ALL tiles — at 16 KiB pages that is a spacing-8, depth-8192
+same-destination i8 chain, exact 20/20: the existence proof that deep
+low-spacing i8 chains with per-group barriers are safe (f16 does NOT
+inherit this — erratum #19).
 
 ## Per-core memory hierarchy
 
@@ -106,6 +111,7 @@ the page-table read (kept in US) and the per-tile barrier+MMA.
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 | L0C → US window drain (copy-out 1 KB chunks, queue-fenced) | **152.8 / 222.3 / 260.3 / 285.5 GB/s/core at mt = 1..4** | measured — **9×–45× above the 3.41/6.83/12.28/16.37 hide thresholds: the drain is HIDDEN at every mt**, content-checked exact |
 | **US → US strided copy (post-PV row extraction, plain strided bytes)** | **works — measured REAL** (production expert-GEMM kernel epilogue, differencing-verified) | no layout transform (the ~7 GB/s transform-copy path is a different route); stride math must follow the fragment-order L0C → US drain below |
+| **Gather at the attention kernel's own choreography (fresh-path tile-mix loop)** | **~138 GB/s aggregate, page-size-insensitive** (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) | 18 % under the E21 169 basis — barrier density of the 2-kind diagnostic loop; the production loop halves barriers per byte; c_pg ≈ 0 at ≥ 64 KiB confirmed |
 | **i32 accumulator overflow semantics** | **SILENT SATURATION at 2³¹−1** (not wrap) | measured: 127² chains exact to 2,147,092,480 (99.98 % of 2³¹); −128² chains hitting 2³¹ exactly clamp at 2,147,483,647 — **the [−127,127] quantizer clamp is REQUIRED; U_max = 32 MoE-shape chains are exact (bound HOLDS)**; L0C has no zero-init (pre-accumulation reads are nondeterministic → drain-before-accumulate required) |
 | **Host bounce λ (die→host→die, 4 KiB sync legs)** | **12.2 / 12.1 µs per direction; bounce 23.8–24.6 µs; unchanged under die-0 saturating D2D load** | measured — 7.6× below the 91 µs launch-floor-class anchor, inside the 10/500 bracket; **bounce share of any step ≈ 0.1 % — negligible for the planner** |
 
@@ -185,8 +191,32 @@ the page-table read (kept in US) and the per-tile barrier+MMA.
     independent identical ops into a queue tensor collapse to one op. Rate
     loops need a dependency chain plus a periodic scalar read-back, and the
     number must be validated by an reps-scaling (8×) check before quoting.
-    Also: a verify variant driven by `reps` must force ≥ 1 work block when
-    reps = 0 (a zero-iteration loop silently returns lane 0).
+  Also: a verify variant driven by `reps` must force ≥ 1 work block when
+   reps = 0 (a zero-iteration loop silently returns lane 0).
+18. **The matrix call's C destination silently drops view/slice offsets**
+    (a destination addressed at a chunk offset lands in chunk 0 — the
+    earlier "A offsets ignored, B honored" asymmetry extends to the C
+    side). Address every L0 destination by explicit byte-offset tensor
+    construction, never by view slicing.
+19. **f16 accumulation into one C chunk corrupts across ANY full pipe
+    barrier or A-operand re-lift** — broken at ≥ 2 accumulations, even
+    with interleave ≥ 16; a barrier-flag dance alone (no loads) breaks it.
+    The i8 tuple tolerates the same pattern (the E21 probe: spacing-8,
+    per-tile barriers, depth 8192, exact 20/20). **Consequence: f16
+    accumulate chains do not exist on this part** — fresh chunk sets + a
+    vector-side merge instead (the accumulator budget fits per-group fresh
+    sets), and any mechanism requiring cross-barrier f16 accumulation
+    (e.g. the ±Q difference branch of the attention drift design) is
+    unimplementable on this tuple; fresh-per-block accumulation is
+    drift-free by construction.
+20. **Vector SRAM → S1 A-slot plain copy is WRONG** (data changes but ≠
+    source; 1-of-3 probe variants exact — cold-pipe-class). An A operand
+    built in vector SRAM must ride a DDR bounce (vector out → DDR scratch
+    → the proven DDR → S1 staging → loader lift).
+21. **Host reference patterns alias tokens**: mod-N / short-period planted
+    patterns make distinct tokens share values, hiding transposition and
+    mapping bugs (a call-tile transposition looked like a clean one-token
+    shift). Use prime periods > L for any token-mapped verification data.
 
 ## Concurrency & runtime behavior (all measured, season h)
 
@@ -213,7 +243,10 @@ the page-table read (kept in US) and the per-tile barrier+MMA.
 - Lazy softmax (fixed per-row shift + overflow guard): licensed for
   qk-normalized models (guard trips 0.087-0.22% of steps, non-vacuous);
   DEAD without qk-norm (scores reach ~1667, drift ~560). Check the target
-  model's normalization class first.
+  model's normalization class first. **Measured (attention kernel session
+  1): the guard + per-trip recompute is REQUIRED, not advisory — without
+  the recompute exactly the predicted 9/8192 lanes per tripped block come
+  out wrong.**
 - **Same-dst MMA chains: SPACING is the binding variable, not depth** —
   interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
   bidirectionally at depth >= 256 (filler results leak into chain chunks).
@@ -232,14 +265,21 @@ of the four matched exactly; the probes settled the real one. Host-side
 pre-packing to this order is free (weights are static); in-kernel transform
 copies are the ~7 GB/s software path — never use them on a hot path.
 
+**SETTLED BY MEASUREMENT (f16 sweep, same session):** the f16 B fragment is
+**[16 N-columns × 16 K-rows], column-major, k-fragment-major**; the f16 A
+operand is **[16 M-rows × 16 K-rows], m-row-major**; the f32 C-chunk
+nesting of the f16×f16 tuple is **[16m][16n] per 1-KiB drain chunk**
+(E23(v)) — and the drained scores-chunk nesting equals the A-fragment
+nesting (the zero-copy P·V premise), verified on the full pipeline:
+**2,097,152 score elements exact (bad 0) at L = 32k**.
+
 **MMA shape constraints (measured):** per-call **n caps at 16** — n=256
 silently computes only columns 0–15 (the (16,256,64) design tile is
 impossible; the working loop is a 16-chunk (16,16,128) sequence). k=32 and
 k=128 are correct; **k=64 is nondeterministically wrong** (32/128 reps
-exact — erratum #14) — **both verdicts measured on the i8×i8 tuple only,
-where a k-fragment is 32 deep; they do NOT transfer to f16 (fragment 16
-deep: f16 k=32 is the two-fragment shape, f16 k=64 the four-fragment shape
-that works in i8 as k=128, f16 k=128 has no i8 analogue) — an f16
-(16,16,k) sweep for k ∈ {16,32,64,128} is REQUIRED before any f16 k-shape
-is trusted** (open anomaly, cause not isolated). The align/init flags in the MMA parameter struct are
+exact — erratum #14) — **an i8×i8-tuple-ONLY anomaly: the f16×f16 sweep
+(128 reps/shape, one-hot k-probes covering every k position, all 8 cores
+redundant) is EXACT at every k ∈ {16,32,64,128}** — so the anomaly is
+neither fragment-count- nor element-count-based (i8-only; open, cause not
+isolated). f16 shapes are unrestricted. The align/init flags in the MMA parameter struct are
 ignored on this part.
