@@ -1,5 +1,39 @@
 # DESIGN-3 — decode attention over the KV cache (gather → softmax → reduce), one die, 8 cores
 
+> **ROUND-5 STATUS (2026-11-07 — the production kernel measured end-to-end, attention session 3; HW-MAP 62e8137, errata #29–#30;
+> `proof/attn.py` `[R5-*]`, `proof/attn.lean` `T5r_*` (27 new theorems, 292 total, 0 axioms / sorry / native_decide), `proof/fleet.py`
+> `[R5-*]`, PROOF-COVERAGE-3.md round-5 section).** The model's assumed inputs are replaced by measured ones; every number below is
+> marked MEASURED (session 3 unless named), DERIVED (a theorem) or UNMEASURED. **MEASURED:** the production kernel's t × L sweep (§6.0:
+> t = 1 213.5 / 1 513.6 / 5 852.9 / 46 313.6 µs at 4k / 32k / 128k / 1M = 78.6 / 88.7 / 91.7 / 92.7 GB/s, plus the t = 4 and t = 16 rows),
+> the unguarded 32k cell (938.8 µs = 143.0 GB/s), the guard's per-block scalar scan (+572 µs quoted; 574.8 µs by the table difference),
+> erratum #29, the realised bounce (legs = 2, ≈ 51 µs at 32k), the per-engine phases, causal-exactness, the 1M drift (session 2).
+> **The INPUT validation row (T5r_validate): unguarded 938.8 µs against the round-4 legs-2 cell 911 680 ns = +3.0 % (2.9 % of the displayed
+> 912 µs), inside the 5 % match line — the round-4 choreography model is validated at the cell level.** Two DERIVED readings qualify it
+> (T5r_validate_terms, T5r_engines): the match nets offsetting terms (the model over-charges the bounce by 48.1 µs and the K/V basis by
+> 22.4 µs and under-charges the exposed chain by 97.7 µs), and the measured phases SUM to the total, guarded and unguarded alike (the K+V
+> stream busy 50.9 % / 82.1 %) — the kernel is chain-serial, not DDR-bound with hidden vector slack as §6.1″ modelled. **The cost premise
+> of §3.2 / §3.4 is corrected (erratum #29; T5r_guard, T5r_A5_refuted, T5r_crossing_cells):** per-block scalar reads are not free — the
+> shipped guard costs 8 981 ns per block, serialised (round 4's A5 said < 1 µs, hidden in 9.2 µs of DDR slack); the chain cost is
+> max(stream, lane work) + a crossing term ⌈nb/K⌉·cx for one crossing per K blocks (cx = 10–20 µs measured). The "fused target ≈ 140 GB/s"
+> is exactly the unguarded kernel + ONE 20 µs crossing per step (958.8 µs; 141.5 GB/s at 10 µs) — worth 554.8–564.8 µs per layer at 32k
+> (574.8 µs is the zero-residual ceiling, the "~570 µs"); the batched guard itself is UNMEASURED (E39). **The rowmax chain of §3.2 needs its
+> 16 row maxima as Duplicate operands every block**: ≥ one crossing per block (≥ 10.3 µs — UNMEASURED structure, a lower bound), so it is
+> ≥ 1 599 µs at 32k, slower than the shipped guarded lazy chain: **the switch-to-rowmax policy of §3.4 (e) is void** and KV-int8 on rowmax
+> is ≥ 1 311 µs at 32k (T5r_rowmax_bound, T5r_switch_void). **Statuses:** E26′ CLOSED (1.2 / 1.8 ppm at 1M against the 246 / 490 ppm bound,
+> T5r_drift); E35's device half RESOLVED (the SCAN is the cost, the trips ≈ free; the trip rate per model stays open); E24′ CLOSED (legs = 2;
+> the bounce costs 51.4 % of the modelled roof charge); E36 CLOSED (session 2: a host overrun); E27′ causal half CLOSED (12/12, relerr
+> 9.8·10⁻¹¹; the planted-sink test open); E28 CLOSED (the realised rate is the sweep). The interim "4k = 390–422 GB/s" was never quoted in
+> this document, DESIGN-4 or the ledgers (HW-MAP voids it): nothing to retire. **Readings for the planner (§6.0, T5r_readings; fleet.py
+> `[R5-*]`):** guarded = MEASURED at every L; unguarded = MEASURED at 32k, elsewhere the guarded cell minus the per-block guard (UNMEASURED
+> off 32k — the round-4 cells track it at 108.2 / 103.0 / 99.0 / 97.7 %); fused = unguarded + one crossing per step. The DESIGN-4 MoE-128k
+> cell is attention-bound on every reading (by 82.5 / 10.8 / 11.4 %); with the measured bounce its stream-only line is G ≤ 178.7 (round 4:
+> 189.4) — attention-bound at every G ≤ 174.6 even with zero chain cost (T5r_fleet_moe_128k_*). t ≥ 4: the measured cells are 2.4–2.6×
+> (t = 4) and 3.9–4.2× (t = 16) the round-4 regime cells — the guarded multi-fragment kernel costs ≈ 20.3–24.0 µs per fragment per 512
+> tokens whatever the fragment count (T5r_per_fragment); the unguarded t ≥ 4 kernel is UNMEASURED. The crossover moves to L ≈ 7 697
+> (guarded) / 13 329 (unguarded) on the chord between the measured 4k and 32k cells (T5r_chord_*). New ladder rows: E39 (the batched
+> guard's residual — it decides whether guard fusion outranks the direct-path expert kernel at 32k) and E40 (phase overlap, ≤ 117 µs at
+> 32k). The round-4 banner and body are kept; every moved cell is in `[R5-moved]` and the round-5 ledger.
+
 > **ROUND-4 STATUS (2026-11-07 — the pre-implementation review absorbed, re-grounded on kernel session 1; HW-MAP commit 423d433,
 > errata #18–#21; `proof/attn.py` `[R4-*]`, `proof/attn.lean` `T4r_*` (66 new theorems, 265 total, 0 axioms / sorry / native_decide),
 > `proof/fleet.py` `[R4-*]`, PROOF-COVERAGE-3.md round-4 section).** The review's verdict is carried as the frame: implementable as
@@ -604,6 +638,43 @@ vector-bound (T4r_t1_binding). rows* (the fragment count at which the vector uni
 (64 rows, t ≥ 8) with the bounce, mt = 3 (48, t ≥ 6) without; rowmax-T mt = 2 (32, t ≥ 4) either way; rowmax-C mt = 1 without the bounce.
 The lazy chain's per-step extra — the first-block max — is in the fixed cost (§2.2), not here.
 
+**Round 5 — the chain cost with its scalar crossings (erratum #29; `[R5-guard*]`, `[R5-A5-refuted]`, `[R5-crossing-*]`, `[R5-rowmax-*]`;
+T5r_guard, T5r_A5_refuted, T5r_xing_once, T5r_xing_every, T5r_fusion_32k, T5r_crossing_cells, T5r_rowmax_bound, T5r_switch_void).**
+Rounds 3–4 costed the chain as lane work only and composed it with the stream by max(); the per-block scalar reads — the guard's 8 reduce
+results through a queue fence, the rowmax chain's 16 row maxima into the shift reel's Duplicate calls — were "≈ free" (A5: under 1 µs by the
+σ_s class). Erratum #29 (MEASURED, session 3) refutes the premise: any per-block scalar crossing drains the in-flight vector work by
+≈ 10–20 µs, and a reduce-max with a scalar destination costs ≈ 1.1 µs per call. The corrected per-block cost, per pass:
+
+  block = max(stream + bounce, vector lane work, MMA, loader) + X,  X = the crossing term (serial — it overlaps nothing).
+
+| guard implementation | X per block (32k, 64 blocks) | 32k cell, t = 1 | status |
+|---|---|---|---|
+| none (unguarded) | 0 | **938 800 ns** = 143.0 GB/s | MEASURED |
+| as shipped: 8 reduce-max calls with a scalar destination + one queue fence | **8 981 ns** (574 800 / 64; the quoted +572 000 gives 8 937) — 8 × 1 100 = 8 800 ns = 98.0 % of it: the scalar-destination reduce *is* the crossing | **1 513 600** = 88.7 | MEASURED |
+| f16 tree + one queue round trip | 19 531 — one drain per block, inside the 10–20 µs band | 2 188 800 (+1 250 000) | MEASURED |
+| f16 tree + one full barrier | 21 875 (1 875 above the band) | 2 338 800 (+1 400 000) | MEASURED |
+| **batched guard**: the decision as a vector side-product (the 8 vector-destination reduce calls already in the chain, 1 455 ns, into a per-block flag lane), crossed once per K blocks | ⌈nb/K⌉·cx / nb | K = nb (once per step): **958 800 (140.0)** at cx = 20 µs, 948 800 (141.5) at 10 µs; K = 8: 1 098 800 / 1 018 800; K = 1: 2 218 800 / 1 578 800 | DERIVED; the kernel is UNMEASURED (E39) |
+
+The algebra (∀ nb, K, cx): one crossing per step leaves exactly one crossing (T5r_xing_once: ⌈nb/K⌉ = 1 for 0 < nb ≤ K), one per block
+leaves nb of them (T5r_xing_every); at 32k, for every K ≥ 64 and every cx ≤ 574 800, the fused cell is 938 800 + cx and guard fusion is
+worth 574 800 − cx per layer (T5r_fusion_32k). So the "fused target ≈ 140 GB/s" is the unguarded kernel plus one crossing at the band's
+top, and the "~570 µs" of the steering note is the zero-residual ceiling. Three terms can push the batched guard above its target and are
+carried, not assumed away: (1) **the side-product** — the 8 vector-destination reduce calls cost 1 455 ns per block at the round-4
+throughput convention; the measured kernel's chain is serial (§6.0), so if they land on it they add up to 93.1 µs at 32k (the measured
+softmax runs 3.0× under that convention, ≈ 31 µs); (2) **the re-run** — with one crossing per step the merge cannot wait for a per-block
+verdict, so the batched guard merges optimistically and re-runs the step with m_r raised when the step's flag shows a trip (exact by shift
+invariance: the rescale-at-every-raise result) — ≤ 0.22 % of a step at the measured trip rate (≈ 2.1 µs at 32k); (3) **cx itself** (10–20
+µs). E39 measures their sum X per step; DESIGN-4 round 5 shows that X decides whether guard fusion outranks the direct-path expert kernel at
+MoE 32k (iff X ≤ 8 279 ns). Round 4's A5 is refuted 8.9× (8 981 ns per block against "< 1 000"), and the cell it fed — the guard "hidden in
+9 171 ns of DDR slack" — never existed: the measured kernel has no DDR-bound slack to hide in.
+
+**The rowmax chain under erratum #29.** Step 3's shift reel is built from the 16 per-row maxima by Duplicate — a scalar operand — so the
+chain as specified crosses at least once per block: ≥ min(16 scalar-destination reduce calls = 17 600 ns, one drain + 16 scalar reads
+= 10 000 + 318 ns) = **10 318 ns per block** (UNMEASURED structure; a lower bound — the extra lane work comes on top). At 32k that is
+≥ 938 800 + 64 × 10 318 = **1 599 152 ns** (83.9 GB/s) > the shipped guarded lazy chain's 1 513 600; at 1M ≥ 49 051 264 > 46 313 600.
+Every rowmax cell of the round-3 / round-4 tables (917 µs at 32k, 7 756 µs at t = 16, …) assumed free crossings and is superseded by this
+bound.
+
 
 ### 3.3 Numerics
 Scores are f32 (exact products of f16 inputs, f32 sums over d ≤ 128); the shift makes every exp argument ≤ 0 so
@@ -692,6 +763,26 @@ lazy P reaches e⁸ ≈ 2 981 (127 × 2 981 saturates i8): **the cell is UNREACH
 (P ≤ 1, scale 127 fixed, every P > 1 trips) at a trip rate that is UNMEASURED (E35 at μ = 0 — expected far above 0.22 %); otherwise KV-int8
 needs the per-block max and lives on the rowmax chain: **651 µs at 32k (vector-bound: 9 791 > the 7 746 ns half-stream block), 20.1 ms at
 1M** on the design page with the bounce (T4r_i8). The KV-int8 lever therefore loses its DDR-bound cell until E35 at μ = 0 says otherwise.
+
+**Round 5 — what session 3 settled about the lazy chain (`[R5-e35]`, `[R5-guard]`, `[R5-rowmax-*]`; T5r_guard, T5r_rowmax_bound,
+T5r_switch_void).** (MEASURED) Correctness: causal-exact end-to-end — 12/12 causal-matrix cells at 32k (t 2–16 × tail residues) bad 0,
+relerr 9.8·10⁻¹¹; real-exp bad-0 at 4k / 32k / 128k / 1M; with rescale-at-every-raise the output IS the true final-m softmax; the trip
+machinery is REQUIRED and the trips themselves are ≈ free. **E35's device half is RESOLVED: the guard's cost is the SCAN, not the trips**
+— 574.8 µs at 32k (38.0 % of the guarded kernel, 61.2 % of the unguarded one), 8 981 ns per block. What moves in the closure (a)–(f):
+- **(b) the result path.** As shipped the 8 reduce results cross as 8 scalar-destination reduce calls (≈ 1.1 µs each) plus one queue fence
+  per block — that is the 8 981 ns; A5 ("one fence, under 1 µs") is refuted 8.9×. The fix is to stop crossing per block: the batched guard
+  of §3.2 round 5 reads one flag per step (E39).
+- **(c) gate the merge.** With one crossing per step the merge cannot wait for a per-block verdict unless the block partials are held: a
+  ring of per-block partials costs 8 KiB·mt per block (8 blocks = +64 KiB of US at mt = 1, 186 KiB + 64 B in all — fits; a whole 32k step,
+  512 KiB, does not). The batched guard therefore merges optimistically and, when the step's flag shows a trip, re-runs the step with m_r
+  raised (exact by shift invariance): at the measured 0.087–0.22 % of steps ≤ 0.22 % of a step (≈ 2.1 µs at 32k) — UNMEASURED (E39); the
+  trip rate per (model, L) is E35's open model half.
+- **(e) the switch policy is VOID.** The rowmax chain pays ≥ 10 318 ns of crossings per block (§3.2 round 5) — more than the shipped guard's
+  8 981 on every remaining stretch of r blocks (T5r_switch_void, ∀ r): finishing a step on rowmax after k trips is never cheaper than staying
+  on the guarded lazy chain. Policy: stay on lazy; a trip is handled by the recompute (as shipped) or by the batched guard's re-run.
+- **KV-int8 (review item 4).** Its rowmax route pays the same crossing: ≥ 1 311 142 ns at 32k (round 4: 650 790) and ≥ 41.2 ms at 1M —
+  slower than the fused f16 lazy target (958 800 ns at 32k). The μ = 0 lazy route (P ≤ 1 at the fixed scale 127, every P > 1 trips) is the
+  only KV-int8 route without a per-block crossing; its trip rate is UNMEASURED (E35, model half).
 
 
 ---
@@ -826,6 +917,58 @@ chain corners: **spec** = the chain as specified (throughput convention), **chai
 **lazy** = the fixed-shift variant of §3.4. The round-2 tables 6.1 / 6.2 are kept below as the record of the retired branches;
 the round-3 cells are 6.1′ / 6.2′, and `[R3-moved-*]` pairs every round-2 headline cell with its replacement.
 
+### 6.0 Round 5 — MEASURED: the production kernel's t × L sweep (attention session 3) — `[R5-meas-*]`, `[R5-ung-*]`, `[R5-overlap-*]`, `[R5-validate*]`, `[R5-engines*]`; T5r_meas_*, T5r_readings, T5r_overlap, T5r_validate*, T5r_engines
+
+In-kernel µs as measured (best-of-3, causal flags incl. the guard — read as in-kernel, as the validation row compares them with the
+in-kernel 912 µs cell); headline shape (H_kv = 8, g = 8, d = 128, f16 KV, 256 KiB pages, bounce legs = 2). These are the cells now; the
+model tables 6.1′–6.2″ below are kept as the record of what was predicted:
+
+| L | **t = 1** (rows 8, one fragment) | eff GB/s | t = 4 (rows 32, mt 2) | per fragment-pass | t = 16 (rows 128, 2 × mt 4) | per fragment-pass | round 4 (lazy-T, legs 2, 169.2): t = 1 / 4 / 16 |
+|---|---|---|---|---|---|---|---|
+| 4k | **213.5** | 78.6 | 382.1 | 87.8 | 1 481.4 | 90.6 | 131 / 162 / 383 |
+| 32k | **1 513.6** | 88.7 (quoted 88.6) | 2 695.6 | 99.6 | 10 741.7 | 100.0 | 912 / 1 030 / 2 565 |
+| 128k | **5 852.9** | 91.7 | 10 514.3 | 102.1 | 42 013.4 | 102.2 | 3 589 / 4 005 / 10 044 |
+| 1M | **46 313.6** | 92.7 | 83 123.1 | 103.3 | 332 476.2 | 103.3 | 28 575 / 31 768 / 79 853 |
+
+"eff" = KV bytes / T at round-half-up — HW-MAP's 88.6 at 32k is the floored tenth (134 217 728 B / 1 513 600 ns = 88.67; T5r_meas_t1).
+"Per fragment-pass" = (rows/16)·KV / T, the normalisation behind HW-MAP's "t ≥ 4 = 99.6–103.4", which covers L ≥ 32k (87.8 / 90.6 at 4k;
+T5r_meas_t4, T5r_meas_t16). Measured ÷ round-4 cell: 1.6–1.7× at t = 1, 2.4–2.6× at t = 4, 3.9–4.2× at t = 16. Per 512-token block at
+t = 1: 26 687 / 23 650 / 22 862 / 22 614 ns; per fragment per 512 tokens at t ≥ 4: 20.3–24.0 µs — the guarded multi-fragment kernel costs
+about the same per fragment whatever the fragment count, i.e. a verify batch costs ≈ fragments × the single-fragment kernel; the stream is
+not amortised across fragments as the round-4 regime map assumed (T5r_per_fragment). Fraction of the 398 µs GEMV unit: 0.54 / 3.80 /
+14.7 / 116.4.
+
+**The validation row (INPUT, PROMPT-3R5; T5r_validate).** Unguarded 32k t = 1: 938 800 ns = 143.0 GB/s against the round-4 legs-2 cell
+911 680 ns: +27 120 ns = **3.0 %** of the exact cell (**2.9 %** of the displayed 912 µs) — inside the 5 % match line (which allows 45 584
+ns). **Term by term (T5r_validate_terms):** model = K/V at 169.2 (793 216) + the bounce on the DDR roof (99 136) + fixed (19 328);
+measured = the K+V stream phase (770 800 = 174.1 GB/s) + the bounce (≈ 51 000) + the rest (117 000). The model over-charges the K/V basis
+by 22 416 ns and the bounce by 48 136 ns (the measured bounce is 51.4 % of the modelled roof charge) and under-charges the exposed chain by
+97 672 ns. **The phases serialise (T5r_engines):** scores 523.9 + softmax+guard 644.3 + PV-merge-bounce 344.9 = 1 513.1 µs against the
+1 513.6 µs total (0.03 %); without the guard 523.9 + 69.5 + 344.9 = 938.3 against 938.8 (premise: the guard's cost lies in the
+softmax+guard phase). The K+V stream is busy 50.9 % guarded (49.1 % idle by this split; HW-MAP quotes ≈ 47 %) and 82.1 % unguarded — the
+binding engine is the serial chain in both kernels. So the cell-level validation stands, and the mechanism of §6.1″ ("DDR-bound with
+9.2 µs of vector slack per block") is not what the silicon does: the round-4 cells match because their errors cancel. Per block the
+measured softmax without the guard is 1 085 ns against the round-4 throughput convention's 3 317 ns (3.0×).
+
+**The readings the planner uses (`[R5-ung-*]`, T5r_readings).** The unguarded kernel is MEASURED at 32k only; off 32k it is read as the
+guarded cell minus the per-block guard (574 800 ns over 64 blocks, scaled per block — structurally per block, UNMEASURED off 32k); the fused
+kernel as the unguarded one plus one 20 µs crossing per step (the band's top; UNMEASURED — E39); the constant-rate reading (143.0 / 140.0
+GB/s at every L) is carried beside them as the bracket:
+
+| L | guarded (M) | unguarded | fused (the target) | constant-rate bracket 143.0 / 140.0 | round 4 (legs 2, 169.2) | unguarded ÷ round 4 |
+|---|---|---|---|---|---|---|
+| 4k | 213.5 µs (78.6 GB/s) | 141.7 (118.4) D | 161.7 (103.8) D | 117.3 / 119.8 | 130.9 | 108.2 % |
+| 32k | 1 513.6 (88.7) | **938.8 (143.0) M** | **958.8 (140.0)** D | 938.6 / 958.7 | 911.7 | 103.0 % |
+| 128k | 5 852.9 (91.7) | 3 553.7 (151.1) D | 3 573.7 (150.2) D | 3 754.3 / 3 834.8 | 3 588.7 | 99.0 % |
+| 1M | 46 313.6 (92.7) | 27 920.0 (153.8) D | 27 940.0 (153.7) D | 30 034.7 / 30 678.3 | 28 574.6 | 97.7 % |
+
+On the per-block reading the round-4 cell family tracks the unguarded kernel within +8.2 % (4k) … −2.3 % (1M) — inside the 5 % line from 32k
+up; the constant-rate bracket is up to 7.6 % slower at 1M (it ignores the amortisation of the fixed costs). **The overlapped floor**
+(`[R5-overlap-*]`, T5r_overlap): the K+V stream phase scaled per block plus the measured bounce runs 163.3 GB/s at every L — 821.8 µs at
+32k; the unguarded kernel sits 117.0 µs above it at 32k (12.5 %), 38.9 / 266.5 / 1 622.4 µs at 4k / 128k / 1M (27.5 / 7.5 / 5.8 %): that
+gap is the most that overlapping the serial phases across blocks could recover (E40). The measured bounce removal would save 6.4 / 51.0 /
+204.0 / 1 632.0 µs — 51.4 % of round 4's legs-2 → 0 charge (12.4 / 99.1 / 396.5 / 3 172.4 µs).
+
 ### 6.1′ t = 1, round 3 (rows = 8, mt = 1, one pass) — `[R3-t1-*]`, T3r_t1_4k … T3r_t1_1M
 
 | L | 64 KiB shuffled 167.0 (design): spec / chained / lazy | 256 KiB 169.2 | 16 KiB 153.8 | 174.6 (W8 ceiling) | 3× what-if 58.2 | binding | eff GB/s (167.0, spec) | × GEMV (167.0, spec) |
@@ -951,6 +1094,18 @@ not: L ≥ 12 817, or 12 305 ≤ L with a tail of ≥ 15 tokens (the vector tail
 (16 896) and round 3's (16 384 / 15 872 on the measured rates; 16 896 lazy) remain true of their models and are superseded. Per DESIGN-4
 layer the MoE-128k cell is no longer a tie with the bounce: attention 3 589 µs against the 3 208 µs layer (§1.4, §10; T4r_fleet_moe_128k_*).
 
+**The crossover, round 5** (`[R5-gemv]`, `[R5-crossover]`, `[R5-fleet-moe-128k]`; T5r_chord_guarded, T5r_chord_unguarded, T5r_nb_lines,
+T5r_crossover_cells, T5r_fleet_moe_128k_*). Measured fractions of the 398 µs GEMV unit: **0.54 / 3.80 / 14.7 / 116.4** at 4k / 32k / 128k /
+1M (guarded; 2.36 unguarded at 32k; round 4: 0.33 / 2.29 / 9.02 / 71.8). Between the measured 4k and 32k cells the crossover is read on the
+chord over the 512-token blocks (DERIVED; the kernel is UNMEASURED in between): the guarded kernel reaches one GEMV unit at 16 blocks —
+**every L ≥ 7 697** — and the unguarded one at 27 blocks — **every L ≥ 13 329** (iffs over the block count, ∀ nb ≥ 8, and over L; round 4:
+14 336 over the 512-multiples and 13 841 over every L, at 169.2 with the bounce). Per DESIGN-4 layer the MoE-128k cell is attention-bound
+on every reading: 5 852.9 µs guarded (+82.5 % over the 3 207.7 µs layer), 3 553.7 unguarded (+10.8 %), 3 573.7 fused (+11.4 %). On the
+effective rate the line is G_eff ≤ 167.3 GB/s (every reading — 91.7 / 151.1 / 150.2 — is below it), and with the MEASURED legs-2 bounce
+(204 µs per layer at 128k) the stream-only line is **G ≤ 178.7** (zero chain and zero fixed cost; ≤ 179.8 with the 19.3 µs lazy fixed cost)
+against round 4's legs-2 line 189.4: attention-bound at every G ≤ 174.6 whatever the chain costs (DESIGN-4 round 5 restates T3r_moe128k_tie
+on these numbers).
+
 
 ---
 
@@ -1037,6 +1192,14 @@ rowmax chain (rows* = 32); the bounce never enters a vector-bound cell, so t ≥
 KV-int8 is vector-bound at t = 1 on the rowmax chain (651) and unreachable on lazy (§3.4). The E35-first build order stands: the lazy
 chain is the only one with slack at every t ≤ 4.
 
+**Round 5 — the regime map on the measured kernel (§6.0; T5r_engines, T5r_per_fragment, T5r_rowmax_bound).** The t = 1 cells are MEASURED and
+the binding engine is the serial chain (scores → softmax + guard → PV-merge-bounce), not the KV stream: the stream is busy 50.9 % guarded
+and 82.1 % unguarded. Verify batches: 2 695.6 µs at t = 4 and 10 741.7 µs at t = 16 at 32k (round 4: 1 030 / 2 565); the guarded kernel
+costs ≈ 20.3–24.0 µs per fragment per 512 tokens at every L, so a verify batch costs ≈ fragments × the single-fragment kernel — the rows* /
+stream-amortisation argument of the round-4 map does not hold on the guarded kernel (the unguarded t ≥ 4 kernel is UNMEASURED). The rowmax
+chain loses every cell to the guarded lazy chain (≥ 1 599 µs at 32k: its per-block crossing); KV-int8 on rowmax is ≥ 1 311 µs. Build order:
+the batched guard (E39) first, then the phase overlap (E40).
+
 
 ---
 
@@ -1084,6 +1247,23 @@ E25, E27, E28. Round 2's order was E21 first, then E23 / E24, E22, E26, E25, E27
 Order (round 4): **E36 first** (nothing downstream of the reel can be measured until P is P), then E24′ (the bounce and the P cadence:
 the headline's largest unmeasured term), E35 (trip rate at β = 3 and μ = 0), E27′ with the sink and the causal reference, E26′, E25, E28.
 
+**Round 5 — the ladder after session 3** (what closed, what is new; statuses as MEASURED / DERIVED / UNMEASURED):
+
+| # | Settles | Status / result | Observable failure | Decides |
+|---|---|---|---|---|
+| **E24′ — CLOSED (session 3)** | the bounce at the real P cadence | realised legs = 2, ≈ 51 µs at 32k — 51.4 % of the modelled roof charge (T5r_validate_terms) | — | the headline (now MEASURED) |
+| **E26′ — CLOSED (session 2)** | the online-chain f32 drift | 1.2 / 1.8 ppm at 1M (512 / 256-token blocks): 205× / 272× inside the 246 / 490 ppm bound, 833× / 555× inside the ship line (T5r_drift) | — | ship at 1M |
+| **E27′ — causal half CLOSED (session 3)** | end-to-end numerics | causal-exact 12/12 at 32k (relerr 9.8·10⁻¹¹), real-exp bad-0 through 1M; **open: the planted sink (β)** | 3.1 % row-mass loss at 1M with β = 0 | β |
+| **E28 — CLOSED (session 3)** | the realised rate beside the ms | the t × L sweep (§6.0); the K+V stream phase 174–176 GB/s | — | the planner reads the measured per-layer time |
+| **E35 — device half RESOLVED (session 3)** | the guard's cost | the SCAN costs 574.8 µs at 32k (8 981 ns per block); the trips ≈ free; **open (model half): the trip rate per (model, L) at μ = 8, β = 3 and at μ = 0** | trips well above the measured 0.087–0.22 % of steps = the batched guard's re-run term grows | the re-run term of E39; KV-int8 at μ = 0 |
+| **E36 — CLOSED (session 2)** | the softmax reel | a host-side buffer overrun, not silicon (steering note, PROOF-COVERAGE-3) | — | — |
+| **E39 (new) — the batched guard** | the guard decision as a vector side-product (the 8 vector-destination reduce calls into a per-block flag lane), ONE scalar crossing per step, optimistic merge, re-run on a trip | the 32k t = 1 cell; the residual over the unguarded 938.8 µs = crossings + side-product + re-runs (X per step) | X > 20 µs = the side-product sits on the serial chain (up to 93.1 µs at the round-4 convention); a planted trip without a re-run = a blind batched guard | fused ≈ 140 GB/s; **whether guard fusion outranks the direct-path expert kernel at MoE 32k (iff X ≤ 8 279 ns — DESIGN-4 round 5)** |
+| **E40 (new) — phase overlap** | scores → softmax → PV overlapped across blocks (the 3 C_s regions were sized for it) | the 32k cell against the overlapped floor 821.8 µs (stream + bounce) | no gain = a hidden per-phase crossing (erratum #29 again) | up to 117 µs at 32k (12.5 %), 1.62 ms at 1M |
+| E25 | unchanged | | | |
+
+Order (round 5): **E39 first** (554.8–564.8 µs per layer at 32k; it decides the 32k lever rank), then E40, E35's model half, E27′'s sink
+test, E25.
+
 
 ---
 
@@ -1125,6 +1305,19 @@ the headline's largest unmeasured term), E35 (trip rate at β = 3 and μ = 0), E
 | Causality at t > 1 | E27′ (causal host reference) | 32-token tails (8 KiB each) and the per-row additive mask; the vector tail is 64 µs at t = 16 worst case | — |
 | Page waste in the planner | fleet.py `[R4-waste-*]` | 4 MiB per layer-sequence at 256 KiB: 120 MiB per instance die against 2–30 MB margins (+1–3 ‰ of int4 share), 60 MiB on the dense 1M KV-int8 die (1.5 GB left) | 64 KiB pages cut it to 1 MiB (30 MiB per instance die — still above every margin) |
 | The C destination and the host patterns | errata #18, #21 | silent chunk-0 landing; aliased verification | byte-offset tensors; prime periods > L |
+
+**Round 5 — the risk rows session 3 added or re-aimed:**
+
+| Risk | Trigger | Impact (measured / derived) | Fallback |
+|---|---|---|---|
+| **Per-block scalar crossings** (erratum #29) | any per-block scalar read | 8 981 ns per block as shipped (574.8 µs at 32k = 38 % of the cell); tree + queue / tree + barrier +1 250 / +1 400 µs (measured) | the batched guard (E39): one crossing per step |
+| The batched guard's side-product lands on the serial chain | E39 | ≤ 1 455 ns per block at the round-4 convention: fused 958.8 → ≤ 1 051.9 µs at 32k | overlap it with the chain (E40) |
+| A trip under the batched guard | E35 (model half) | one re-run per tripped step: ≤ 0.22 % of a step at the measured rate (≈ 2.1 µs at 32k) | per-block flags + a ring of 8 partials (+64 KiB of US at mt = 1) |
+| The rowmax fallback / switch policy | erratum #29 | ≥ 10 318 ns per block of crossings: ≥ 1 599 µs at 32k — never cheaper than the guarded lazy chain | stay on lazy; never switch |
+| KV-int8 | erratum #29 | rowmax ≥ 1 311 µs at 32k (round 4: 651) | the lazy μ = 0 route (trip rate UNMEASURED) |
+| Verify batches (t ≥ 4) scale with the fragment count | measured | t = 4 / 16 at 32k: 2 695.6 / 10 741.7 µs (2.6× / 4.2× the round-4 cells) | the batched guard, then E40, at mt ≥ 2; the unguarded t ≥ 4 kernel is UNMEASURED |
+| The validation is a net of terms | T5r_validate_terms | the 2.9–3.0 % match hides −97.7 / +48.1 / +22.4 µs term errors; a change that moves one term alone loses the match | re-validate per term (stream phase, bounce, exposed chain) |
+| Erratum #30 (B-slot ping-pong state carries across loop nests; per-region loop bounds) | spec | a consumer expecting "tile 0 preloaded" reads stale K/V; a strips·2 bound writes into a neighbour core | every consumer resets the ping-pong state; per-region bounds |
 
 
 ---
@@ -1193,6 +1386,14 @@ the headline's largest unmeasured term), E35 (trip rate at β = 3 and μ = 0), E
     rides the same bulk A-staging route the expert kernel measured ("one pack per launch" there, one pack per block here).
 12. **Verification data.** Host patterns for any token-mapped check use prime periods > L (erratum #21); every L0C destination the
     kernel addresses is a byte-offset tensor (erratum #18).
+13. **The planner reads the measured per-layer attention, not G (round 5).** The t × L sweep is the attention term (DESIGN-4 round 5):
+    guarded = MEASURED at every L; unguarded = MEASURED at 32k (938.8 µs), elsewhere the guarded cell minus the per-block guard; fused =
+    unguarded + one crossing per step (the target, E39). At t = 1 both DESIGN-4 shapes run mt = 1 (dense rows 16, MoE rows 4) — the measured
+    kernel's shape — so the per-layer time transfers as is; verify batches transfer by fragment count (dense t = 4 = one mt-4 pass of the
+    measured t = 16 cell, MoE t = 4 = the measured t = 1 cell — DERIVED readings, not measurements).
+14. **No per-block scalar crossing in a production kernel (erratum #29).** Scalar decisions are computed as vector side-products and
+    crossed in batches; a kernel interface that exposes a per-block scalar decision (the guard verdict, a per-block scale) is batched per
+    step, with a re-run path for the rare positive.
 
 
 ---
@@ -1251,3 +1452,12 @@ UNMEASURED, headline 2) and the fresh-set merge (itemised, 15 431 lazy / 70 462 
 assumptions: A4 (the k = 64 / k = 16 issue cost equals the measured k = 128's 15 ns), A5 (the guard's queue-fence read under 1 µs); the
 conventions T / C and the chain cells are carried as OPEN until the softmax-reel anomaly (E36) lands. Retired as hypotheses: the pack's
 merge 25 750, the region-difference drift's random walk (its mechanism cannot be built: erratum #19), the i8 k-shape facts on f16.
+
+
+Round 5 (2026-11-07): session 3's measurements are the `T5r_*` theorems (27, listed in PROOF-COVERAGE-3.md rows R5-1–R5-22 with their
+`[R5-*]` labels). Resolved as hypotheses: `legs` = 2 (MEASURED), the production loop's rate (the sweep), A5 (refuted: 8 981 ns per block),
+the OPEN chain cells (E36 closed), the drift (E26′ closed). New hypothesis variables: the crossing cost cx ∈ [10, 20] µs and the batching
+factor K (erratum #29; `xing`, ∀ nb, K, cx), the batched guard's residual X per step (E39), and the per-block guard off 32k (the scaling rule
+of the unguarded / fused readings; the constant-rate reading is carried beside it as the bracket). The t ≥ 4 transfers by fragment count and
+the chord crossover are DERIVED readings of measured cells, not measurements; the rowmax crossing (≥ 10 318 ns per block) is a lower bound on
+an UNMEASURED structure.

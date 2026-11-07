@@ -1,4 +1,4 @@
-# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07)
+# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07; round 5, 2026-11-07 — the measured production kernel)
 
 How to read a row: **Claim** quotes or paraphrases the DESIGN-3.md statement (section numbers refer to the
 corrected document); **Proof** names the theorem(s) in `proof/attn.lean` that fix the number; **attn.py** names
@@ -21,6 +21,104 @@ flat m = 1..16) as the pure-read roof class — the KV stream is read-only (the 
 ≤ 8 KiB K/V append and the output), so the 173.8 read+write figure does not apply; the raw direct-load 181.3 is
 recorded as the ceiling the kernel's choreography sits under (`Measured.rGemm`, `rDirect`, `rDdrRW`;
 T1_stream_roof gives the 3.8 % what-if).
+
+## Round 5 (2026-11-07) — the measured production kernel folded in (attention session 3, HW-MAP 62e8137, errata #29–#30)
+
+Round 5 replaces the model's assumed inputs with the measured kernel, re-derives the affected cells and corrects the chain-cost premise
+that erratum #29 refutes. Labels `[R5-*]` are printed by `python3 -I proof/attn.py` after the `[R4-*]` block (the first 869 output lines —
+every round-2, round-3 and round-4 line — are byte-identical: `diff` of the two outputs is exactly the `[R5-*]` block) and by
+`python3 -I proof/fleet.py` after `[R3P-*]` (the first 628 lines byte-identical); theorems `T5r_*` are the last section of
+`proof/attn.lean` (and of `proof/fleet.lean`, PROOF-COVERAGE-4.md). Status words this round: **MEASURED** (= INPUT: an attention-session-3
+number used as given, or session 2 where named), PROVED / **DERIVED** (a theorem from measured inputs), **UNMEASURED** (carried with an
+explicit variable or as a bound, with a ladder row), CORRECTION, EMPIRICAL — Ex.
+
+### Build status, round 5
+
+| Item | Result |
+|---|---|
+| `lean proof/attn.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 8 s |
+| `cd proof && lake build` | **succeeds** (all six targets) |
+| Theorems in attn.lean | **292** = 265 (rounds 2–4, kept byte-identical) + **27** round 5 (`T5r_*`) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0; `#print axioms` over the 27: 18 depend on no axiom, 8 on `propext` + `Quot.sound`, 1 on `propext` (the `omega` / `simp` standard set) |
+| New namespaces | `Measured5` (the t × L sweep, the unguarded cell, the guard readings, erratum #29's two constants, the bounce, the per-engine phases, the drift, the 5 % line), `Design5` (`nb5`, `guardTab`, `guard5`, `bounce5`, `stream5`, `ung5`, `xing`, `fused5`, `overlap5`, `xRowmax`, `chord`, `x10r`) |
+| `python3 -I proof/attn.py` | 869 lines unchanged + 44 lines (42 `[R5-*]` labels); `python3 -I proof/fleet.py` 628 unchanged + 41 lines (39 `[R5-*]` labels); `proof/alt.py` output unchanged |
+| Cell theorems | generated from attn.py's own values (`gen_attn5.py`, scratch) — no hand-typed cell |
+
+### The moved cells (round 4 → round 5; `[R5-moved]`, T5r_moved)
+
+| Cell | Round 4 (lazy-T, legs 2, 169.2) | Round 5 | Status | Theorem |
+|---|---|---|---|---|
+| t = 1, 32k | 912 µs (DDR-bound) | **1 513.6 µs guarded** / 938.8 unguarded / 958.8 fused | M / M / D (target, E39) | T5r_meas_t1, T5r_readings |
+| t = 1, 4k / 128k / 1M | 131 / 3 589 / 28 575 µs | **213.5 / 5 852.9 / 46 313.6** guarded; 141.7 / 3 553.7 / 27 920.0 unguarded | M / D (per-block guard off 32k UNMEASURED) | T5r_meas_t1, T5r_readings |
+| effective KV, t = 1 | 128.2 / 147.2 / 149.6 / 150.3 GB/s | **78.6 / 88.7 / 91.7 / 92.7** (guarded) | M (88.7 vs the quoted 88.6: floored display) | T5r_meas_t1 |
+| t = 4 / t = 16 at 32k | 1 030 / 2 565 µs | **2 695.6 / 10 741.7** (2.6× / 4.2×) | M | T5r_meas_t4, T5r_meas_t16 |
+| binding at t = 1 | KV stream (9.2 µs of vector slack per block) | **the serial chain** (phases sum to the total; stream 50.9 % / 82.1 % busy) | D | T5r_engines |
+| the guard's cost | 1 455 ns + a fence < 1 µs, hidden in DDR slack → 0 on the cell | **8 981 ns per block, serial: 574.8 µs at 32k** | M | T5r_guard, T5r_A5_refuted |
+| the bounce at 32k | 99 136 ns (legs 2 on the roof) | **≈ 51 000** (legs 2, measured) | M | T5r_validate_terms |
+| rowmax cells (32k) | 917 µs | **≥ 1 599 µs** (≥ one crossing per block) | D bound (structure UNMEASURED) | T5r_rowmax_bound |
+| switch-to-rowmax worst case | +32 µs + the rowmax cells (917 µs) | **void** (never cheaper than staying) | D | T5r_switch_void |
+| KV-int8 (rowmax), 32k | 651 µs | **≥ 1 311 µs** | D bound | T5r_rowmax_bound |
+| L_eq (one 398 µs GEMV unit) | 14 336 (512-multiples) / 13 841 (every L) | **every L ≥ 7 697 guarded / ≥ 13 329 unguarded** (chord) | D (interpolation UNMEASURED) | T5r_chord_*, T5r_nb_lines |
+| × GEMV, t = 1 | 0.33 / 2.29 / 9.02 / 71.8 | **0.54 / 3.80 / 14.7 / 116.4** | M | T5r_meas_t1 |
+| MoE-128k (DESIGN-4) | attention-bound at every G ≤ 174.6 (line 189.4) | attention-bound by **82.5 / 10.8 / 11.4 %**; stream-only line **178.7**; G_eff line 167.3 | D (∀ G) | T5r_fleet_moe_128k_* |
+| drift at 1M | 246 ppm (deterministic bound) | **1.2 ppm measured** (E26′ closed) | M (session 2) | T5r_drift |
+
+### Corrections forced by the measurements (round 4 → round 5)
+
+| # | Where | Round 4 said | Now | Caught by |
+|---|---|---|---|---|
+| 1 | §3.2 / §3.4 cost premise, A5 | per-block scalar reads ≈ free; the guard's fence < 1 µs and hidden in DDR slack | **erratum #29: any per-block crossing drains the vector pipe ~10–20 µs; the shipped guard costs 8 981 ns per block, serialised (8.9× A5's ceiling)**; the chain cost becomes max(stream, lane work) + ⌈nb/K⌉·cx | session 3 (T5r_guard, T5r_A5_refuted, T5r_xing_*) |
+| 2 | §6.1″ mechanism | DDR-bound, the chain hidden in 9.2 µs of slack per block | **the phases serialise** guarded (1 513.1 vs 1 513.6 µs) and unguarded (938.3 vs 938.8); the 3.0 % cell-level match nets −97.7 / +48.1 / +22.4 µs term errors | session 3 per-engine split (T5r_engines, T5r_validate_terms) |
+| 3 | §6.1″ headline | 912 µs at 32k (legs 2) | **1 513.6 µs guarded (M)**; 938.8 unguarded (M) = the 912 cell + 3.0 % | session 3 (T5r_validate) |
+| 4 | §2.2 bounce term | legs 2 on the DDR roof: 99 136 ns at 32k | **≈ 51 000 ns measured (51.4 %)** — legs = 2 confirmed, its cost halved | session 3 (T5r_validate_terms, T5r_overlap) |
+| 5 | §6.2″ / §7 t ≥ 4 regime | t = 4 1 030 µs (KV-bound), t = 16 2 565 (vector-bound); rows* = 64 | **2 695.6 / 10 741.7 µs**: the guarded kernel costs ≈ 20.3–24.0 µs per fragment per 512 tokens at every fragment count — no stream amortisation | session 3 (T5r_meas_t4/t16, T5r_per_fragment) |
+| 6 | §3.4 (e) switch policy | after 3 trips finish on rowmax: worst case 917 µs at 32k | **void**: rowmax pays ≥ 10 318 ns of crossings per block > the shipped guard's 8 981 (∀ r blocks) | erratum #29 (T5r_switch_void, T5r_rowmax_bound) |
+| 7 | §3.4 KV-int8 | rowmax 651 µs, vector-bound | **≥ 1 311 µs** (the per-block crossing) — above the fused f16 lazy target (958.8) | erratum #29 (T5r_rowmax_bound) |
+| 8 | HW-MAP quote (not edited) | 32k effective KV 88.6 GB/s | **88.7** at round-half-up (88.67; the quote is the floored tenth); t ≥ 4 "99.6–103.4" is per fragment-pass and covers L ≥ 32k only (4k: 87.8 / 90.6) | T5r_meas_t1, T5r_meas_t4, T5r_meas_t16 |
+| 9 | steering figures (PROMPT-3R5) | "guard fusion worth ~570 µs at 32k"; "fused target ≈ 140" | consistent once read together: **574.8 µs is the zero-residual ceiling; 140.0 GB/s = the unguarded kernel + one 20 µs crossing per step, worth 554.8 µs** (564.8 at 10 µs); the quoted +572 µs and the table difference 574.8 µs are 0.5 % apart | T5r_guard, T5r_fusion_32k, T5r_crossing_cells |
+| 10 | §6.3 crossover | L_eq 14 336 / 13 841 at 169.2 with the bounce | **≈ 7 697 guarded / 13 329 unguarded** on the chord between the measured 4k and 32k cells | T5r_chord_*, T5r_nb_lines |
+| 11 | ladder statuses | E24′ / E26′ / E28 / E36 open; E35 open; E27′ open | **E24′, E26′, E28, E36 CLOSED; E35 device half RESOLVED (model half open); E27′ causal half CLOSED (sink open)**; new E39 (batched guard), E40 (phase overlap) | session 2 / 3 |
+
+Not corrections (survivals): the round-4 legs-2 cell at 32k (validated, 3.0 % ≤ 5 %); legs = 2 as the planner's reading (measured); the
+online two-level chain ships at 1M (now measured, 205× inside its bound); the MoE-128k cell attention-bound at every G ≤ 174.6 (now with the
+measured bounce, line 178.7); fresh chunk sets, the C_o nesting, the page maps, the buffer budgets (no round-5 input touches them).
+
+### The round-5 ledger (every `[R5-*]` label and every round-5 claim of DESIGN-3.md)
+
+| # | Claim (round-5 text) | Proof | labels | Status |
+|---|---|---|---|---|
+| R5-1 | the t × L sweep: t = 1 213.5 / 1 513.6 / 5 852.9 / 46 313.6 µs, t = 4 382.1 / 2 695.6 / 10 514.3 / 83 123.1, t = 16 1 481.4 / 10 741.7 / 42 013.4 / 332 476.2; 8 / 64 / 256 / 2 048 blocks; 26 687 / 23 650 / 22 862 / 22 614 ns per block at t = 1; × GEMV 53.6 / 380.3 / 1 470.6 / 11 636.6 %; measured ÷ round 4 1.6–1.7× / 2.4–2.6× / 3.9–4.2× | T5r_meas_t1, T5r_meas_t4, T5r_meas_t16 | [R5-meas-*] | **INPUT (session 3)** + PROVED (the readings) |
+| R5-2 | effective KV: t = 1 78.6 / 88.7 / 91.7 / 92.7 GB/s (the quoted 88.6 is the floored tenth, 88.67); t ≥ 4 per fragment-pass ((rows/16)·KV / T) 87.8 / 99.6 / 102.1 / 103.3 and 90.6 / 100.0 / 102.2 / 103.3 — the quoted 99.6–103.4 covers L ≥ 32k | T5r_meas_t1, T5r_meas_t4, T5r_meas_t16 | [R5-meas-eff-check] | PROVED (display CORRECTION 8) |
+| R5-3 | **VALIDATION (INPUT row):** unguarded 938 800 ns vs the round-4 legs-2 cell 911 680 ns: +27 120 ns = 3.0 % of the exact cell, 2.9 % of the displayed 912 µs; ≤ the 5 % match line (≤ 45 584 ns); 143.0 GB/s | T5r_validate | [R5-validate] | **INPUT** (the PROMPT-3R5 validation row) + PROVED |
+| R5-4 | the term-level reading: model 793 216 + 99 136 + 19 328 = 911 680; measured 770 800 (174.1 GB/s) + ≈ 51 000 + 117 000 = 938 800; offsets +22 416 / +48 136 / −97 672 (net −27 120); the bounce 51.4 % of the modelled charge | T5r_validate_terms | [R5-validate-terms] | PROVED (from INPUT terms) |
+| R5-5 | the phases serialise: 523.9 + 644.3 + 344.9 = 1 513.1 µs vs 1 513.6 (0.03 %); stream 50.9 % busy (49.1 % idle by the split; quoted ≈ 47 %); without the guard 938.3 vs 938.8, stream 82.1 % busy; per block 8 185 / 10 067 / 5 389 ns; softmax w/o guard 1 085 ns per block vs 3 317 modelled (3.0×) | T5r_engines | [R5-engines], [R5-engines-unguarded] | INPUT + PROVED (premise: the guard lies in the softmax+guard phase) |
+| R5-6 | the guard: 574 800 ns (table difference; quoted 572 000, 2 800 = 0.5 % apart), 8 981 ns per block (8 937 quoted), 8 × 1 100 = 98.0 % of it; 61.2 % of the unguarded / 38.0 % of the guarded cell; tree + queue 19 531 per block (in the 10–20 µs band), tree + barrier 21 875 (above), +675 200 / +825 200 over shipped | T5r_guard | [R5-guard], [R5-guard-alt] | INPUT + PROVED |
+| R5-7 | A5 refuted: the round-4 guard (1 455 ns + a fence < 1 µs, inside 9 171 ns of DDR slack) → 8 981 ns serial per block (8.9×) | T5r_A5_refuted | [R5-A5-refuted] | CORRECTION (A5 → INPUT) |
+| R5-8 | the batched-crossing model xing(nb, K, cx) = ⌈nb/K⌉·cx: one crossing per step = cx (∀ 0 < nb ≤ K); per block = nb·cx (∀ nb); at 32k fused = 938 800 + cx and guard fusion = 574 800 − cx (∀ K ≥ 64, cx ≤ 574 800); cells K = 1 / 8 / 64 at cx = 10 / 20 µs: 85.0 / 60.5, 131.7 / 122.1, 141.5 / 140.0 GB/s | T5r_xing_once (∀), T5r_xing_every (∀), T5r_fusion_32k (∀ K, cx), T5r_crossing_cells | [R5-crossing-K*] | PROVED ∀ (the batched kernel: **UNMEASURED**, E39) |
+| R5-9 | "fused target ≈ 140" = unguarded + one 20 µs crossing per step = 958 800 ns = 140.0 GB/s (141.5 at 10 µs); "~570 µs" = the zero-residual ceiling 574 800; the side-product (≤ 93.1 µs at 32k at the round-4 convention) and the re-run (≤ 0.22 % of a step at the measured trip rate) carried as risks | T5r_fusion_32k, T5r_crossing_cells | [R5-crossing-target] | PROVED (target UNMEASURED; side-product, re-run: UNMEASURED, E39) |
+| R5-10 | rowmax under erratum #29: ≥ 10 318 ns per block (min(16 × 1 100, 10 000 + 16 σ_s)); ≥ 1 599 152 ns at 32k (83.9 GB/s) > 1 513 600; ≥ 49 051 264 at 1M > 46 313 600; the switch policy void ∀ r | T5r_rowmax_bound, T5r_switch_void (∀ r) | [R5-rowmax-bound] | PROVED (crossing structure UNMEASURED: lower bound) |
+| R5-11 | KV-int8 on rowmax ≥ 1 311 142 / 41 207 398 ns (32k / 1M) > the fused f16 958 800; μ = 0 the only crossing-free KV-int8 route | T5r_rowmax_bound | [R5-rowmax-i8] | PROVED (bound); μ = 0 trip rate: EMPIRICAL — E35 |
+| R5-12 | readings per L: guard5 71 850 / 574 800 / 2 299 200 / 18 393 600; unguarded 141 650 / 938 800 / 3 553 700 / 27 920 000 ns (118.4 / 143.0 / 151.1 / 153.8 GB/s); fused 161 650 / 958 800 / 3 573 700 / 27 940 000 (151 650 … at 10 µs); constant-rate bracket 117 323 / 938 585 / 3 754 342 / 30 034 736 and 119 837 / 958 698 / 3 834 792 / 30 678 337; ÷ round 4 108.2 / 103.0 / 99.0 / 97.7 % | T5r_readings | [R5-ung-*] | PROVED (32k: M; the per-block guard off 32k: **UNMEASURED**) |
+| R5-13 | the overlapped floor (stream + bounce, 163.3 GB/s at every L): 102 725 / 821 800 / 3 287 200 / 26 297 600 ns; the overlap gap ≤ 38 925 / 117 000 / 266 500 / 1 622 400 (27.5 / 12.5 / 7.5 / 5.8 %); the bounce removal 6 375 / 51 000 / 204 000 / 1 632 000 vs round 4's 12 392 / 99 136 / 396 544 / 3 172 352 | T5r_overlap | [R5-overlap-*] | PROVED (bound; the overlap mechanism: EMPIRICAL — E40) |
+| R5-14 | t ≥ 4 per fragment per 512 tokens: 23 974 / 21 069 / 20 538 / 20 294 (t = 4), 23 237 / 20 990 / 20 516 / 20 293 (t = 16), t = 1 26 792 / 23 661 / 22 865 / 22 614 ns — fragment-serial | T5r_per_fragment | [R5-t4], [R5-t16] | PROVED (INPUT rows); the unguarded t ≥ 4 kernel: **UNMEASURED** |
+| R5-15 | E26′ CLOSED: 1.2 / 1.8 ppm at 1M vs the 246 / 490 ppm bound (205× / 272×), 833× / 555× inside the 1 000 ppm line | T5r_drift | [R5-drift] | INPUT (session 2) + PROVED |
+| R5-16 | E35 device half RESOLVED: the scan costs 574 800 ns at 32k, the trips ≈ free; a batched guard re-streams / re-runs on a trip (≈ 23.7 µs per block re-stream, UNMEASURED) | T5r_guard | [R5-e35] | INPUT; the trip rate per model: EMPIRICAL — E35 (model half) |
+| R5-17 | the chord crossover: guarded one GEMV unit iff nb ≥ 16 (∀ nb ≥ 8) ⇔ L ≥ 7 697; unguarded iff nb ≥ 27 ⇔ L ≥ 13 329 (∀ L); 2.36 × GEMV unguarded at 32k | T5r_chord_guarded (∀ nb), T5r_chord_unguarded (∀ nb), T5r_nb_lines (∀ L), T5r_crossover_cells | [R5-gemv], [R5-crossover] | PROVED ∀ (the interpolation itself: UNMEASURED between 4k and 32k) |
+| R5-18 | MoE-128k on the measured kernel: +2 645 181 / +345 981 / +365 981 ns over the 3 207 719 ns layer (82.5 / 10.8 / 11.4 %); G_eff line ≤ 167.3 (∀ G iff); with the measured bounce (204 000 ns) the stream-only line G ≤ 178.7 (∀ G iff) and attention-bound at every G ≤ 174.6 (∀ G); the overlapped floor 3 287 200 still +2.5 % | T5r_fleet_moe_128k_bounce (∀ G), T5r_fleet_moe_128k_line (∀ G, iff), T5r_fleet_moe_128k_eff (∀ G, iff), T5r_fleet_moe_128k_cells | [R5-fleet-moe-128k] | PROVED ∀ G (layer time: D4 input) |
+| R5-19 | the moved cells (round 4 → round 5) | T5r_moved | [R5-moved] | PROVED |
+| R5-20 | correctness settled: causal-exact 12/12 at 32k (relerr 9.8·10⁻¹¹), real-exp bad-0 through 1M, rescale-at-every-raise = the true final-m softmax; E27′'s causal half closed | — | — | **INPUT (session 3)**; the planted-sink test: EMPIRICAL — E27′ |
+| R5-21 | legs = 2 MEASURED (the round-4 headline reading confirmed); E24′, E28, E36 closed | T5r_validate_terms, T5r_overlap | [R5-validate-terms] | INPUT |
+| R5-22 | the interim "4k = 390–422 GB/s" is not quoted in DESIGN-3, DESIGN-4 or these ledgers (HW-MAP marks it VOID: its rung gates skipped PV + softmax) — nothing to retire | — | — | INPUT (checked by search) |
+
+**Coverage, round 5: 22 rows, 19 with a theorem (86 %); the 3 without (R5-20, R5-21, R5-22) are measurement statements used as given
+(INPUT). 0 orphans — every `T5r_*` theorem of attn.lean is cited in R5-1–R5-19 or in the corrections table, every `[R5-*]` label family of
+attn.py is cited.** The status summary the round asked for: **MEASURED** — the t × L sweep, the unguarded 32k cell, the guard readings
+(+572 quoted, the table difference 574.8, tree + queue, tree + barrier), erratum #29's constants (1.1 µs, 10–20 µs), the bounce (legs = 2,
+≈ 51 µs), the per-engine phases, the stream-phase rate, causal-exactness, the 1M drift (session 2); **DERIVED** — every other number of the
+section, each with its theorem; **UNMEASURED** — the batched guard (its crossing, side-product and re-run; E39), the phase overlap (E40), the
+per-block guard off 32k (the readings' scaling rule; the constant-rate bracket beside it), the unguarded t ≥ 4 kernel, the rowmax crossing
+structure (a lower bound), the KV-int8 μ = 0 trip rate, the per-model trip rate (E35's model half). The empirical residue is DESIGN-3 §8's
+round-5 order: E39, E40, E35 (model half), E27′ (sink), E25.
 
 ## Round 4 (2026-11-07) — the pre-implementation review absorbed, re-grounded on kernel session 1 (HW-MAP commit 423d433, errata #18–#21)
 

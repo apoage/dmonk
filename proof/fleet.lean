@@ -3175,3 +3175,283 @@ theorem T3r_min_dies :
       ¬ (n0 * moe.wRes ≤ dieMem ∧ n1 * moe.wRes ≤ dieMem ∧ n2 * moe.wRes ≤ dieMem ∧ n3 * moe.wRes ≤ dieMem)) ∧
     24 * dense.wRes + dense.wEmbed + 24 * 4096 * 4096 + ws + oRt ≤ dieMem ∧
     6 * moe.wRes + moe.wEmbed + 6 * 4096 * 4096 + ws + oRt ≤ dieMem := T_min_dies
+
+/-! # ROUND 5 (2026-11-07) — the measured production attention kernel (attention session 3, HW-MAP 62e8137)
+
+  The planner's attention term is now a MEASURED per-layer time (proof/attn.lean `Measured5` carries the inputs; duplicated here, the
+  fleet file cannot import it standalone). Three readings — the "G triplet" at 32k: guarded = the t × L sweep (M at every L), unguarded =
+  938.8 µs at 32k (M) and the guarded cell minus the per-block guard elsewhere (D; the per-block guard off 32k is UNMEASURED), fused =
+  unguarded + one batched crossing per step (D; cx = 20 µs, the top of erratum #29's band → 140.0 GB/s at 32k, the target). At t = 1 both
+  fleet shapes run mt = 1, the measured kernel's shape, so the per-layer time transfers as is. The step is affine in the per-layer attention
+  (`T5r_step_form`), which is what makes every cell below a theorem about the measured number. fleet.py `[R5-*]`. -/
+namespace Measured5F
+/-- the t = 1 per-layer attention of the production kernel (ns, in-kernel, causal flags incl. the guard) -/
+def aG4k : Nat := 213500
+def aG32k : Nat := 1513600
+def aG128k : Nat := 5852900
+def aG1M : Nat := 46313600
+/-- the unguarded 32k cell; the t = 16 32k cell (the dense verify transfer) -/
+def aU32k : Nat := 938800
+def aT16_32k : Nat := 10741700
+/-- the realised bounce and the K+V stream phase at 32k (64 blocks); erratum #29's crossing band; the rowmax crossing bound (attn.lean) -/
+def bounce32kF : Nat := 51000
+def stream32kF : Nat := 770800
+def cxLoF : Nat := 10000
+def cxHiF : Nat := 20000
+def xRowmaxF : Nat := 10318
+end Measured5F
+
+namespace Design5F
+open Measured Design Measured3 Attn3F Design3F Measured5F
+def guardTabF : Nat := aG32k - aU32k
+def nbF (L : Nat) : Nat := nblocks4 L 1 1
+def guardF (L : Nat) : Nat := nbF L * guardTabF / 64
+def bounceF (L : Nat) : Nat := nbF L * bounce32kF / 64
+def streamF (L : Nat) : Nat := nbF L * stream32kF / 64
+def aUng (Tg L : Nat) : Nat := Tg - guardF L
+def aFused (Tg L cx : Nat) : Nat := aUng Tg L + cx
+def overlapF (Tg L : Nat) : Nat := aUng Tg L - streamF L - bounceF L
+/-- fleet.py step5f: the round-3/4 step with the per-layer attention a given (ns) -/
+def step5F (s : Shape) (B t : Nat) (b : Br3) (a lam : Nat) : Nat :=
+  W3 s B t b + s.nL * B * a + Ln3 s B t b + Q3 s B t b + X3 s B t lam + D3 t b lam
+/-- the round-3 instance step with the per-layer attention a given -/
+def instStep5 (s : Shape) (B t : Nat) (xs : Nat → Nat) (hot : XReg) (Tc R4 : Nat) (pop : Pop) (b : Br3) (a lam : Nat) : Nat :=
+  sum4 (fun pos => layers4 s * (instWl s (B * t) (xs pos) b.fam pop (tSlab3 hot) Tc R4 b.integ + B * a
+                                 + instNl s b.mega * tLaunch + quantNs s (B * t) b.cq + instMega s (B * t) b.mega))
+  + tn s.wHead (rW b.integ) + 2 * tLaunch + instXch s (B * t) lam + D3 t b lam
+/-- the direct-path expert kernel's saving per MoE token (E29, weights side, L-independent) -/
+def e29 : Nat := moe.nL * (tw3 moe .anchor - tw3 moe .directSer)
+end Design5F
+
+open Measured5F Design5F
+
+/-! ## T5r_readings — the per-layer attention readings (`[R5-attn-*]`), exact at 32k -/
+theorem T5r_readings : nbF 4096 = 8 ∧
+    guardF 4096 = 71850 ∧
+    aUng aG4k 4096 = 141650 ∧
+    aFused aG4k 4096 cxHiF = 161650 ∧
+    aFused aG4k 4096 cxLoF = 151650 ∧
+    attn4 4096 1 4 g256 .lazy .T 2 false = 130872 ∧
+    nbF 32768 = 64 ∧
+    guardF 32768 = 574800 ∧
+    aUng aG32k 32768 = 938800 ∧
+    aFused aG32k 32768 cxHiF = 958800 ∧
+    aFused aG32k 32768 cxLoF = 948800 ∧
+    attn4 32768 1 4 g256 .lazy .T 2 false = 911680 ∧
+    nbF 131072 = 256 ∧
+    guardF 131072 = 2299200 ∧
+    aUng aG128k 131072 = 3553700 ∧
+    aFused aG128k 131072 cxHiF = 3573700 ∧
+    aFused aG128k 131072 cxLoF = 3563700 ∧
+    attn4 131072 1 4 g256 .lazy .T 2 false = 3588736 ∧
+    nbF 1048576 = 2048 ∧
+    guardF 1048576 = 18393600 ∧
+    aUng aG1M 1048576 = 27920000 ∧
+    aFused aG1M 1048576 cxHiF = 27940000 ∧
+    aFused aG1M 1048576 cxLoF = 27930000 ∧
+    attn4 1048576 1 4 g256 .lazy .T 2 false = 28574592 ∧
+    aUng aG32k 32768 = aU32k := by decide
+/-! ## T5r_step_form — the step is affine in the per-layer attention a, for every a (`[R5-step-*]`): dense 2289788669 + 120·a, MoE 115956899 + 28·a -/
+theorem T5r_step_form (a : Nat) : step5F dense 1 1 br3 a lam3 = 2289788669 + 120 * a ∧ step5F moe 1 1 br3 a lam3 = 115956899 + 28 * a := by
+  have hd : W3 dense 1 1 br3 + Ln3 dense 1 1 br3 + Q3 dense 1 1 br3 + X3 dense 1 1 lam3 + D3 1 br3 lam3 = 2289788669 := by decide
+  have hm : W3 moe 1 1 br3 + Ln3 moe 1 1 br3 + Q3 moe 1 1 br3 + X3 moe 1 1 lam3 + D3 1 br3 lam3 = 115956899 := by decide
+  have n1 : dense.nL = 120 := rfl
+  have n2 : moe.nL = 28 := rfl
+  unfold step5F; rw [n1, n2]; constructor <;> omega
+/-- the t = 1 cells at the three readings beside round 4 (lazy-T, legs 2, 169.2) -/
+theorem T5r_step_cells : step4F dense 4096 1 1 br3Lazy 2 lam3 = 2305493309 ∧
+    tpsCard 1000 2305493309 = 108 ∧
+    tpsCard 1000 (2289788669 + 120 * 213500) = 107 ∧
+    tpsCard 1000 (2289788669 + 120 * 141650) = 108 ∧
+    tpsCard 1000 (2289788669 + 120 * 161650) = 108 ∧
+    step4F dense 32768 1 1 br3Lazy 2 lam3 = 2399190269 ∧
+    tpsCard 1000 2399190269 = 104 ∧
+    tpsCard 1000 (2289788669 + 120 * 1513600) = 101 ∧
+    tpsCard 1000 (2289788669 + 120 * 938800) = 104 ∧
+    tpsCard 1000 (2289788669 + 120 * 958800) = 103 ∧
+    step4F dense 131072 1 1 br3Lazy 2 lam3 = 2720436989 ∧
+    tpsCard 1000 2720436989 = 91 ∧
+    tpsCard 1000 (2289788669 + 120 * 5852900) = 83 ∧
+    tpsCard 1000 (2289788669 + 120 * 3553700) = 92 ∧
+    tpsCard 1000 (2289788669 + 120 * 3573700) = 91 ∧
+    step4F moe 4096 1 1 br3Lazy 2 lam3 = 119621315 ∧
+    tpsCard 1000 119621315 = 2089 ∧
+    tpsCard 1000 (115956899 + 28 * 213500) = 2050 ∧
+    tpsCard 1000 (115956899 + 28 * 141650) = 2084 ∧
+    tpsCard 1000 (115956899 + 28 * 161650) = 2074 ∧
+    step4F moe 32768 1 1 br3Lazy 2 lam3 = 141483939 ∧
+    tpsCard 1000 141483939 = 1766 ∧
+    tpsCard 1000 (115956899 + 28 * 1513600) = 1578 ∧
+    tpsCard 1000 (115956899 + 28 * 938800) = 1757 ∧
+    tpsCard 1000 (115956899 + 28 * 958800) = 1750 ∧
+    step4F moe 131072 1 1 br3Lazy 2 lam3 = 216441507 ∧
+    tpsCard 1000 216441507 = 1155 ∧
+    tpsCard 1000 (115956899 + 28 * 5852900) = 893 ∧
+    tpsCard 1000 (115956899 + 28 * 3553700) = 1160 ∧
+    tpsCard 1000 (115956899 + 28 * 3573700) = 1157 ∧
+    step4F moe 1048576 1 1 br3Lazy 2 lam3 = 916045475 ∧
+    tpsCard 1000 916045475 = 272 ∧
+    tpsCard 1000 (115956899 + 28 * 46313600) = 176 ∧
+    tpsCard 1000 (115956899 + 28 * 27920000) = 278 ∧
+    tpsCard 1000 (115956899 + 28 * 27940000) = 278 := by decide
+/-! ## T5r_moe128k_tie_measured — T3r_moe128k_tie restated with the MEASURED legs = 2 and the MEASURED kernel (`[R5-moe-128k-*]`).
+    Per layer at 128k the cell is attention-bound on every reading (guarded by 82.5 %, unguarded 10.8 %, fused 11.4 % on the anchored kernel;
+    121.6 / 34.5 / 35.3 % on the direct path) and the STEP is attention-bound on every reading. The legs-conditional lines, restated at the
+    measured bounce (204000 ns per layer): attention-bound iff G ≤ 178.7 (anchored) / 220.2 (direct) with zero chain and zero fixed cost — both
+    above 174.6; on the effective KV rate the lines are G_eff ≤ 167.3 / 203.2. -/
+theorem T5r_moe128k_tie_measured (G : Nat) (h1 : 0 < G) :
+    (tw3 moe .anchor ≤ 256 * (20971520 / G) + bounceF 131072 ↔ G ≤ 1787) ∧
+    (tw3 moe .directSer ≤ 256 * (20971520 / G) + bounceF 131072 ↔ G ≤ 2202) ∧
+    (tw3 moe .anchor ≤ 5368709120 / G ↔ G ≤ 1673) ∧ (tw3 moe .directSer ≤ 5368709120 / G ↔ G ≤ 2032) := by
+  have hb : bounceF 131072 = 204000 := by decide
+  have hw : tw3 moe .anchor = 3207719 ∧ tw3 moe .directSer = 2641199 := by decide
+  rw [hb, hw.1, hw.2]
+  have ka : 11734 ≤ 20971520 / G ↔ G ≤ 1787 := by rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  have kd : 9521 ≤ 20971520 / G ↔ G ≤ 2202 := by rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  refine ⟨⟨fun h => ka.mp (by omega), fun h => by have := ka.mpr h; omega⟩, ⟨fun h => kd.mp (by omega), fun h => by have := kd.mpr h; omega⟩, ?_, ?_⟩
+  · rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  · rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+/-- the planner reading: attention-bound at every G ≤ 174.6 with the measured bounce, on both expert kernels -/
+theorem T5r_moe128k_everyG (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    tw3 moe .anchor ≤ 256 * (20971520 / G) + bounceF 131072 ∧ tw3 moe .directSer ≤ 256 * (20971520 / G) + bounceF 131072 := by
+  have l := T5r_moe128k_tie_measured G h1
+  have hg : gStream = 1746 := rfl
+  exact ⟨l.1.mpr (by omega), l.2.1.mpr (by omega)⟩
+theorem T5r_moe128k_cells : aG128k - tw3 moe .anchor = 2645181 ∧ pct 2645181 (tw3 moe .anchor) = 825 ∧
+    aG128k - tw3 moe .directSer = 3211701 ∧ pct 3211701 (tw3 moe .directSer) = 1216 ∧
+    aUng aG128k 131072 - tw3 moe .anchor = 345981 ∧ pct 345981 (tw3 moe .anchor) = 108 ∧
+    aUng aG128k 131072 - tw3 moe .directSer = 912501 ∧ pct 912501 (tw3 moe .directSer) = 345 ∧
+    aFused aG128k 131072 cxHiF - tw3 moe .anchor = 365981 ∧ pct 365981 (tw3 moe .anchor) = 114 ∧
+    aFused aG128k 131072 cxHiF - tw3 moe .directSer = 932501 ∧ pct 932501 (tw3 moe .directSer) = 353 ∧
+    W3 moe 1 1 br3 = 92824932 ∧ W3 moe 1 1 br3 < 28 * aUng aG128k 131072 ∧ W3 moe 1 1 br3 < 28 * aG128k ∧
+    W3 moe 1 1 br3 < 28 * aFused aG128k 131072 cxHiF ∧ gStream < 1787 ∧ 1787 < 1894 ∧ 2202 < 2303 := by decide
+/-! ## T5r_levers — the corrected attention-side ranking at Π = 1 (the step is a sum; `[R5-levers-*]`). Per token: guard fusion (guarded →
+    fused, one 20 µs crossing per step; 10 µs alongside), the phase-overlap bound, the measured bounce removal, and for MoE the direct-path
+    expert kernel E29 (15862560 ns). Ranking (cx = 20 µs): dense guard fusion > overlap > bounce at every L; MoE 4k / 32k E29 first; MoE 128k
+    guard fusion > E29 > overlap > bounce; MoE 1M guard fusion > bounce > overlap > E29. -/
+theorem T5r_levers : e29 = 15862560 ∧ 120 * (guardF 4096 - cxHiF) = 6222000 ∧
+    120 * (guardF 4096 - cxLoF) = 7422000 ∧
+    120 * overlapF aG4k 4096 = 4671000 ∧
+    120 * bounceF 4096 = 765000 ∧
+    120 * overlapF aG4k 4096 < 120 * (guardF 4096 - cxHiF) ∧
+    120 * bounceF 4096 < 120 * overlapF aG4k 4096 ∧
+    120 * (guardF 32768 - cxHiF) = 66576000 ∧
+    120 * (guardF 32768 - cxLoF) = 67776000 ∧
+    120 * overlapF aG32k 32768 = 14040000 ∧
+    120 * bounceF 32768 = 6120000 ∧
+    120 * overlapF aG32k 32768 < 120 * (guardF 32768 - cxHiF) ∧
+    120 * bounceF 32768 < 120 * overlapF aG32k 32768 ∧
+    120 * (guardF 131072 - cxHiF) = 273504000 ∧
+    120 * (guardF 131072 - cxLoF) = 274704000 ∧
+    120 * overlapF aG128k 131072 = 31980000 ∧
+    120 * bounceF 131072 = 24480000 ∧
+    120 * overlapF aG128k 131072 < 120 * (guardF 131072 - cxHiF) ∧
+    120 * bounceF 131072 < 120 * overlapF aG128k 131072 ∧
+    28 * (guardF 4096 - cxHiF) = 1451800 ∧
+    28 * (guardF 4096 - cxLoF) = 1731800 ∧
+    28 * overlapF aG4k 4096 = 1089900 ∧
+    28 * bounceF 4096 = 178500 ∧
+    28 * (guardF 4096 - cxHiF) < e29 ∧
+    28 * overlapF aG4k 4096 < 28 * (guardF 4096 - cxHiF) ∧
+    28 * bounceF 4096 < 28 * overlapF aG4k 4096 ∧
+    28 * (guardF 32768 - cxHiF) = 15534400 ∧
+    28 * (guardF 32768 - cxLoF) = 15814400 ∧
+    28 * overlapF aG32k 32768 = 3276000 ∧
+    28 * bounceF 32768 = 1428000 ∧
+    28 * (guardF 32768 - cxHiF) < e29 ∧
+    28 * overlapF aG32k 32768 < 28 * (guardF 32768 - cxHiF) ∧
+    28 * bounceF 32768 < 28 * overlapF aG32k 32768 ∧
+    28 * (guardF 131072 - cxHiF) = 63817600 ∧
+    28 * (guardF 131072 - cxLoF) = 64097600 ∧
+    28 * overlapF aG128k 131072 = 7462000 ∧
+    28 * bounceF 131072 = 5712000 ∧
+    e29 < 28 * (guardF 131072 - cxHiF) ∧
+    28 * overlapF aG128k 131072 < e29 ∧
+    28 * bounceF 131072 < 28 * overlapF aG128k 131072 ∧
+    28 * (guardF 1048576 - cxHiF) = 514460800 ∧
+    28 * (guardF 1048576 - cxLoF) = 514740800 ∧
+    28 * overlapF aG1M 1048576 = 45427200 ∧
+    28 * bounceF 1048576 = 45696000 ∧
+    28 * bounceF 1048576 < 28 * (guardF 1048576 - cxHiF) ∧
+    28 * overlapF aG1M 1048576 < 28 * bounceF 1048576 ∧
+    e29 < 28 * overlapF aG1M 1048576 := by decide
+/-- MoE 32k: guard fusion (574 800 − X per layer, X = the fused kernel's residual crossing cost per step) outranks E29 iff X ≤ 8279 ns, i.e.
+    T_fused ≤ 947079 ns = 141.7 GB/s; at the measured 10–20 µs band E29 stays first by 48 160–328 160 ns per token (0.3–2.1 %:
+    a tie inside the band); the zero-residual ceiling (16 094 400 ns) would be first -/
+theorem T5r_levers_moe32k_iff (X : Nat) (hX : X ≤ guardTabF) : e29 < 28 * (guardTabF - X) ↔ X ≤ 8279 := by
+  have h1 : e29 = 15862560 := by decide
+  have h2 : guardTabF = 574800 := by decide
+  rw [h1, h2]; rw [h2] at hX; constructor <;> intro h <;> omega
+/-- guard fusion overtakes E29 from 66 blocks (cx = 20 µs) / 65 blocks (cx = 10 µs), i.e. for every L ≥ 33 297 / 32 785 (per-block guard reading) -/
+theorem T5r_levers_overtake (nb : Nat) :
+    (e29 < 28 * (nb * guardTabF / 64 - cxHiF) ↔ 66 ≤ nb) ∧ (e29 < 28 * (nb * guardTabF / 64 - cxLoF) ↔ 65 ≤ nb) := by
+  have h1 : e29 = 15862560 := by decide
+  have h2 : guardTabF = 574800 := by decide
+  unfold cxHiF cxLoF; rw [h1, h2]; constructor <;> constructor <;> intro h <;> omega
+theorem T5r_nbF_lines (L : Nat) : (66 ≤ nbF L ↔ 33297 ≤ L) ∧ (65 ≤ nbF L ↔ 32785 ≤ L) := by
+  have hb : blockOf 1 = 512 := by decide
+  unfold nbF nblocks4 ceilDiv; rw [hb]
+  constructor <;> constructor <;> intro h <;> omega
+/-- the P4P2 ranking at MoE 128k, retired and moved: the 138.3 → 169.2 choreography lever (22335488 ns) is gone (the production kernel's K+V
+    stream phase runs 174–176 GB/s, MEASURED); the measured kernel's gap to the round-4 cell is the guard (the per-block guard covers 101.5 %
+    of it); 169.2 → 174.6 is moot; the bounce removal moves 11.10 → 5.71 ms -/
+theorem T5r_retired : 28 * (attn4 131072 1 4 gK1 .lazy .T 2 false - attn4 131072 1 4 g256 .lazy .T 2 false) = 22335488 ∧
+    aG128k - attn4 131072 1 4 g256 .lazy .T 2 false = 2264164 ∧ 28 * 2264164 = 63396592 ∧ pct (guardF 131072) 2264164 = 1015 ∧
+    28 * (attn4 131072 1 4 g256 .lazy .T 2 false - attn4 131072 1 4 g256 .lazy .T 0 false) = 11103232 ∧
+    28 * (attn4 131072 1 4 g256 .lazy .T 2 false - attn4 131072 1 4 gStream .lazy .T 2 false) = 3089408 ∧
+    28 * bounceF 131072 = 5712000 ∧ 28 * bounceF 131072 < 11103232 ∧ e29 < 28 * (guardF 131072 - cxHiF) := by decide
+/-- context (not in the ranking): the E31 megakernel at c_sync = 5 µs saves 14480312 ns per MoE token — the same size class as E29 and the 32k guard fusion -/
+theorem T5r_levers_context : step3 moe 32768 1 1 br3 lam3 - step3 moe 32768 1 1 (br3Mega 5000) lam3 = 14480312 ∧
+    step3 dense 32768 1 1 br3 lam3 - step3 dense 32768 1 1 (br3Mega 5000) lam3 = 50353440 := by decide
+/-- spec decode (k = 3, α = 0.7) on the guarded verify kernel (D transfers: dense rows 64 = one mt-4 pass of the measured t = 16 cell; MoE rows 16 =
+    one mt-1 fragment = the measured t = 1 cell); the unguarded verify kernel is UNMEASURED -/
+theorem T5r_spec : aT16_32k / 2 = 5370850 ∧ step5F dense 1 4 br3 (aT16_32k / 2) lam3 = 3000803528 ∧ tpsCard (tau 700 3) 3000803528 = 211 ∧
+    step5F moe 1 4 br3 aG32k lam3 = 472726003 ∧ tpsCard (tau 700 3) 472726003 = 1339 ∧
+    step4F dense 32768 1 4 br3Lazy 2 lam3 = 2512448648 ∧ tpsCard (tau 700 3) 2512448648 = 252 ∧
+    step4F moe 32768 1 4 br3Lazy 2 lam3 = 455872691 ∧ tpsCard (tau 700 3) 455872691 = 1389 := by decide
+/-- the spec-decode thresholds re-instantiated on the measured verify kernel (D transfers): dense spec beats t = 1 iff α ≥ 0.179 (round 3:
+    0.144); MoE spec (uniform, anchored) loses iff α ≤ 0.807 guarded / 0.854 unguarded / 0.853 fused (round 3: 0.866) — T_spec_moe_loss survives, its line moves -/
+theorem T5r_spec_steps : step5F dense 1 1 br3 aG32k lam3 = 2471420669 ∧
+    step5F moe 1 1 br3 1513600 lam3 = 158337699 ∧
+    step5F moe 1 4 br3 1513600 lam3 = 472726003 ∧
+    step5F moe 1 1 br3 938800 lam3 = 142243299 ∧
+    step5F moe 1 4 br3 938800 lam3 = 456631603 ∧
+    step5F moe 1 1 br3 958800 lam3 = 142803299 ∧
+    step5F moe 1 4 br3 958800 lam3 = 457191603 := by decide
+theorem T5r_spec_thresholds : (∀ a, a < 1001 → (1000 * 3000803528 < tau a 3 * 2471420669 ↔ 179 ≤ a)) ∧
+    (∀ a, a < 1001 → (tau a 3 * 158337699 < 1000 * 472726003 ↔ a ≤ 807)) ∧
+    (∀ a, a < 1001 → (tau a 3 * 142243299 < 1000 * 456631603 ↔ a ≤ 854)) ∧
+    (∀ a, a < 1001 → (tau a 3 * 142803299 < 1000 * 457191603 ↔ a ≤ 853)) := by decide +kernel
+/-- MoE B = 16 (uniform) at 32k on the three readings, beside round 4 -/
+theorem T5r_B16 : step5F moe 16 1 br3 1513600 lam3 = 2034043603 ∧
+    tpsCard 16000 2034043603 = 1966 ∧
+    step5F moe 16 1 br3 938800 lam3 = 1776533203 ∧
+    tpsCard 16000 1776533203 = 2251 ∧
+    step5F moe 16 1 br3 958800 lam3 = 1785493203 ∧
+    tpsCard 16000 1785493203 = 2240 ∧
+    step4F moe 32768 16 1 br3Lazy 2 lam3 = 1764383443 ∧
+    tpsCard 16000 1764383443 = 2267 := by decide
+/-- the two-instance cells (overlapped cold tier, the round-3 minimal shares) on the three readings, and the H10 concurrency each needs -/
+theorem T5r_inst : instStep5 moe 1 1 xsMoe32k .directSer tW4 0 .uniform br3 1513600 lam3 = 154020529 ∧
+    tpsInst 1000 h10Card 154020529 = 3230 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer tW4 0 .uniform br3 938800 lam3 = 137926129 ∧
+    tpsInst 1000 h10Card 137926129 = 3607 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer tW4 0 .uniform br3 958800 lam3 = 138486129 ∧
+    tpsInst 1000 h10Card 138486129 = 3592 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 rW4ovl .uniform br3 1513600 lam3 = 3307675873 ∧
+    tpsInst 1000 h10Card 3307675873 = 150 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 rW4ovl .uniform br3 938800 lam3 = 3238699873 ∧
+    tpsInst 1000 h10Card 3238699873 = 153 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 rW4ovl .uniform br3 958800 lam3 = 3241099873 ∧
+    tpsInst 1000 h10Card 3241099873 = 153 ∧
+    (∀ c, 1579 ≤ tpsInst 1000 c 154020529 ↔ 973 ≤ c) ∧
+    (∀ c, 1758 ≤ tpsInst 1000 c 137926129 ↔ 970 ≤ c) ∧
+    (∀ c, 1751 ≤ tpsInst 1000 c 138486129 ↔ 970 ≤ c) ∧
+    (∀ c, 102 ≤ tpsInst 1000 c 3307675873 ↔ 1350 ≤ c) ∧
+    (∀ c, 105 ≤ tpsInst 1000 c 3238699873 ↔ 1361 ≤ c) ∧
+    (∀ c, 104 ≤ tpsInst 1000 c 3241099873 ↔ 1349 ≤ c) := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+  · intro c; unfold tpsInst; rw [Nat.le_div_iff_mul_le (by decide)]; constructor <;> intro h <;> omega
+/-- dense 1M KV-int8 (rowmax chain; no KV-int8 kernel is measured): erratum #29's per-block crossing bound (≥ xRowmaxF ns per block) caps the cell -/
+theorem T5r_dense1M_bound : step4F dense 1048576 1 1 br3I8 2 lam3 = 4698924749 ∧ tpsCard 1000 4698924749 = 53 ∧
+    120 * 2048 * xRowmaxF = 2535751680 ∧ tpsCard 1000 (4698924749 + 2535751680) = 34 := by decide

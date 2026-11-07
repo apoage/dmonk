@@ -26,6 +26,7 @@ penalty `pen` (tenths of a percent) and the KV read rate G are explicit argument
 | `cd proof && lake build` | **succeeds** (targets `Model`, `Smoke`, `Moe`, `Fleet` = fleet.lean, added to `lakefile.toml`) |
 | Theorems in fleet.lean | **124** (`grep -c '^theorem'`), of which 5 are the load-bearing umbrellas under PROMPT-4P's names: `T_mem_feas_dense_1M`, `T_min_dies`, `T_spec_moe_loss`, `T_pipelining`, `T_whatif` (plus `T_mem_feas_dense_4k`, `T_mem_feas_kv_int8`, `T_Lmax`, `T_serial`, `T_spec_dense` under their own names) |
 | Theorems after the round-3 proof session (2026-11-07) | **292** = these 124 + 168 round-3 theorems (`T3r_*`); see the round-3 proof section at the end — `lean proof/fleet.lean` and `lake build` succeed, 0 axioms / sorry / native_decide |
+| Theorems after round 5 (2026-11-07, PROMPT-3R5) | **310** = 292 + 18 round-5 theorems (`T5r_*`: the measured attention kernel in the planner); see the round-5 section at the end — standalone and `lake build` clean, 0 axioms / sorry / native_decide |
 | `axiom` / `sorry` / `native_decide` declared or used | 0 / 0 / 0; 94 theorems depend on no axiom at all, 30 (the `omega` / `simp` / `Nat.div_le_div_left` proofs and the umbrellas built on them) on the standard `propext` / `Quot.sound` / `Classical.choice` that core tactics emit (`#print axioms` over every theorem) |
 | `decide +kernel` | 10 (the 256-order exchange theorems, the 1001-case α thresholds, τ < 4 ∀ α — the elaborator's recursion limit, not the kernel's, is what they exceed) |
 | Leaf closers used | `decide`, `omega`, `rfl`, `simp` / `simp only` with core lemmas (`List.sum_cons`, `Nat.add_mul`, `Nat.succ_mul`, `Nat.mul_one`, `Nat.div_one`), `exact` / `apply` of core lemmas (`Nat.le_div_iff_mul_le`, `Nat.div_lt_iff_lt_mul`, `Nat.div_le_iff_le_mul_add_pred`, `Nat.div_le_div_left`, `Nat.div_le_div_right`, `Nat.mul_le_mul_left`, `Nat.le_add_right`, `Nat.add_le_add`, `Nat.le_max_left/right`, `Nat.zero_le`); structure: `unfold`, `rw`, `intro`, `constructor`, `refine`, `induction` |
@@ -414,3 +415,74 @@ variable), 4 CORRECTED (R11, R12, R13, R18: the corrected statement is the one p
 R16, R23); the MoE-128k tie target is proved in its moved, legs-conditional form; **0 orphans** — every
 number in DESIGN-4.md's round-3 blocks and in its corrected cells is fixed by a theorem above or is an INPUT (HW-MAP) / EMPIRICAL
 (named experiment) entry of this ledger. The round-2 ledger above is unchanged (39 / 39 proved of the round-2 model).
+
+
+## Round 5 (2026-11-07) — the measured production attention kernel in the planner (PROMPT-3R5; attention session 3, HW-MAP 62e8137)
+
+**What this section is.** `proof/fleet.lean` gains a round-5 section after the round-3 proof session: namespace `Measured5F` (the t = 1
+per-layer cells of the t × L sweep, the unguarded 32k cell, the t = 16 32k cell, the bounce, the stream phase, erratum #29's crossing band
+and the rowmax crossing bound — duplicated from `proof/attn.lean`'s `Measured5`, which the fleet file cannot import standalone), namespace
+`Design5F` (`guardF`, `bounceF`, `streamF`, `aUng`, `aFused`, `overlapF`, `step5F` = fleet.py `step5f`, `instStep5`, `e29`), and 18
+theorems. Every round-5 number DESIGN-4 quotes was first printed by `proof/fleet.py` (`[R5-*]`) and then fixed by a theorem generated from
+the script's own values. The round-2 and round-3 parts of the file are byte-identical (the diff is the appended section).
+
+| Item | Result |
+|---|---|
+| `lean proof/fleet.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 46 s |
+| `cd proof && lake build` | **succeeds** (all six targets) |
+| Theorems in fleet.lean | **310** = 292 (rounds 2–3, unchanged) + **18** round 5 (`T5r_*`) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0. `#print axioms` over the 18: 11 depend on no axiom, 7 on `propext` + `Quot.sound` only |
+| `decide +kernel` | 1 new (`T5r_spec_thresholds`: four 1 001-case α iffs, the round-3 pattern) |
+| `python3 -I proof/fleet.py` | the first 628 output lines **byte-identical**; + 41 lines (39 `[R5-*]` labels); `proof/alt.py` output unchanged |
+| Ledger | **14 / 14 rows resolved** (F5-1 … F5-14), **0 orphans** |
+
+**Inputs (MEASURED, attention session 3; DESIGN-3 §6.0 and its ledger rows R5-1 … R5-22):** the t = 1 per-layer cells 213 500 /
+1 513 600 / 5 852 900 / 46 313 600 ns at 4k / 32k / 128k / 1M (guarded), the unguarded 32k cell 938 800 ns, the t = 16 32k cell
+10 741 700 ns, the bounce ≈ 51 000 ns and the K+V stream phase 770 800 ns at 32k, erratum #29's crossing band 10–20 µs. **The validation
+row** (DESIGN-3 R5-3, an INPUT row here): 938.8 vs the round-4 cell 911.68 µs = 3.0 % (2.9 % of the displayed 912) ≤ the 5 % match line.
+
+**The three readings and their status.** guarded = MEASURED at every L; unguarded = MEASURED at 32k, DERIVED off 32k (the guarded cell
+minus the per-block guard 574 800 ns / 64 blocks — the per-block scaling is UNMEASURED off 32k; the constant-rate reading 143.0 GB/s is
+carried as the bracket); fused = DERIVED target (unguarded + one 20 µs crossing per step; the batched guard is UNMEASURED — E39).
+
+### Corrections and moves (round 4 / round-3 proof session → round 5)
+
+| # | Claim before | Now | theorem / label |
+|---|---|---|---|
+| 1 | the attention term = DESIGN-3's round-4 model (lazy-T, legs 2, 169.2): MoE 32k 1.766, 128k 1.155, 1M 0.272; dense 32k 0.104 | the MEASURED kernel: **guarded MoE 32k 1.578 (−10.6 %), 128k 0.893 (−22.6 %), 1M 0.176 (−35.2 %); dense 32k 0.101 (−2.8 %), 128k 0.083 (−8.7 %)**; on the unguarded / fused readings every cell within ±2.2 % of round 4 | `T5r_step_cells`; `[R5-step-*]` |
+| 2 | T3r_moe128k_tie: legs-conditional; the planner reads legs = 2 (UNMEASURED) | legs = 2 MEASURED; on the measured kernel attention-bound by 82.5 / 10.8 / 11.4 % (anchored), 121.6 / 34.5 / 35.3 % (direct); the step attention-bound on every reading; stream-only lines at the measured bounce **178.7 / 220.2** (round 4: 189.4 / 230.3); G_eff lines 167.3 / 203.2 | `T5r_moe128k_tie_measured`, `T5r_moe128k_everyG`, `T5r_moe128k_cells`; `[R5-moe-128k-*]` |
+| 3 | the follow-up ranking at MoE 128k: choreography 22.33 > E29 15.86 > bounce 11.10 ms | **guard fusion 63.81 > E29 15.86 > phase overlap ≤ 7.46 > bounce 5.71**; the choreography lever retired (the stream phase runs 174–176, MEASURED; the guard covers 101.5 % of the measured gap); 169.2 → 174.6 moot | `T5r_levers`, `T5r_retired`; `[R5-levers-*]`, `[R5-retired]` |
+| 4 | (steering, PROMPT-3R5) "guard fusion (worth ~570 µs at 32k) is the new #1" | true at MoE 128k / 1M and on every dense cell; **at MoE 32k guard fusion outranks E29 iff the fused kernel's residual X ≤ 8 279 ns per step** (T_fused ≤ 947 079 ns = 141.7 GB/s); at the measured band (10–20 µs) E29 stays first by 48 160–328 160 ns per token (0.3–2.1 %); first for every L ≥ 33 297 (32 785 at 10 µs); MoE 4k: E29 first | `T5r_levers_moe32k_iff` (∀ X), `T5r_levers_overtake` (∀ nb), `T5r_nbF_lines` (∀ L) |
+| 5 | T_spec_moe_loss: the MoE verify batch loses iff α ≤ 0.866 (round 3) | **survives, line moved: α ≤ 0.807 guarded / 0.854 unguarded / 0.853 fused** (verify kernel = the t = 1 kernel, D transfer); dense spec breakeven 0.144 → 0.179 | `T5r_spec_steps`, `T5r_spec_thresholds` (∀ α) |
+| 6 | dense spec 0.252 (round 4), MoE spec 1.389 | guarded verify kernel (D transfers): **dense 0.211, MoE 1.339** | `T5r_spec`; `[R5-spec-*]` |
+| 7 | MoE B = 16 2.267 (round 4) | 1.966 / 2.251 / 2.240 | `T5r_B16` |
+| 8 | two instances at c = 1.990: MoE 32k 3.702, dense 0.154 (round 3) | MoE 3.230 / 3.607 / 3.592 (needs c ≥ 0.973 / 0.970 / 0.970), dense 0.150 / 0.153 / 0.153 (c ≥ 1.350 / 1.361 / 1.349) — the instance decision unchanged | `T5r_inst` (∀ c) |
+| 9 | dense 1M KV-int8 0.053 (round 4, rowmax chain) | **≤ 0.034** with erratum #29's per-block crossing bound (≥ 10 318 ns × 2 048 × 120) | `T5r_dense1M_bound` |
+
+### The round-5 ledger (DESIGN-4.md round-5 blocks: banner, §0″, §3.6, §4.4, §6.5, §8 / §9 rows, §10″, Appendix A″)
+
+| # | claim | theorem(s) in `proof/fleet.lean` | fleet.py | status |
+|---|---|---|---|---|
+| F5-1 | per-layer readings, t = 1 (both shapes, mt = 1): guarded 213 500 / 1 513 600 / 5 852 900 / 46 313 600; unguarded 141 650 / 938 800 / 3 553 700 / 27 920 000; fused 161 650 / 958 800 / 3 573 700 / 27 940 000 (cx 10 µs: −10 000 each); round 4 130 872 / 911 680 / 3 588 736 / 28 574 592; the unguarded reading exact at 32k | `T5r_readings` | [R5-attn-*] | INPUT (guarded; unguarded 32k) + PROVED (D readings; per-block guard off 32k UNMEASURED) |
+| F5-2 | the step is affine in the per-layer attention: dense 2 289 788 669 + 120·a, MoE 115 956 899 + 28·a (t = 1, B = 1) | `T5r_step_form` (∀ a) | [R5-step-*] | PROVED ∀ a |
+| F5-3 | the t = 1 cells: dense 4k 0.107 / 0.108 / 0.108, 32k 0.101 / 0.104 / 0.103, 128k 0.083 / 0.092 / 0.091; MoE 4k 2.050 / 2.084 / 2.074, 32k 1.578 / 1.757 / 1.750, 128k 0.893 / 1.160 / 1.157, 1M 0.176 / 0.278 / 0.278; round 4 beside each | `T5r_step_cells` | [R5-step-*], [R5-headline-*] | PROVED |
+| F5-4 | the MoE-128k tie restated (correction 2) | `T5r_moe128k_tie_measured` (∀ G, iffs), `T5r_moe128k_everyG` (∀ G ≤ 174.6), `T5r_moe128k_cells` | [R5-moe-128k-tie], [R5-moe-128k-step] | PROVED ∀ G (legs, kernel: INPUT) |
+| F5-5 | the lever table per (shape, L) and its orderings (cx = 20 µs; 10 µs alongside) | `T5r_levers` | [R5-levers-*] | PROVED (E39 / E40 values: UNMEASURED targets / bounds) |
+| F5-6 | MoE 32k: guard fusion > E29 iff X ≤ 8 279 ns | `T5r_levers_moe32k_iff` (∀ X ≤ 574 800) | [R5-levers-moe-32k-iff] | PROVED ∀ X (X: EMPIRICAL — E39) |
+| F5-7 | guard fusion overtakes E29 from 66 / 65 blocks = every L ≥ 33 297 / 32 785 | `T5r_levers_overtake` (∀ nb), `T5r_nbF_lines` (∀ L) | [R5-levers-overtake-*] | PROVED ∀ nb, L (per-block guard reading) |
+| F5-8 | the P4P2 ranking retired / moved: 22 335 488 ns choreography lever; gap 2 264 164 ns per layer (63.39 ms per token), the per-block guard 101.5 % of it; bounce 11 103 232 → 5 712 000 ns; 169.2 → 174.6 3 089 408 ns (moot) | `T5r_retired` | [R5-retired] | PROVED |
+| F5-9 | context: E31 at c_sync = 5 µs saves 14 480 312 ns per MoE token, 50 353 440 per dense token | `T5r_levers_context` | [R5-levers-context] | PROVED (c_sync: EMPIRICAL — E31) |
+| F5-10 | spec decode on the guarded verify kernel: dense 3 000.80 ms → 0.211, MoE 472.72 → 1.339; round 4 0.252 / 1.389 | `T5r_spec` | [R5-spec-dense-32k], [R5-spec-moe-32k] | PROVED (the fragment transfers: D; unguarded verify: UNMEASURED) |
+| F5-11 | spec thresholds: dense beats t = 1 iff α ≥ 0.179; MoE loses iff α ≤ 0.807 / 0.854 / 0.853 | `T5r_spec_steps`, `T5r_spec_thresholds` (∀ α) | [R5-spec-dense-breakeven], [R5-spec-moe-loss-*] | PROVED ∀ α — **T_spec_moe_loss survives (line moved)** |
+| F5-12 | MoE B = 16: 1.966 / 2.251 / 2.240 (round 4 2.267) | `T5r_B16` | [R5-B16-moe-32k-*] | PROVED (D(16): EMPIRICAL — H9) |
+| F5-13 | two instances (c = 1.990): MoE 3.230 / 3.607 / 3.592, dense 0.150 / 0.153 / 0.153, with the c each needs | `T5r_inst` (∀ c) | [R5-inst-*] | PROVED ∀ c (H10 hypothesis variable) |
+| F5-14 | dense 1M KV-int8 ≤ 0.034 (round 4 0.053) | `T5r_dense1M_bound` | [R5-dense-1M-kvi8] | PROVED (bound; KV-int8 kernel UNMEASURED) |
+
+**Hypothesis variables carried, round 5:** the per-layer attention a (the step's only attention input — every cell is an instance of
+`T5r_step_form`), the fused kernel's residual X per step (E39: crossings + vector side-product + re-runs), the block count nb (the per-block
+guard reading), the crossing cost cx ∈ [10, 20] µs, the concurrency c (H10, unchanged), the acceptance α. Unchanged: λ, the expert regime,
+the int4 share x and the overhead `ort`, c_sync, the popularity family. **T_min_dies is untouched** (no attention term enters it).
+
+**Coverage, round 5:** 14 / 14 rows resolved — 13 PROVED (6 universally quantified over a, G, X, nb / L, α, c), 1 PROVED bound (F5-14);
+the MoE-128k tie target is proved in its measured form; **0 orphans** — every `T5r_*` theorem of fleet.lean is cited in F5-1 … F5-14, every
+`[R5-*]` label family of fleet.py is cited. The round-2, round-3 and round-3-proof-session ledgers above are unchanged.
