@@ -25,6 +25,7 @@ penalty `pen` (tenths of a percent) and the KV read rate G are explicit argument
 | `lean proof/fleet.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 7 s (no imports beyond Init; Mathlib/Batteries not used) |
 | `cd proof && lake build` | **succeeds** (targets `Model`, `Smoke`, `Moe`, `Fleet` = fleet.lean, added to `lakefile.toml`) |
 | Theorems in fleet.lean | **124** (`grep -c '^theorem'`), of which 5 are the load-bearing umbrellas under PROMPT-4P's names: `T_mem_feas_dense_1M`, `T_min_dies`, `T_spec_moe_loss`, `T_pipelining`, `T_whatif` (plus `T_mem_feas_dense_4k`, `T_mem_feas_kv_int8`, `T_Lmax`, `T_serial`, `T_spec_dense` under their own names) |
+| Theorems after the round-3 proof session (2026-11-07) | **292** = these 124 + 168 round-3 theorems (`T3r_*`); see the round-3 proof section at the end — `lean proof/fleet.lean` and `lake build` succeed, 0 axioms / sorry / native_decide |
 | `axiom` / `sorry` / `native_decide` declared or used | 0 / 0 / 0; 94 theorems depend on no axiom at all, 30 (the `omega` / `simp` / `Nat.div_le_div_left` proofs and the umbrellas built on them) on the standard `propext` / `Quot.sound` / `Classical.choice` that core tactics emit (`#print axioms` over every theorem) |
 | `decide +kernel` | 10 (the 256-order exchange theorems, the 1001-case α thresholds, τ < 4 ∀ α — the elaborator's recursion limit, not the kernel's, is what they exceed) |
 | Leaf closers used | `decide`, `omega`, `rfl`, `simp` / `simp only` with core lemmas (`List.sum_cons`, `Nat.add_mul`, `Nat.succ_mul`, `Nat.mul_one`, `Nat.div_one`), `exact` / `apply` of core lemmas (`Nat.le_div_iff_mul_le`, `Nat.div_lt_iff_lt_mul`, `Nat.div_le_iff_le_mul_add_pred`, `Nat.div_le_div_left`, `Nat.div_le_div_right`, `Nat.mul_le_mul_left`, `Nat.le_add_right`, `Nat.add_le_add`, `Nat.le_max_left/right`, `Nat.zero_le`); structure: `unfold`, `rw`, `intro`, `constructor`, `refine`, `induction` |
@@ -251,10 +252,10 @@ arithmetic; `T3r_*` re-instantiations alongside).
 
 | Item | Result |
 |---|---|
-| `proof/fleet.lean` | **unchanged**; `lean proof/fleet.lean` and `cd proof && lake build` still succeed (124 theorems, 0 axioms / sorry / native_decide) — every round-2 theorem remains true of the round-2 model; the cells it fixes that round 3 supersedes are listed below |
+| `proof/fleet.lean` | *(at the design round; the proof session below extends it)* **unchanged**; `lean proof/fleet.lean` and `cd proof && lake build` still succeed (124 theorems, 0 axioms / sorry / native_decide) — every round-2 theorem remains true of the round-2 model; the cells it fixes that round 3 supersedes are listed below |
 | `python3 -I proof/fleet.py` | runs on Python ≥ 3.8 (needs `proof/attn.py` beside it); round-2 output unchanged (278 lines, byte-identical); + 200 `[R3-*]` labels (259 output lines) |
 | `proof/alt.py` | unchanged and its output unchanged (it imports `fleet.py`; the new section adds functions only) |
-| Round-3 theorems | 0 proved / 27 ledger rows (R1–R27) in waiting; load-bearing survivors stated below |
+| Round-3 theorems | *(superseded 2026-11-07: all 27 resolved, 168 theorems — see the proof session below)* 0 proved / 27 ledger rows (R1–R27) in waiting; load-bearing survivors stated below |
 
 **Load-bearing verdicts, round 3.** `T_min_dies` **survives unchanged**: no round-3 term enters the memory model
 (`[R3-mem]`); the instance variant is PROBLEM-4's "hot/cold residency split" escape under the *different* hypothesis that
@@ -283,7 +284,7 @@ identity Σ blocks + λ = T_step holds at λ = 12 200 as well, `[R3-whatif-*-pip
 | the other 20 step cells (row 19) | §3.2 | §3.5.2 (−0.9 … −3.7 %; dense 128k spec −33.6 %) | [R3-moved-*] | as above |
 | T_branches_* (row 20) | brackets −8 / +3 % dense, −27 / +38 % MoE | **−21 / +4 %** dense (the integrated-chain reading), **−5 / +42 %** MoE | [R3-branch-*] | measured λ and G shrink the old brackets; c_q and the expert regime open new ones |
 | T_moe_families (row 21) | 2.357 / 3.714 / 4.765 | 2.325 / 3.636 / 4.638 (direct path 2.728 / 4.144 / 5.173) | [R3-B16-*] | |
-| T_Lstar_kv (row 22) | dense 778 240 (= W_layer/4096), MoE 136 736 | dense **753 168** (256 KiB; 777 232 at 174.6 on the block model), KV-int8 1 006 608 at every G; MoE **131 600** / 108 048 (direct) | [R3-Lkv-*] | block granularity + fixed cost + the measured G; KV-int8 is vector-bound |
+| T_Lstar_kv (row 22) | dense 778 240 (= W_layer/4096), MoE 136 736 | dense **753 168** (256 KiB; 777 232 at 174.6 on the block model), KV-int8 1 006 608 at every G; MoE **131 600** / 108 048 (direct) | [R3-Lkv-*] | block granularity + fixed cost + the measured G; KV-int8 is vector-bound. L* is the length from which every longer context is attention-bound; the first attention-bound length is lower in 13 of 40 cells (131 103 for MoE at 256 KiB) — proof-session correction 2 |
 | T_fleet_G_* (attn.lean, round 2) | MoE 128k attention-bound iff G ≤ 167.7 | iff G ≤ **168.3** (anchored) / **204.7** (direct path) | [R3-Gstar-*] | the 18 820 ns fixed cost; the faster expert kernel |
 | T_regime_* (row 25) | 24 cells | 24 cells: + dense 1M KV-int8 = ATTN:VEC; MoE 128k W by 0.5 % per layer at 256 KiB | [R3-regime] | |
 | T_p2p_bound, T_tsplit, T_pipelining (rows 27–29) | ≤ 1.5 / 1.48 ms; 398.52 / 43.02 ms (5.9× / 3.1×); 0.817 / 13.414 | ≤ **236 / 220 µs**; **382.32 / 39.24 ms (6.2× / 3.5×)**; **0.808 / 12.918** (7.7× / 7.1×) | [R3-whatif-*] | reductions 191 → 34 µs; blocks carry c_q |
@@ -297,20 +298,119 @@ identity Σ blocks + λ = T_step holds at λ = 12 200 as well, `[R3-whatif-*-pip
 
 ### Round-3 rows R1–R27 (DESIGN-4.md Appendix A′) — status
 
-Every row: **THEOREM-IN-WAITING** — printed by its `[R3-*]` label, no `proof/fleet.lean` theorem yet. Rows whose statement
-is an iff or a bound over one explicit variable (the natural `decide`/`omega` targets): R2 (λ: `T3r_bounce_threshold_*`),
-R12 (L: `T3r_Lstar_iff`), R13 (G: `T3r_fleet_G`, `T3r_moe_128k_cells`), R16 (c_sync: `T3r_mega_threshold`), R17 (x:
-`T3r_inst_fit`, with the overhead `ort` as a hypothesis), R19 (T_cold: `T3r_inst_breakeven`; the measured-5.3 instance
-`T3r_inst_gain_measured`), R22–R23 (α: `T3r_spec_dense_breakeven`, `T3r_spec_moe_loss` both directions). Cell identities on
-the imported DESIGN-3 model: R3–R5, R7–R11, R15, R18, R20–R21, R24–R26 (transcribe `attn3_seq`, `step3`, `die_block3`,
-`step_tsplit3`, `inst_step3` with `Design3.step3` from `proof/attn.lean` evaluated at rows = t·g; their round-2 limits must
-reproduce `T_step_*`, which `[R3-moved-*]` pairs cell by cell). R6 and R1 are closed-form arithmetic on measured inputs.
-R27 is the identity "no round-3 term enters the memory model" (the round-2 theorems stand). Assumptions carried as explicit
-hypothesis variables: the runtime overhead `ort` (H8 / H11: the instance fit has 2–30 MB of margin at 2 GiB), c_q's
-scaling (E38: fixed per pass vs proportional; the integrated-chain 135.5 reading), the expert-kernel regime (E29), c_sync
-(E31), the chain convention (throughput vs chained) and variant (E35), the int4 unpack rate (measured 5.3; the serial-chain
-branch), the popularity family (H9), Π (H4) and the two-instance concurrency (H10).
+**Superseded by the proof session below (2026-11-07): every row is now PROVED, PROVED ∀ (its hypothesis variable), or
+CORRECTED.** The design-round text that stood here ("THEOREM-IN-WAITING … 0 / 27 proved") is replaced by the ledger that follows.
 
-**Coverage, round 3:** 27 / 27 rows have a label and a proposed theorem; **0 / 27 proved** (by design of this round — the
-proof round is next); 0 orphans (every number in DESIGN-4.md's round-3 blocks is printed by a label); the round-2 ledger
-above is unchanged (39 / 39 proved of the round-2 model).
+## Round 3 proof session (PROMPT-4P2, 2026-11-07) — the 27 `T3r_*` rows proved
+
+**What this section is.** `proof/fleet.lean` gains a round-3 section after the round-2 umbrellas: namespace `Measured3` (the HW-MAP
+e9349c8 inputs and the two round-4 inputs the MoE-128k tie needs), namespace `Attn3F` (DESIGN-3's round-3 attention chain and
+its round-4 bounce-legs variant, **duplicated** from `proof/attn.lean` — the fleet file cannot import it standalone; same integer
+formulas, rows = t·g per core, `proof/attn.lean` untouched), namespace `Design3F` (`step3`, `die_block3`, `step_tsplit3`,
+`inst_step3`, `min_x`, `cold_share` of `proof/fleet.py` transcribed 1:1), and 168 theorems. Every `[R3-*]` number the design
+quotes was first printed from `proof/fleet.py` and then fixed by a theorem; the cell theorems were generated from the script's
+own values, not typed. The round-2 part of the file is byte-identical (the diff is a header note plus the appended section).
+
+| Item | Result |
+|---|---|
+| `lean proof/fleet.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 45 s (core Lean 4.35, no imports beyond Init) |
+| `cd proof && lake build` | **succeeds** (all six targets: `Model`, `Smoke`, `Moe`, `Fleet`, `Attn`, `Alt`) |
+| Theorems in fleet.lean | **292** = 124 round 2 (unchanged) + 168 round 3 (166 `T3r_*`, 2 `max4_*` helpers) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0. `#print axioms` over the 168 new theorems: 79 depend on no axiom; 89 (the `omega` / `simp` proofs and the umbrellas) on the standard `propext` / `Quot.sound` / `Classical.choice` only |
+| `decide +kernel` | 4 new (the 1 001-case α iffs `T3r_spec_dense_breakeven`, `T3r_spec_moe_loss_exact`, `T3r_spec_moe_loss_tps`; the lcm(1..256) Zipf share `T3r_inst_zipf`) |
+| `python3 -I proof/fleet.py` | the first 583 output lines (every `[F*]`, `[R3-*]`, `[R4-*]` label) **byte-identical**; + 45 `[R3P-*]` lines appended (the corrections and the new hypothesis-variable readings — `diff` of the two outputs IS the correction list); `proof/alt.py` output unchanged |
+| Ledger | **27 / 27 rows resolved** (21 PROVED / PROVED ∀ x, 6 CORRECTED with the corrected statement proved), **0 orphans** |
+
+**Inputs instantiated this session (PROMPT-4P2).**
+- **H10 is GREEN at card scale** (HW-MAP, season h: two instances on disjoint dies at full solo speed, 1.99× aggregate). It is
+  carried as the hypothesis variable `c` (aggregate two-instance throughput in thousandths of one instance: 2 000 = both at solo
+  speed — fleet.py's `tps_card_inst`; 1 990 = the measurement; 1 000 = serialised). Every variant-I cell is a function of `c`
+  (`tpsInst`), each gain is an iff in `c` (`T3r_h10_iff`, `T3r_inst_gain_measured`, `T3r_inst_h10`), and the card-scale reading
+  activates **every overlapped-tier cell** (MoE 32k 3.702, dense 32k 0.154 at c = 1.990; thresholds c ≥ 0.970 / 1.354). The
+  two-card inheritance (two 2-card instances behave like two single-die instances) remains the open hypothesis.
+- **E35 is LICENSED** (qk-norm + per-row guard): both chains are carried in every cell where they differ (`T3r_e35_branches`);
+  the fixed-shift cells are the loadable branch for qk-normalised models; the guard is inside every lazy cell (`T3r_e35_guard`:
+  one reduce-max per P reel, 1 455 ns of the 5 530 ns block); the no-guard variant enters no cell. Even one ≈ 10.7 µs guard trip
+  in every layer of every step (≥ 450× the measured 0.087–0.22 % rate) leaves the fixed-shift cells unchanged
+  (`T3r_e35_trip_bound`).
+- **DESIGN-3 round 4** (landed before this session): the tie is stated over the bounce legs (`attn4`, `step4F` = fleet.py
+  `attn4_seq` / `step4f`); the `[R4-*]` sections of fleet.py are untouched.
+
+### Corrections forced by formalization (round-3 text → proof)
+
+| # | DESIGN-4 round-3 claim | what the prover found | theorem / label |
+|---|---|---|---|
+| 1 | serial-chain int4 cold tier: 596 ns per 2 KiB piece, 55.2 W8-eq (constants table, §1.8, R18); "MoE 32k … 147.06 → 3.399 (+88.6 %)", "dense 32k … 4 095.48 → 0.122 (+17.3 %)", "serial-chain at 128k: −4.3 %" | the piece carries **8 KiB** of f16 and two MMA calls: **807 ns**, 413 184 ns per core-slab, **40.8** W8-eq (the alternatives proof round's correction, never propagated). MoE 32k **159.85 → 3.128 (+73.5 %)**; **dense 32k 4 977.19 → 0.100 (−3.8 %): the gain FLIPS to a loss** — it needs c ≥ 2.091×, more than two solo-speed instances give; dense 4k 0.114 (+5.5 %); dense 128k **0.070 (−24.7 %)**; MoE 4k / 128k / 1M 3.662 / 2.087 / 0.507. Dense replication needs the **overlapped** cold tier (E30). The MoE breakeven still passes on the corrected chain (3.4× inside) | `T3r_serpiece`, `T3r_serpiece_h10`; `[R3P-serpiece-*]` |
+| 2 | T5′ / R12: "L* = (nb* − 1)·512 + 16 … (checked at L* and L* − 16)"; fleet.py "smallest L … exact over every L" | the t = 1 attention is **not monotone in L**: the L mod 16 vector tail adds up to 3 896 ns, so in **13 of the 40 cells** lengths just below L* are already attention-bound. Proved exact form: attention-bound ⟺ L ≥ L* ∨ (L* − 512 ≤ L ∧ L mod 16 ≥ τ). L* is where every longer context is attention-bound; the first attention-bound length is lower — **MoE anchored at 256 KiB: 131 103 (τ = 15), not 131 600; dense KV-int8: 1 006 102 (τ = 6), not 1 006 608**; dense fixed-shift 753 175, MoE ping-pong 105 489, … Every design cell (L a multiple of 16: tail 0) keeps its verdict — 128k = 131 072 is still weights-bound at 256 KiB, now 31 tokens under the first attention-bound length | 40 × `T3r_Lstar_*`, `T3r_Lstar_kv`; `[R3P-Lkv-*]` |
+| 3 | R13 / §4.3: "attention-bound iff G ≤ G*: … dense 1M 2 354 tenths … MoE 1M 13 460" (16 371 / 16 737 on the direct / ping-pong kernels) | false as iffs over G > 0: **the vector chain alone (2 048 × 9 276 + 18 820 = 19 016 068 ns) exceeds every 1M weight time**, so above the printed line the block turns vector-bound and the cell stays attention-bound. Corrected statement proved: **every 1M cell is attention-bound at EVERY G** (no hypothesis on G). The fixed-shift chain keeps a real line at dense 1M (G ≤ 235.3). Every other G* line is an exact iff over all G > 0 (stronger than the G ≤ 174.6 domain) | `T3r_fleet_G_1M_everyG`, `T3r_fleet_G_1M_iff_false`, `T3r_fleet_G_dense_1M_lazy`, 12 × `T3r_fleet_G_*`; `[R3P-Gstar-*]` |
+| 4 | §4.3 / R11: "Host bounce ≤ 0.16 % everywhere" | the 24-cell map peaks at **0.18 %** (MoE 4k, t = 1); 0.16 % is the 32k value | `T3r_regime_moe_4k`, `T3r_bounce_share_max`; `[R3P-bounce-max]` |
+| 5 | §0′ / §4.3 / §9: MoE 128k "weights-bound by 0.5 % at 256 KiB, attention-bound at 64 KiB / 16 KiB" | **moved by DESIGN-3 round 4** — proved legs-conditional: attention-bound iff G ≤ **168.3 (legs 0) / 178.9 (legs 1) / 189.4 (legs 2)** on the anchored kernel and ≤ 204.7 / 217.5 / 230.3 on the direct path. The planner reads **legs = 2** (erratum #20): **attention-bound at every G ≤ 174.6 on both kernels**; legs 1 gives the same verdict, only a legs-0 route restores the round-3 tie. Precision: "attention-bound" is per layer — at 64 KiB on the round-3 chain the step's largest term is still W (92.82 vs 90.53 ms, the lm_head) | `T3r_moe128k_tie`, `T3r_moe128k_lines`, `T3r_moe128k_tie_cells`, `T3r_moe128k_step_level`; `[R3P-tie-*]` |
+| 6 | (decision framing, PROMPT-4P2) "the tie decides whether attention-kernel follow-ups outrank expert-GEMM follow-ups" | at Π = 1 the step is a **sum** (Σ W + Σ ATTN + …), so the binding side ranks nothing. Per MoE token at 128k (legs 2, 169.2): **E29 (direct-path expert kernel) saves 15.86 ms; removing the bounce 11.10 ms; one leg 5.54 ms; 174.6 instead of 169.2 3.08 ms; 169.2 instead of the session-1 loop's 138.3 22.33 ms.** E29 outranks the bounce follow-up at 128k although the cell is attention-bound; the bounce removal overtakes E29 only from L = 187 392 (88.82 ms at 1M); realising the measured G outranks both | `T3r_moe128k_followups`; `[R3P-tie-followups]` |
+| 7 | §6.4 T12′: "0.866 loses at 1.397 … 1.802, 0.867 gains at 1.803" | at α = 0.866 the cell is **1.800** (< 1.802); 0.867 gives 1.803 | `T3r_spec_moe_cells`, `T3r_spec_moe_loss_tps` |
+| 8 | R16 / §5′: "pays iff c_sync ≤ 109.9 µs (dense)" | the dense line is a **tie**: at c_sync = 109 903 ns the megakernel step equals the launch-per-op step exactly (4 × 109 903 + 15 388 = 455 000); strictly better iff ≤ 109 902 (MoE ≤ 108 430 either way) | `T3r_mega_threshold`; `[R3P-mega-tie]` |
+| 9 | §10: "the MoE regime 1.13×" | 1.13× is the serialised-A-lift direct path; the overlapped lift is 1.15× and ping-pong 1.14× — the regime spread is 1.13–1.15× | `T3r_branch_ratios` |
+
+### The 27-row round-3 ledger (DESIGN-4.md Appendix A′)
+
+| # | claim (as corrected) | theorem(s) in `proof/fleet.lean` | fleet.py | status |
+|---|---|---|---|---|
+| R1 | λ = 12 200 ns; T_x = Σbw + 16 λ: dense 236 307 / 359 643 / 852 999, MoE 219 567 / 292 684 / 585 151 ns; 201 / 8 041 µs at the 10 / 500 µs what-ifs; instance chain 8 λ: 126 / 119 µs | `T3r_Tx_form` (∀ shape, rows, λ), `T3r_Tx` | [R3-xch-*] [R3-inst-*] | PROVED (λ INPUT, HW-MAP e9349c8) |
+| R2 | bounce ≥ 10 % of the 32k step iff λ ≥ 16 573 797 ns (dense) / 960 105 (MoE); 50 % iff ≥ 149 184 724 / 8 653 124; 0.01 % / 0.16 % at 12.2 µs, 1 358× / 78× below the 10 % line | `T3r_step_lambda_form`, `T3r_bounce_threshold_dense`, `T3r_bounce_threshold_moe` (iffs ∀ λ), `T3r_bounce_cells` | [R3-T8-*] | PROVED ∀ λ |
+| R3 | t = 1 attention per layer (rows ≤ 16): nb(L)·⌊20 971 520 / G⌋ + 18 820 + tail for every G ≤ 174.6 and every L — 812 036 / 25 401 732 ns at 256 KiB, 822 468 / 25 735 556 at 64 KiB, 891 460 / 27 943 300 at 16 KiB, 787 524 / 24 617 348 at 174.6; KV-bound; chain 74.8 % of the block (95.5 % chained) | `T3r_mt1`, `T3r_attn_mt1`, `T3r_block_consts`, `T3r_attn_t1_form` (∀ L, G, rows), `T3r_attn_t1`, `T3r_attn_t1_bind` | [R3-attn-*] | PROVED ∀ G (E21 / E22 INPUT) |
+| R4 | dense verify (rows 64, mt 4, 256-token blocks): 3 555 844 ns at 32k, vector-bound (27 350 vs 6 197 ns per block, 4.4×); fixed-shift 1 593 364; MoE verify (rows 16) 812 036 | `T3r_attn_t4` | [R3-attn-*] | PROVED |
+| R5 | KV-int8 t = 1 vector-bound: 612 484 / 19 016 068 ns; DDR-bound on the fixed-shift chain: 407 936 / 12 702 784 | `T3r_attn_i8` | [R3-attn-*] | PROVED |
+| R6 | c_q × 4 per layer: 20.97 / 4.89 ms per token; proportional reading 568 100 / 262 200 ns per layer at rows 1 | `T3r_quant` | [R3-layer-*] | PROVED (c_q INPUT; the E38 reading is the branch `cq`) |
+| R7 | the §3.5.2 table, 31 rows: T_step, W / ATTN / launch / quant / bounce / draft, tokens/s/card, binding, feasibility | `T3r_step_dense_{4k,32k,128k,1M}`, `T3r_step_moe_{4k,32k,128k,1M}` | [R3-step] | PROVED |
+| R8 | 26 moved pairs (round-2 theorem value → round-3 value); −0.9 / −3.4 / −13.3 / −18.1 / −3.2 % (dense 128k spec −33.6 %); the round-3 step with the round-2 attention and no quant pass IS the round-2 step, ∀ L, B, t, λ | `T3r_moved_cells`, `T3r_moved_pct`, `T3r_round2_limit` | [R3-moved-*] | PROVED |
+| R9 | branches at 32k: dense 0.082 … 0.108, MoE 1.703 … 2.564; λ ∈ [10, 500] µs: dense 0.104 for every λ, MoE 1.706 … 1.802; regimes 2.035 / 2.072 / 2.061; §10's ratios (0.98× … 1.20×; MoE regime 1.13–1.15×) | `T3r_branches_dense`, `T3r_branches_moe`, `T3r_branch_ratios`, `T3r_step_lambda_bracket` (∀ λ in the bracket) | [R3-branch-*] | PROVED ∀ λ (precision (9)) |
+| R10 | MoE B = 16: 2.325 / 3.636 / 4.638 (uniform / Zipf 1.0 / Zipf 1.5), 2.728 / 4.144 / 5.173 direct | `T3r_moe_families` | [R3-B16-*] | PROVED (D(16) EMPIRICAL — H9) |
+| R11 | regime map, 24 cells: W everywhere except MoE 1M (ATTN:KV 86.0 %), dense 1M KV-int8 (ATTN:VEC 49.9 %) and the MEM cells; quant 0.9 / 3.5 %, launch 2.8 / 13.0 %; **bounce ≤ 0.18 %** | `T3r_regime_{dense,moe}_{4k,32k,128k,1M}`, `T3r_bounce_share_max` | [R3-regime] [R3P-bounce-max] | CORRECTED (4) |
+| R12 | KV crossover over every L: attention-bound ⟺ L ≥ L* ∨ (L* − 512 ≤ L ∧ L mod 16 ≥ τ); L* dense 753 168 / 743 440 / 684 560 / 777 232 / 259 088, KV-int8 1 006 608 (first 1 006 102), fixed-shift 753 680 (first 753 175) / 1 507 344; MoE anchored 131 600 (**first 131 103**) / 129 552 / 119 312 / 135 696 / 45 072; direct 108 048 …; ping-pong 106 000 (first 105 489) … | `T3r_nb1`, `T3r_tail1`, 40 × `T3r_Lstar_<shape>_<G>_<regime>_<chain>[_i8]` (∀ L, exact), `T3r_Lstar_kv` | [R3-Lkv-*] [R3P-Lkv-*] | CORRECTED (2) |
+| R13 | t = 1 attention-bound iff G ≤ G*, as iffs over every G > 0: dense 32k / 128k 7.3 / 29.4; MoE 32k 42.0 / 51.1 / 52.3, **128k 168.3 / 204.7 / 209.2**; **every 1M cell attention-bound at every G**; MoE-128k margins (W by 16.0 µs = 0.5 % at 256 KiB, ATTN by 25.7 µs at 64 KiB, 301.7 µs at 16 KiB, 550.5 µs = 20.8 % direct) | `T3r_attn_G_form`, 12 × `T3r_fleet_G_<shape>_<L>_<regime>`, `T3r_fleet_G_1M_everyG`, `T3r_fleet_G_1M_iff_false`, `T3r_fleet_G_dense_1M_lazy`, `T3r_moe_128k_cells` | [R3-Gstar-*] [R3P-Gstar-*] | CORRECTED (3); PROVED ∀ G |
+| R14 | softmax crossover rows* = 32 (chain as specified) / 48 (fixed-shift): dense t ≥ 2 / 3, MoE t ≥ 5 / 9; KV-int8 dense 1 / 2, MoE 1 / 5; chained convention as stated per corner | 8 × `T3r_tstar_<shape>_<chain><conv>` (∀ t ≤ 16, iff), `T3r_tstar_cells` | [R3-tstar-*] | PROVED ∀ t |
+| R15 | P2P saving ≤ T_x (236 / 220 µs); tensor-split 382.32 / 39.24 ms → 0.653 (6.2×) / 6.369 (3.5×), 34 / 27 µs reductions; Π = 8 blocks, Σ blocks + λ = T_step exactly, 0.808 (7.7×) / 12.918 (7.1×), balance loss 3.5 / 10.4 % | `T3r_p2p_bound` (∀ x), `T3r_tsplit`, `T3r_pipelining_blocks`, `T3r_pipelining_decomposition` | [R3-whatif-*] | PROVED (premises: the runtime capabilities, H4) |
+| R16 | megakernel saves 54.60 / 15.28 ms, reductions +1.84 / +0.10 ms, 480 / 140 syncs; pays iff c_sync ≤ 109 903 ns (dense: a tie there, strict iff ≤ 109 902) / 108 430 (MoE); cells 0.107 / 0.106 / 0.106, 2.019 / 2.012 / 1.979; V1 + V2 2.307 | `T3r_mega_form` (∀ c), `T3r_mega_threshold` (iffs ≤ and <), `T3r_mega_cells` | [R3-mega-*] [R3P-mega-tie] | PROVED ∀ c_sync (precision (8)) |
+| R17 | instance fit: minimal x per die an iff in x (MoE 32k 182 / 170 / 170 / 182 ‰, dense 32k 376 / 358 / 332 / 376) and minimal in all 8 cells; dense 1M infeasible at every x ≤ 1000 and every overhead; margins 1.9 … 30.1 MB; Δx ≤ 23 / 21 ‰ per GB | `T3r_inst_ort_add`, `T3r_inst_form`, `T3r_inst_fit_moe_32k`, `T3r_inst_fit_dense_32k` (∀ x), `T3r_inst_fit`, `T3r_inst_w_mono`, `T3r_inst_dense_1M_infeasible` (∀ x, ort), `T3r_inst_dense_1M_cells`, `T3r_inst_margins`, `T3r_instance_margin` (∀ ort), `T3r_inst_dx` | [R3-inst-fit-*] | PROVED ∀ x, ∀ ort (overhead ASSUMPTION — H8 / H11) |
+| R18 | instance cells at c = 2.000: MoE 32k 134.37 ms → 3.720 (+106.4 %), anchored 3.391, overlapped lift 3.771, Zipf(1.0) 4.006, 4k / 128k / 1M 4.396 / 2.437 / 0.577, B = 16 4.035; dense 32k 3 223.48 → 0.155 (+49.0 %), spec 0.349 / 0.374, 4k / 128k 0.168 / 0.122; **serial-chain cells on the 807 ns piece: MoE 32k 3.128, dense 32k 0.100 (a loss)** | `T3r_inst_cells`, `T3r_inst_zipf`, `T3r_serpiece` | [R3-inst-*] [R3P-serpiece-*] | PROVED (popularity EMPIRICAL — H9); serial-chain cells CORRECTED (1) |
+| R19 | two instances beat one (MoE 32k) iff the int4 core-slab time ≤ 1 406 404 ns at c = 2.000 / ≤ 1 394 680 at the card-scale c = 1.990; at the measured 5.3 GB/s/core iff c ≥ 0.970 (≥ 1.095 against the direct-path chain); 4.0 / 3.0 / 2.0 / 1.0 GB/s/core → 3.521 / 3.282 / 2.890 / 2.127; all-int4 2.646 dominated | `T3r_inst_moe32k_form` (∀ Tc), `T3r_h10_iff`, `T3r_inst_breakeven` (∀ Tc), `T3r_inst_gain_measured` (∀ c), `T3r_inst_sens`, `T3r_inst_h10`, `T3r_serpiece_h10` | [R3-inst-breakeven-moe-32k] [R3-inst-sens-*] [R3P-h10-*] | PROVED ∀ Tc, ∀ c (H10 hypothesis variable) |
+| R20 | V3 + V2 4.170 / 0.157; + overlapped lift 4.234; Π = 8 of one chain 3.4× / 5.2× the two-instance cells; H10's 14.880 vs 7.208 fleet tokens/s (2.06× / 1.49×) | `T3r_inst_vs_pipe` | [R3-inst-combo-*] | PROVED |
+| R21 | draft token 22 130 µs = 5 727 + 1 153 + 11 011 + 4 195 + 19 + 24; verify step 66.38 ms (33.35 / 41.34 / 53.80); launch 49.8 %, quant 19.0 % | `T3r_draft` | [R3-draft] | PROVED |
+| R22 | dense spec 0.168 / 0.227 / 0.308 (1.608 / 2.172 / 2.949×), k = 7 → 0.238 (0.432); gain iff α ≥ 0.144; fixed-shift 0.184 / 0.248 / 0.337, k = 7 0.277 / 0.503, iff α ≥ 0.064; the pair as thresholds over the chain cost (T3r_spec_dense_split) | `T3r_spec_dense`, `T3r_spec_dense_breakeven` (∀ α, iff), `T3r_spec_dense_best_k`, `T3r_spec_dense_split_form`, `T3r_spec_dense_split` (∀ v), `T3r_spec_dense_split_cells`, `T3r_e35_branches`, `T3r_e35_guard`, `T3r_e35_trip_bound` | [R3-spec-dense-*] [R3P-spec-split] [R3P-e35-trips] | PROVED ∀ α, ∀ v |
+| R23 | MoE spec loss iff α ≤ 0.866 / 0.752 / 0.657 (anchored), 0.847 / 0.741 / 0.652 (direct), both directions; 1.034 / 1.397 / 1.897; best k = 1 → 1.745; mechanism E₁ = 82.64 ms = 59.6 %, every τ < 2.787 a loss | `T3r_spec_moe_steps`, `T3r_spec_moe_loss_exact` (∀ α, iff), `T3r_spec_moe_loss_tps`, `T3r_spec_moe_cells`, `T3r_spec_moe_mechanism`, `T3r_spec_moe_loss` | [R3-spec-moe-*] | PROVED ∀ α — **T_spec_moe_loss survives** (precision (7)) |
+| R24 | rollout 593.73 / 1 187.48 / 2 387.22 ms (dense 32k), 33.85 / 67.72 / 138.68 (MoE) and the 4k / 128k cells; 4 × stage-1 + 12.29 = 2 387.23 exactly (MoE + 3.25 = 138.69) | `T3r_rollout`, `T3r_rollout_identity` | [R3-rollout-*] | PROVED |
+| R25 | ladder: H1 12 348 / 12 494 ns (4 KiB), 2.44 / 4.84 ms (64 MiB); H3 queueing 5 / 75 / 1 207 µs; H10 2.0× (14.880 vs 7.208); H11 margin 24.5 MB, 23 ‰ per GB; E38 47.19 / 2.44 ms between the readings | `T3r_ladder`, `T3r_inst_vs_pipe`, `T3r_inst_margins`, `T3r_inst_dx` | [R3-ladder-*] | PROVED |
+| R26 | integrated chain 3 001.92 → 0.083 (−20.1 %) / 136.60 → 1.830 (+1.5 %); dense serial 2 953.41 → 0.084; MoE 128k 1.217 / 1.210 / 1.167 (1.319 / 1.311 / 1.260 direct); MoE 1M 0.302 / 0.298 / 0.278, gather3x 0.114 (2.6×), KV-int8 0.385 / 0.530; dense 1M KV-int8 0.054 / 0.065 | `T3r_fallbacks` | [R3-risk-*] | PROVED |
+| R27 | memory tables, L_max, T_min_dies, T_mem_*: unchanged (no round-3 term enters them) | `T3r_mem`, `T3r_min_dies` (= the round-2 theorems) | [R3-mem] | PROVED — **T_min_dies survives unchanged** |
+
+### The three PROMPT-4P2 targets
+
+- **`T3r_spec_dense_split` — survives, sharpened.** The dense verify step at 32k is affine in the per-block chain cost v (ns per
+  256-token block at mt = 4, v ≥ 6 197): T(v) = 2 356 342 808 + 15 600·v (`T3r_spec_dense_split_form`). The cell is ≥ 0.248 iff
+  v ≤ 12 633, ≥ 0.227 iff v ≤ 27 775, and beats t = 1 iff v ≤ 235 551. The chain as specified (27 350) gives 0.227 with 425 ns of
+  margin; the fixed-shift chain (12 254; E35 licensed) gives 0.248 with 379 ns.
+- **`T3r_moe128k_tie` — survives as a legs-conditional; the planner reads legs = 2.** Attention-bound iff G ≤ 168.3 / 178.9 /
+  189.4 (legs 0 / 1 / 2, anchored), ≤ 204.7 / 217.5 / 230.3 (direct path). At legs ≥ 1 — and legs = 2 is what erratum #20 forces —
+  the cell is attention-bound at every G ≤ 174.6 on both expert kernels; the round-3 tie (weights-bound by 0.5 % at 256 KiB) exists
+  only at legs 0. What the tie does **not** decide is the ranking of follow-ups (correction 6): at 128k E29 saves 15.86 ms per token
+  against 11.10 ms for removing the bounce, so the expert-GEMM follow-up still outranks the bounce follow-up there; the bounce
+  removal wins only from L = 187 392 on, and realising the measured G (169.2 rather than the session-1 loop's 138.3) is worth
+  22.33 ms, more than either.
+- **`T3r_instance_margin` — survives, with the overhead as the hypothesis.** At the shipped minimal x the MoE 32k instance fits iff
+  the real per-die overhead is ≤ 2 GiB + 24 485 516 B (dense 32k: + 3 346 208 B). For every L, x and overhead, one more GB of
+  overhead is absorbed by +23 ‰ of x (MoE) / +21 ‰ (dense) on every die. Worst-die margins over the replicable cells run from
+  1.9 MB (MoE 128k) to 30.1 MB (dense 4k). The cells at +1 / +3 GB step by 22 ‰ per GB (MoE), within the 23 ‰ ceiling.
+
+### Assumptions and hypothesis variables carried, round 3
+
+λ (`lam`, measured 12 200; brackets 10 / 91 / 500 µs), G (`Br3.G` and the ∀ G iffs; E21 rows as inputs), the chain variant and
+convention (`Var`, `Conv`: E35 licensed, both carried), the quant-pass reading (`CQ`: E38), the integrated-chain rate (`integ`),
+the expert regime (`XReg`: E29), c_sync (`mega`: E31), the int4 share x and the overhead `ort` (H8 / H11), the cold-tier time `Tc`
+(the measured 5.3 GB/s/core and its serial-chain branch, 807 ns per piece), the popularity family (H9), the acceptance α, the
+bounce legs (E24′), the verify-chain cost v (E35), and the two-instance concurrency c (H10: measured 1.99× at card scale; the
+two-card inheritance is the open premise). Π stays 1 in every cell except the Π = 8 what-if (H4).
+
+**Coverage, round 3 (proof session):** 27 / 27 rows resolved — 20 PROVED as stated (most of them ∀ an explicit hypothesis
+variable), 4 CORRECTED (R11, R12, R13, R18: the corrected statement is the one proved), 3 PROVED with a precision correction (R9,
+R16, R23); the MoE-128k tie target is proved in its moved, legs-conditional form; **0 orphans** — every
+number in DESIGN-4.md's round-3 blocks and in its corrected cells is fixed by a theorem above or is an INPUT (HW-MAP) / EMPIRICAL
+(named experiment) entry of this ledger. The round-2 ledger above is unchanged (39 / 39 proved of the round-2 model).

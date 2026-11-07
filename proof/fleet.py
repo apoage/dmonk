@@ -1129,5 +1129,113 @@ def main4():
     Ti8 = step4f(D, 1048576, i8=True, var="rowmax")[0]
     print(f"[R4-dense-1M-kvi8] dense 1M KV-int8 (the only dense 1M layout): the lazy x KV-int8 cell is UNREACHABLE as specified (P at the fixed scale 127 vs the lazy e^8); rowmax chain, legs 2: {ms2(Ti8)} ms -> {t3(tps_card(1000, Ti8))} (round 3 rowmax {t3(tps_card(1000, step3(D, 1048576, i8=True)[0]))}, lazy {t3(tps_card(1000, step3(D, 1048576, i8=True, var='lazy')[0]))}); fits with the 256 KiB waste term: {feasible4(D, 1048576, 1, True, 256 * KiB)}")
 
+# ================================================================== ROUND 3 PROOF SESSION (PROMPT-4P2, 2026-11-07): prover-forced corrections ==========
+# proof/fleet.lean now proves the 27 Appendix-A' rows (T3r_*). The labels above keep printing their values (byte-identical); the [R3P-*]
+# labels below are what the proof session corrected or added, so `diff` of the two outputs IS the correction list:
+#   * the serial-chain int4 piece is 807 ns, not 596 (8 KiB of f16 per 2 KiB of int4, two MMA calls -- the alternatives proof round's
+#     correction; T_PIECE_W4_SER above is the as-written record): every serial-chain instance cell moves, dense 32k flips to a loss;
+#   * Lstar_kv3 is NOT "exact over every L": the t = 1 attention is not monotone in L (the L mod 16 vector tail, up to 3 896 ns), so in
+#     13 of 40 cells lengths just below L* are already attention-bound -- L* is where EVERY longer context is, the first one is lower;
+#   * Gstar3's "attention-bound iff G <= G*" is false over G > 0 for the four 1M cells: the vector chain alone exceeds the weight time;
+#   * the bounce share over the regime map peaks at 0.18 % (MoE 4k), not "<= 0.16 % everywhere";
+#   * new hypothesis-variable readings: H10's fleet-scale concurrency c, the bounce legs of the MoE-128k tie, the verify-chain cost.
+T_PIECE_W4_SER_C = tn(2 * KiB, R_W4V) + tn(8 * KiB, 2500) + tn(8 * KiB, 265) + 2 * 25 + 2 * 15                        # 807 ns
+T_SLAB_W4_SER_C  = 512 * T_PIECE_W4_SER_C                                                                          # 413 184 ns
+R_W4_W8EQ_SER_C  = 8 * ((2 * 4 * KiB * 10 + T_PIECE_W4_SER_C) // (2 * T_PIECE_W4_SER_C))                           # 40.8
+H10_CARD = 1990                                    # two instances on disjoint dies at full solo speed, 1.99x aggregate (HW-MAP, measured)
+def tps_inst_c(tok_milli, c, T): return tok_milli * c * 10 ** 6 // (4 * T)           # c = aggregate concurrency, thousandths of one instance
+def c_min(T, target, tok_milli=1000):              # smallest c with tps_inst_c >= target (the H10 premise a cell needs)
+    return ceil(target * 4 * T, tok_milli * 10 ** 6)
+def inst_ser_c(s, L, xs, B=1, t=1, **kw):          # inst_step3 on the corrected serial chain
+    saved = (globals()["T_SLAB_W4"], globals()["R_W4_W8EQ"])
+    globals()["T_SLAB_W4"], globals()["R_W4_W8EQ"] = T_SLAB_W4_SER_C, R_W4_W8EQ_SER_C
+    try: return inst_step3(s, L, B, t, xs=xs, **kw)
+    finally: globals()["T_SLAB_W4"], globals()["R_W4_W8EQ"] = saved
+
+def main3p():
+    D, M = DENSE, MOE
+    print("\n# ---- ROUND 3 PROOF SESSION (PROMPT-4P2, 2026-11-07): [R3P-*] = the corrections proof/fleet.lean forced and the new hypothesis-variable readings. Everything above unchanged. ----")
+    # ------------------------------------------------------------ the serial-chain piece (T3r_serpiece)
+    print(f"[R3P-serpiece] serial-chain int4 piece per 2 KiB of int4 (4 096 values = 8 KiB f16): unpack {tn(2 * KiB, R_W4V)} + US->S1 {tn(8 * KiB, 2500)} + loader {tn(8 * KiB, 265)} + 2 x 25 + 2 x 15 = {T_PIECE_W4_SER_C} ns "
+          f"(as written {T_PIECE_W4_SER}: 4 KiB legs, one call); core-slab {T_SLAB_W4_SER_C} ns (was {T_SLAB_W4_SER}); {t10(R_W4_W8EQ_SER_C)} W8-equivalent GB/s per die (was {t10(R_W4_W8EQ_SER)})")
+    for s in SHAPES:
+        for lab, L in (("4k", 4096), ("32k", 32768), ("128k", 131072), ("1M", 1048576)):
+            xs = [min_x(s, p, L) for p in range(4)]
+            if any(x is None for x in xs): continue
+            T0 = step3(s, L)[0]; one = tps_card(1000, T0)
+            Tw_, _ = inst_step3c(s, L, xs=xs, cold="ser"); Tc_, _ = inst_ser_c(s, L, xs)
+            a, b = tps_card_inst(1000, Tw_), tps_card_inst(1000, Tc_)
+            print(f"[R3P-serpiece-{s['name']}-{lab}] serial-chain cold tier: as written {ms2(Tw_)} ms -> {t3(a)} ({spc(pcs(a, one))}) ==> corrected {ms2(Tc_)} ms -> {t3(b)} ({spc(pcs(b, one))}) vs one 8-die instance {t3(one)}; "
+                  f"H10 premise c >= {t3(c_min(Tc_, one + 1))}x{' -- LOSES even at full concurrency (2.000x)' if c_min(Tc_, one + 1) > 2000 else ''}")
+    print(f"[R3P-serpiece-breakeven] the corrected serial slab {T_SLAB_W4_SER_C} ns still clears the MoE 32k breakeven line (1 406 404 ns) {t10(1406404 * 10 // T_SLAB_W4_SER_C)}x inside; dense replication needs the OVERLAPPED cold tier (E30)")
+    # ------------------------------------------------------------ L* over every L (T3r_Lstar_*)
+    for s in SHAPES:
+        regs = ("anchor", "direct_ser", "pp") if s["moe"] else ("anchor",)
+        for gk in ("p256k", "shuf64k", "shuf16k", "stream174", "gather3x"):
+            G = G3[gk]; cells = []
+            cfg = [(r, "rowmax", False) for r in regs] + [("anchor", "lazy", False)]
+            if not s["moe"]: cfg += [("anchor", "rowmax", True), ("anchor", "lazy", True)]
+            for reg, var, i8 in cfg:
+                Tw = gemm3_ns(s, 1, "uniform", reg); Ls = Lstar_kv3(s, G, reg, var, "T", i8)
+                bad = [L for L in range(Ls - 512, Ls) if attn3_seq(s, L, 1, G, var, "T", i8)[0] >= Tw]
+                tau = min(L % 16 for L in bad) if bad else None
+                tag = f"{reg}{'-' + var if var != 'rowmax' else ''}{'-kvi8' if i8 else ''}"
+                cells.append(f"{tag}: every L >= {Ls}" + (f"; first {Ls - 512 + tau} (L mod 16 >= {tau} in [{Ls - 512}, {Ls - 1}])" if bad else " (exact)"))
+            print(f"[R3P-Lkv-{s['name']}-{gk}] attention-bound at t=1 over EVERY L (the 15-token vector tail makes it non-monotone below L*): " + "; ".join(cells))
+    # ------------------------------------------------------------ G* over every G (T3r_fleet_G_*)
+    for s in SHAPES:
+        for reg in (("anchor", "direct_ser", "pp") if s["moe"] else ("anchor",)):
+            Tw = gemm3_ns(s, 1, "uniform", reg); va = A.nblocks(1048576, 1) * 9276 + 18820
+            print(f"[R3P-Gstar-{s['name']}-1M-{reg}] attention-bound at EVERY G (no iff line): the vector chain alone {va} ns >= T_w {Tw} ns; the printed 'iff G <= {Gstar3(s, 1048576, reg)}' fails above it "
+                  f"(at G = {Gstar3(s, 1048576, reg) + 1}: attention {attn3_seq(s, 1048576, 1, Gstar3(s, 1048576, reg) + 1)[0]} >= {Tw})")
+    print(f"[R3P-Gstar-dense-1M-lazy] on the fixed-shift chain dense 1M keeps a real line: attention-bound iff G <= 2353 tenths (2 048 x 5 530 + 11 328 = {2048 * 5530 + 11328} < {gemm3_ns(D, 1, 'uniform', 'anchor')})")
+    # ------------------------------------------------------------ the regime map's bounce share (T3r_bounce_share_max)
+    mx = max((pctH(step3(s, L, B, t)[1]["XCH"], step3(s, L, B, t)[0]), s["name"], L, B, t) for s in SHAPES for L in L_SET.values() for B, t in ((1, 1), (1, 4), (16, 1)))
+    print(f"[R3P-bounce-max] host-bounce share over the 24-cell map peaks at {mx[0] / 100:.2f} % ({mx[1]} L={mx[2]} B={mx[3]} t={mx[4]}); 0.16 % at MoE 32k -- not '<= 0.16 % everywhere'")
+    # ------------------------------------------------------------ H10 as a hypothesis variable (T3r_inst_h10, T3r_inst_gain_measured)
+    T0 = step3(M, 32768)[0]; xs = [min_x(M, p, 32768) for p in range(4)]; Ti = inst_step3c(M, 32768, xs=xs)[0]
+    print(f"[R3P-h10] the instance cells read the fleet-scale concurrency c (thousandths of one instance; measured {H10_CARD} at card scale = two instances on disjoint dies; the two-card inheritance is the hypothesis): "
+          f"MoE 32k {t3(tps_inst_c(1000, H10_CARD, Ti))} at c = {t3(H10_CARD)} ({t3(tps_inst_c(1000, 2000, Ti))} at 2.000); beats the anchored chain iff c >= {t3(c_min(Ti, tps_card(1000, T0) + 1))}, the direct-path chain iff c >= {t3(c_min(Ti, tps_card(1000, step3(M, 32768, regime='direct_ser')[0]) + 1))}")
+    for s in SHAPES:
+        for lab, L in L_SET.items():
+            xs = [min_x(s, p, L) for p in range(4)]
+            if any(x is None for x in xs): continue
+            T, _ = inst_step3c(s, L, xs=xs); one = tps_card(1000, step3(s, L)[0])
+            print(f"[R3P-h10-{s['name']}-{lab}] two instances: {t3(tps_inst_c(1000, H10_CARD, T))} at c = 1.990 ({t3(tps_inst_c(1000, 2000, T))} at 2.000) vs one 8-die instance {t3(one)}; needs c >= {t3(c_min(T, one + 1))} -> {'ACTIVE at the card-scale reading' if c_min(T, one + 1) <= H10_CARD else 'NOT active'}")
+    Tc = inst_step3c(M, 32768, xs=xs)[0]
+    lo, hi = 0, 50_000_000
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if tps_inst_c(1000, H10_CARD, inst_step3c(M, 32768, xs=[min_x(M, p, 32768) for p in range(4)], cold=mid)[0]) > tps_card(1000, T0): lo = mid
+        else: hi = mid - 1
+    print(f"[R3P-h10-breakeven] at c = 1.990 the MoE 32k breakeven moves 1 406 404 -> {lo} ns per int4 core-slab ({t10(2 * MiB * 10 // (2 * lo))} GB/s/core); the measured 5.3 is {t10(lo * 10 // T_SLAB_W4)}x inside")
+    # ------------------------------------------------------------ the MoE-128k tie, legs-conditional (T3r_moe128k_tie)
+    Twa, Twd = gemm3_ns(M, 1, "uniform", "anchor"), gemm3_ns(M, 1, "uniform", "direct_ser")
+    for lg in (0, 1, 2):
+        Dl = (262144 + lg * 16384) * 80
+        la, ld = Dl // ceil(Twa - 19328, 256), Dl // ceil(Twd - 19328, 256)
+        print(f"[R3P-tie-legs{lg}] MoE 128k per layer (lazy-T, 256-block lines): attention-bound iff G <= {t10(la)} (anchored) / {t10(ld)} (direct path); at 169.2 {'ATTN' if attn4_seq(M, 131072, 1, 1692, legs=lg)[0] >= Twa else 'W'} by "
+              f"{t10(pct(abs(attn4_seq(M, 131072, 1, 1692, legs=lg)[0] - Twa), Twa))} %; {'attention-bound at EVERY G <= 174.6' if la >= 1746 else 'the round-3 tie (weights-bound at 169.2, attention-bound at 167.0)'}")
+    print("[R3P-tie-planner] the planner reads legs = 2 (erratum #20: P rides US -> DDR scratch -> DDR -> S1; legs 0 needs a direct route the erratum rules out as specified); legs 1 and 2 give the same verdict, so E24' cannot flip it back")
+    a2, a1, a0 = (attn4_seq(M, 131072, 1, 1692, legs=lg)[0] for lg in (2, 1, 0)); ak = attn4_seq(M, 131072, 1, 1383, legs=2)[0]; a174 = attn4_seq(M, 131072, 1, 1746, legs=2)[0]
+    print(f"[R3P-tie-followups] binding != ranking at Pi = 1 (the step is a sum): per MoE token at 128k the direct-path expert kernel saves {ms2(28 * (Twa - Twd))} ms, removing the bounce {ms2(28 * (a2 - a0))} ms, one leg {ms2(28 * (a2 - a1))} ms, "
+          f"169.2 instead of the session-1 138.3 {ms2(28 * (ak - a2))} ms, 174.6 instead of 169.2 {ms2(28 * (a2 - a174))} ms; the bounce removal overtakes E29 from L = 187 392 (1M: {ms2(28 * (attn4_seq(M, 1048576, 1, 1692, legs=2)[0] - attn4_seq(M, 1048576, 1, 1692, legs=0)[0]))} ms)")
+    T64, p64, _ = step3(M, 131072, G="shuf64k")
+    print(f"[R3P-tie-step] per layer vs per step: at 64 KiB the layer is attention-bound by 0.8 % but the step's largest term is W ({ms2(p64['W'])} vs {ms2(p64['ATTN'])} ms: W carries the {ms2(tn(M['w_head'], R_GEMM))} ms lm_head)")
+    # ------------------------------------------------------------ the dense verify chain as the threshold variable (T3r_spec_dense_split)
+    K = step3(D, 32768, 1, 4)[0] - D["nL"] * attn3_seq(D, 32768, 4, 1692)[0] + D["nL"] * 344
+    def tps_v(v): return tps_card(tau_milli(700), K + 15600 * v)
+    lines = []
+    for tgt in (248, 227, 105):
+        v = 6197
+        while tps_v(v) >= tgt: v += 1
+        lines.append(f">= {t3(tgt)} iff v <= {v - 1}")
+    print(f"[R3P-spec-split] dense spec k=3, a=0.7 at 32k as a function of the per-block verify chain v (ns per 256-token block, mt = 4; v >= 6 197): T = {K} + 15 600 v; " + "; ".join(lines)
+          + f"; the chain as specified v = {A.vec3_ns(256, 4, 'rowmax', 'T', A.MERGE_PACK * 100)} -> {t3(tps_v(A.vec3_ns(256, 4, 'rowmax', 'T', A.MERGE_PACK * 100)))}, the fixed-shift chain (E35, LICENSED) v = {A.vec3_ns(256, 4, 'lazy', 'T', A.MERGE_PACK * 100)} -> {t3(tps_v(A.vec3_ns(256, 4, 'lazy', 'T', A.MERGE_PACK * 100)))}")
+    e = 120 * 10700
+    print(f"[R3P-e35-trips] one 10.7 us guard trip in EVERY layer of EVERY step (>= 450x the measured 0.087-0.22 % rate) leaves the fixed-shift cells at dense spec {t3(tps_card(tau_milli(700), step3(D, 32768, 1, 4, var='lazy')[0] + e))}, "
+          f"dense 1M KV-int8 {t3(tps_card(1000, step3(D, 1048576, i8=True, var='lazy')[0] + e))}, dense 32k t=1 {t3(tps_card(1000, step3(D, 32768, var='lazy')[0] + e))}")
+    print(f"[R3P-mega-tie] dense megakernel at c_sync = 109 903 ns TIES the launch-per-op step exactly (4 x 109 903 + 15 388 = 455 000): strictly better iff c_sync <= 109 902; MoE strictly better iff <= 108 430")
+
 if __name__ == "__main__":
-    main(); main3(); main4()
+    main(); main3(); main4(); main3p()
