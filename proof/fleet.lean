@@ -22,6 +22,12 @@
 
   Build: `lean proof/fleet.lean` (standalone) or `cd proof && lake build` (target `Fleet`).
   No `axiom`, no `sorry`, no `native_decide` anywhere.
+
+  Round 3 (PROMPT-4P2, 2026-11-07): the section after the round-2 umbrellas proves DESIGN-4's round-3 layer (Appendix A′, rows
+  R1–R27, `proof/fleet.py` `[R3-*]`) — namespaces `Measured3` / `Attn3F` / `Design3F` (the DESIGN-3 attention chain is duplicated
+  from proof/attn.lean, which this file cannot import standalone) and 168 theorems (166 `T3r_*`, two `max4_*` helpers); the round-2
+  part above is unchanged and every round-2 theorem stays true of the round-2 model (`T3r_round2_limit` reduces the round-3
+  step to it exactly).
 -/
 
 namespace Measured
@@ -1166,3 +1172,2006 @@ theorem T_whatif (x : Nat) :
     x10 (stepNs dense 32768 1 1 br0 lamMid 0) (stepTs dense 32768 1 1 br0 lamMid) = 59 ∧
     x10 (stepNs moe 32768 1 1 br0 lamMid 0) (stepTs moe 32768 1 1 br0 lamMid) = 31 :=
   ⟨(T_p2p_bound x).1, by decide⟩
+
+/-! ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+  # ROUND 3 (PROMPT-4P2, 2026-11-07) — the round-3 layer of DESIGN-4 (Appendix A′, rows R1–R27) as theorems
+
+  Everything above this line is the round-2 file, unchanged (124 theorems; every round-2 theorem stays true of the
+  round-2 model). This section transcribes `proof/fleet.py`'s `[R3-*]` model 1:1:
+    * `Measured3`  — the HW-MAP e9349c8 inputs round 3 adds (λ, E21 G per page size, E22 op set, c_q, 135.5, 5.3 GB/s/core),
+                     plus the two round-4 inputs the MoE-128k tie needs (the session-1 loop's 138.3; the bounce legs are an argument);
+    * `Attn3F`     — DESIGN-3's round-3 chain (`proof/attn.py` step3, as `fleet.py` `attn3_seq` calls it: rows = t·g per core,
+                     d = 128, H_kv = 8 = cores) and the round-4 chain with the P-fragment bounce legs (`attn4_seq`), DUPLICATED
+                     from `proof/attn.lean` (Design / Design3 / Design4) because this file cannot import it standalone — pure
+                     integer arithmetic, the same formulas, a separate namespace; `proof/attn.lean` is not touched;
+    * `Design3F`   — the round-3 step (`step3`), the per-die block (`die_block3`), tensor-split (`step_tsplit3`), the two-instance
+                     variant (`inst_step3`, `min_x`, `cold_share`) and the megakernel launch term (`launch3_ns`).
+  Hypothesis variables kept explicit: λ (`lam`), G (`Br3.G`), c_sync (`Br3.mega`), the int4 share x and the runtime overhead
+  `ort`, the cold-tier core-slab time `Tc`, the acceptance α (`a`), the bounce legs (`legs`), the vector-chain cost per block
+  (`v`, the T3r_spec_dense_split argument) and — new in this round — the two-instance concurrency `c` (H10: aggregate
+  throughput of two instances in thousandths of one; measured 1 990 at card scale, 2 000 = full solo speed, 1 000 = serialised).
+  Units as above (ns floor, tenths of GB/s, thousandths of tokens/s); `pcsUp`/`pcsDown` = fleet.py `pcs` (tenths of a percent). -/
+
+namespace Measured3
+/-- HW-MAP e9349c8 (round 3): host bounce 12.2 / 12.1 µs per direction on 4 KiB sync legs (bounce 23.8–24.6 µs; unchanged under
+    a saturating die-0 D2D load). ns. The round-2 anchor 91 µs (`lamMid`) was the launch floor, a different quantity. -/
+def lam3 : Nat := 12200
+/-- E21 (20/20 reps): aggregate gather rate, tenths GB/s — 256 KiB pages (= the sequential rate; DESIGN-3's default and this plan's
+    primary), 64 KiB sequential / shuffled, 16 KiB shuffled -/
+def g256 : Nat := 1692
+def gSeq64 : Nat := 1690
+def gShuf64 : Nat := 1670
+def gShuf16 : Nat := 1538
+/-- the retained "3× slower" what-if (58.2): no longer a measured branch -/
+def g3x : Nat := 582
+/-- the on-device f16 → i8 A-quantization pass, ns (m = 1, K = 8 192; +12.2 % over host-packed A), and the passes per layer
+    (QKV, O, gate/up with the router, down) -/
+def cQ : Nat := 43700
+def qPasses : Nat := 4
+/-- the integrated production kernel f32-in / f32-out, 135.5 GB/s (tenths): the pessimistic branch for every weight stream -/
+def rGemmInt : Nat := 1355
+/-- the 5-pass vector i4 → f16 unpack, tenths GB/s per core of int4 bytes (the ALT-2 premise; "> 0.8" before e9349c8) -/
+def rW4v : Nat := 53
+/-- data-movement table: S1 → L0 loader 26.5 GB/s/core strict-serial; vector SRAM → S1 plain fill 250 GB/s/core (tenths) -/
+def rLoader : Nat := 265
+def rUsS1 : Nat := 2500
+/-- the per-call A-lift residual of the direct path (ALT-1), tenths of ns -/
+def cResT : Nat := 254
+/-- E22 chained per-call tenths of ns on 1 024 lanes: exp, reduce-max f16, f16 Mul, f32 Mul/Add -/
+def tExp : Nat := 2728
+def tRm16 : Nat := 1819
+def tF16 : Nat := 464
+def tF32 : Nat := 636
+/-- E22: exp = 11.5 lane-equivalents per element (hundredths); ρ32 = 63.6 / 46.4 = 1.37 (hundredths) -/
+def cExp100 : Nat := 1150
+def rho32 : Nat := 137
+/-- L0C → US drain at mt = 1..4, tenths GB/s/core -/
+def rDrain1 : Nat := 1528
+def rDrain2 : Nat := 2223
+def rDrain3 : Nat := 2603
+def rDrain4 : Nat := 2855
+/-- the validation pack's merge-chain itemisation, lane-equivalents per block-fragment (commit e9349c8) -/
+def mergePack : Nat := 25750
+/-- kernel session 1 (HW-MAP 423d433, round 4): the attention kernel's own fresh-path gather at 256 KiB, diagnostic loop -/
+def gK1 : Nat := 1383
+/-- H10 at card scale (HW-MAP, season h): two instances on disjoint dies at FULL solo speed, 1.99× aggregate (thousandths) -/
+def h10Card : Nat := 1990
+end Measured3
+
+namespace Attn3F
+open Measured Design Measured3
+
+/-! ### DESIGN-3's attention chain at the fleet shapes (duplicated from proof/attn.lean; d = 128, one KV head per core) -/
+inductive Conv where
+  | T   -- throughput convention (1 lane-op = 1/43.2 ns, f32 at ρ32 = 1.37)
+  | C   -- chained-latency bound (every 1 024-lane call at its measured chained ns)
+  deriving DecidableEq, Repr
+inductive Var where
+  | rowmax   -- DESIGN-3 §3.2 as specified (per-row block max): "the chain as specified"
+  | lazy     -- §3.4 fixed per-row shift + overflow guard (E35, LICENSED for qk-normalised models): "the fixed-shift chain"
+  deriving DecidableEq, Repr
+/-- tokens per online-softmax block: 512 at mt ≤ 2, 256 at mt = 3, 4 -/
+def blockOf (mt : Nat) : Nat := if mt ≤ 2 then 512 else if mt ≤ 4 then 256 else 128
+def mtOf (rows : Nat) : Nat := ceilDiv rows 16
+def passesOf (rows : Nat) : Nat := ceilDiv rows 64
+def mtPass (rows : Nat) : Nat := mtOf (min rows 64)
+def lMatrix (L : Nat) : Nat := 16 * (L / 16)
+def nblocks (L mt : Nat) : Nat := ceilDiv (lMatrix L) (blockOf mt)
+/-- K + V bytes per token per core at d = 128 -/
+def coreTok : Nat := 512
+def ddrBlock (G mt : Nat) : Nat := tn (blockOf mt * coreTok * 8) G
+def mmaBlock (mt : Nat) : Nat := mt * (blockOf mt / 16 + 8 * (blockOf mt / 128)) * cMma
+def loaderBlock (mt : Nat) : Nat := tn ((blockOf mt / 128) * 4096 * mt) rLoader
+def drainBlock (mt Rd : Nat) : Nat := tn ((blockOf mt * 16 * 4 + 16 * 128 * 4) * mt) Rd
+def rDrainM (mt : Nat) : Nat := if mt ≤ 1 then rDrain1 else if mt = 2 then rDrain2 else if mt = 3 then rDrain3 else rDrain4
+/-- vector tail: the L mod 16 newest tokens, scores + PV as 16-row Mul + Add -/
+def tailOps (L mt : Nat) : Nat := (L % 16) * 128 * 16 * mt * 4
+def call100 (t10 : Nat) : Nat := t10 * 432
+def unitF16 : Conv → Nat
+  | .T => 100
+  | .C => ceilDiv (tF16 * 432) 1024
+def unitF32 : Conv → Nat
+  | .T => rho32
+  | .C => ceilDiv (tF32 * 432) 1024
+def treeOps (block : Nat) : Nat := 6 * ((block * 16 / 1024 - 1) * 1024 + 512 + 256)
+/-- lane-eq ×100 per block for mt fragments (attn.py chain100) -/
+def chain100 (block mt : Nat) : Var → Conv → Nat → Nat
+  | .rowmax, c, m => mt * (block * 16 * (6 * unitF32 c + cExp100) + treeOps block * unitF16 c + 16 * call100 tRm16 + 20 * call100 tF16 + m)
+  | .lazy, c, m => mt * (block * 16 * (5 * unitF32 c + cExp100) + (block * 16 / 1024) * call100 tRm16 + m)
+def vec3 (block mt : Nat) (v : Var) (c : Conv) (m : Nat) : Nat := chain100 block mt v c m * 10 / (rVecCore * 100)
+def mergeH : Nat := mergePack * 100
+/-- the per-block vector time at the pack's merge -/
+def vblk3 (mt : Nat) (v : Var) (c : Conv) : Nat := vec3 (blockOf mt) mt v c mergeH
+def fixed3 (L rows : Nat) (v : Var) (c : Conv) : Nat :=
+  2 * vblk3 (mtPass rows) v c + drainBlock (mtPass rows) (rDrainM (mtPass rows))
+  + tailOps L (mtOf rows) * unitF32 c * 10 / (rVecCore * 100)
+/-- the four engine totals of one sequence (fleet.py attn3_seq: KV-int8 halves the KV total) -/
+def kv3 (L rows G : Nat) (i8 : Bool) : Nat :=
+  passesOf rows * nblocks L (mtPass rows) * ddrBlock G (mtPass rows) / (if i8 then 2 else 1)
+def vecT3 (L rows : Nat) (v : Var) (c : Conv) : Nat := passesOf rows * nblocks L (mtPass rows) * vblk3 (mtPass rows) v c
+def mmaT3 (L rows : Nat) : Nat := passesOf rows * nblocks L (mtPass rows) * mmaBlock (mtPass rows)
+def ldrT3 (L rows : Nat) : Nat := passesOf rows * nblocks L (mtPass rows) * loaderBlock (mtPass rows)
+/-- `proof/fleet.py` attn3_seq: per-layer attention of ONE sequence with rows = t·g query rows per core -/
+def attn3 (L rows G : Nat) (v : Var) (c : Conv) (i8 : Bool) : Nat :=
+  max (max (max (kv3 L rows G i8) (vecT3 L rows v c)) (mmaT3 L rows)) (ldrT3 L rows) + fixed3 L rows v c
+
+/-! ### Round 4 (DESIGN-3 round 4, `fleet.py` attn4_seq): fresh C_o chunk sets, the P-fragment DDR bounce (`legs` ∈ {0, 1, 2}
+    transfers of 16 KiB·mt per block on the K/V stream's roof, UNMEASURED), the lazy first-block max, append-then-attend tails -/
+def coSets (block : Nat) : Nat := block / 128
+def pBytes (mt : Nat) : Nat := coSets (blockOf mt) * 4096 * mt
+def ddr4Block (G mt legs : Nat) (i8 : Bool) : Nat := tn ((blockOf mt * coreTok / (if i8 then 2 else 1) + legs * pBytes mt) * 8) G
+def merge4 (block : Nat) : Var → Conv → Nat
+  | .rowmax, c => call100 tExp + 20 * call100 tF16 + (2048 * (coSets block + 1) + 2048 + 512 + 256 + 256 + 256) * unitF32 c
+  | .lazy, c => (2048 * (coSets block + 1) + 512 + 256 + 256) * unitF32 c
+def chain4 (block mt : Nat) : Var → Conv → Nat
+  | .rowmax, c => mt * (block * 16 * (4 * unitF32 c + cExp100) + treeOps block * unitF16 c + 16 * call100 tRm16 + 20 * call100 tF16
+                        + merge4 block .rowmax c)
+  | .lazy, c => mt * (block * 16 * (3 * unitF32 c + cExp100) + (block * 16 / 1024) * call100 tRm16 + merge4 block .lazy c)
+def vec4 (mt : Nat) (v : Var) (c : Conv) : Nat := chain4 (blockOf mt) mt v c * 10 / (rVecCore * 100)
+def firstMax4 (mt : Nat) (c : Conv) : Nat :=
+  mt * (blockOf mt * 16 * unitF32 c + treeOps (blockOf mt) * unitF16 c + 16 * call100 tRm16 + 20 * call100 tF16) * 10 / (rVecCore * 100)
+def firstMaxOf (mt : Nat) : Var → Conv → Nat
+  | .lazy, c => firstMax4 mt c
+  | .rowmax, _ => 0
+def drain4 (mt Rd : Nat) : Nat := tn ((blockOf mt * 16 * 4 + coSets (blockOf mt) * 16 * 128 * 4) * mt) Rd
+def nblocks4 (L t mt : Nat) : Nat := ceilDiv (16 * ((L - t) / 16)) (blockOf mt)
+def tail4Ops (L t mt : Nat) : Nat := ((L - t) % 16 + t) * 128 * 16 * mt * 4
+def mask4 (t mt : Nat) : Nat := if 2 ≤ t then 512 * mt else 0
+def attn4 (L t rows G : Nat) (v : Var) (c : Conv) (legs : Nat) (i8 : Bool) : Nat :=
+  max (max (max (passesOf rows * nblocks4 L t (mtPass rows) * ddr4Block G (mtPass rows) legs i8)
+                (passesOf rows * nblocks4 L t (mtPass rows) * vec4 (mtPass rows) v c))
+           (passesOf rows * nblocks4 L t (mtPass rows) * mmaBlock (mtPass rows)))
+      (passesOf rows * nblocks4 L t (mtPass rows) * loaderBlock (mtPass rows))
+  + (2 * vec4 (mtPass rows) v c + drain4 (mtPass rows) (rDrainM (mtPass rows))
+     + (tail4Ops L t (mtOf rows) + mask4 t (mtOf rows)) * unitF32 c * 10 / (rVecCore * 100) + firstMaxOf (mtPass rows) v c)
+end Attn3F
+
+namespace Design3F
+open Measured Design Measured3 Attn3F
+
+/-! ### The expert-chain regimes (DESIGN-2 anchor, ping-pong, ALT-1 direct path) and the int4 cold tier (ALT-2) -/
+inductive XReg where
+  | anchor | pp | directSer | directOvl
+  deriving DecidableEq, Repr
+/-- a 2 MiB core-slab at the 174.6 per-core share (96 089 ns) and the serialised A lift (3 285 ns) -/
+def tBDirect : Nat := 2 * MiB * 80 / rGemm
+def aLift : Nat := tn (64 * KiB) rLoader + 32 * cResT / 10
+def tSlab3 : XReg → Nat
+  | .anchor => tSlabSer
+  | .pp => tSlabPP
+  | .directSer => tBDirect + aLift
+  | .directOvl => tBDirect
+/-- the int4 core-slab (1 MiB of int4) on the measured unpack, overlapped with the loader/MMA chain: 197 844 ns -/
+def tW4 : Nat := tn MiB rW4v
+/-- the strictly serial chain per 2 KiB of int4 AS WRITTEN in fleet.py (4 KiB f16 legs, one MMA call): 596 ns — STALE -/
+def pieceSerW : Nat := tn (2 * KiB) rW4v + tn (4 * KiB) rUsS1 + tn (4 * KiB) rLoader + cResT / 10 + cMma
+/-- the same chain with the f16 bytes a 2 KiB int4 piece produces (4 096 values = 8 KiB f16, two (16,16,128) calls): 807 ns —
+    the alternatives proof round's correction (alt.lean `pieceSerC`), carried here -/
+def pieceSerC : Nat := tn (2 * KiB) rW4v + tn (8 * KiB) rUsS1 + tn (8 * KiB) rLoader + 2 * (cResT / 10) + 2 * cMma
+def slabSer (piece : Nat) : Nat := 512 * piece
+/-- W8-equivalent die rates of the cold tier for dense bytes: overlapped 2·8·5.3 = 84.8; serial per piece (fleet.py R_W4_W8EQ_SER) -/
+def rW4ovl : Nat := 2 * 8 * rW4v
+def rW4ser (piece : Nat) : Nat := 8 * ((2 * 4 * KiB * 10 + piece) / (2 * piece))
+/-- an explicit cold core-slab time Tc as a dense W8-equivalent die rate (fleet.py cold_tier) -/
+def rW4of (Tc : Nat) : Nat := 2 * 8 * (MiB * 10 / Tc)
+
+/-! ### The quant pass, the weight stream, launches, the draft -/
+inductive CQ where
+  | none | fixed | prop
+  deriving DecidableEq, Repr
+def gOf (s : Shape) : Nat := s.Hq / s.Hkv
+def quantNs (s : Shape) (rows : Nat) : CQ → Nat
+  | .none => 0
+  | .fixed => qPasses * cQ
+  | .prop => cQ * ceilDiv (rows * (3 * s.d + (if s.moe then 8 * 4096 else 53248))) 8192
+def rW (integ : Bool) : Nat := if integ then rGemmInt else rGemm
+def gemm3 (s : Shape) (rows : Nat) (fam : Fam) (r : XReg) (integ : Bool) : Nat :=
+  if s.moe then tn s.wStream (rW integ) + 2 * fMoe + s.slabs * dOf fam rows * tSlab3 r else tn s.wStream (rW integ)
+/-- the per-layer weight time of the t = 1 cell (uniform routing, 174.6 kernel) — the T_w of every crossover -/
+def tw3 (s : Shape) (r : XReg) : Nat := gemm3 s 1 .uniform r false
+def syncs (s : Shape) : Nat := if s.moe then 5 else 4
+/-- one cross-core reduction through DDR: 8 partials written + read (f32), x written (f16), x read by 8 cores -/
+def redBytes (rows d : Nat) : Nat := 8 * rows * d * 4 + 8 * rows * d * 4 + rows * d * 2 + 8 * rows * d * 2
+def launch3 (s : Shape) (rows : Nat) (launch : Bool) : Option Nat → Nat
+  | none => if launch then (s.nL * s.nlaunch + 2) * tLaunch else 0
+  | some c => (if launch then (s.nL + 2) * tLaunch else 0) + s.nL * (syncs s * c + 2 * tn (redBytes rows s.d) rGemm)
+def draftNl : Option Nat → Nat
+  | none => draftLaunch
+  | some _ => 24
+def draftSync : Option Nat → Nat
+  | none => 0
+  | some c => 24 * 4 * c
+def draft3Tok (lam : Nat) (launch : Bool) (cq : CQ) (mega : Option Nat) : Nat :=
+  tn draftW rGemm + tn draftKv rGemm + (if launch then draftNl mega * tLaunch else 0)
+  + (if cq = .none then 0 else 24 * qPasses * cQ) + tn (128256 * 4) d2h0 + 2 * lam + draftSync mega
+def draft3 (lam : Nat) (launch : Bool) (cq : CQ) (mega : Option Nat) (k : Nat) : Nat := k * draft3Tok lam launch cq mega
+
+/-! ### The round-3 branch vector and the step (fleet.py BR3 / step3) -/
+structure Br3 where
+  G : Nat
+  var : Var
+  conv : Conv
+  launch : Bool
+  regime : XReg
+  fam : Fam
+  i8 : Bool
+  cq : CQ
+  integ : Bool
+  mega : Option Nat
+  pen : Nat
+/-- the primary round-3 branch: 256 KiB pages (169.2), the chain as specified (throughput convention), launches serialised,
+    the anchored serial MoE regime, uniform routing, f16 KV, the quant pass fixed per pass, the 174.6 kernel, no megakernel -/
+def br3 : Br3 := { G := g256, var := .rowmax, conv := .T, launch := true, regime := .anchor, fam := .uniform, i8 := false,
+                   cq := .fixed, integ := false, mega := none, pen := 0 }
+def gemmTot3 (s : Shape) (B t : Nat) (b : Br3) : Nat :=
+  if s.moe then s.nL * gemm3 s (B * t) b.fam b.regime b.integ
+  else s.nL * gemm3 s (B * t) b.fam b.regime b.integ + s.nL * gemm3 s (B * t) b.fam b.regime b.integ * b.pen / 1000
+def head3 (s : Shape) (b : Br3) : Nat := tn s.wHead (rW b.integ)
+/-- the step's parts (fleet.py `parts`): W, ATTN, LAUNCH, QUANT, XCH, DRAFT -/
+def W3 (s : Shape) (B t : Nat) (b : Br3) : Nat := gemmTot3 s B t b + head3 s b
+def aSeq3 (s : Shape) (L t : Nat) (b : Br3) : Nat := attn3 L (t * gOf s) b.G b.var b.conv b.i8
+def A3 (s : Shape) (L B t : Nat) (b : Br3) : Nat := s.nL * B * aSeq3 s L t b
+def Ln3 (s : Shape) (B t : Nat) (b : Br3) : Nat := launch3 s (B * t) b.launch b.mega
+def Q3 (s : Shape) (B t : Nat) (b : Br3) : Nat := s.nL * quantNs s (B * t) b.cq
+def X3 (s : Shape) (B t lam : Nat) : Nat := Tx s (B * t) lam
+def D3 (t : Nat) (b : Br3) (lam : Nat) : Nat := if t > 1 then draft3 lam b.launch b.cq b.mega kDraft else 0
+def step3 (s : Shape) (L B t : Nat) (b : Br3) (lam : Nat) : Nat :=
+  W3 s B t b + A3 s L B t b + Ln3 s B t b + Q3 s B t b + X3 s B t lam + D3 t b lam
+/-- a verify step with k drafts (rows = k + 1): the draft term scales with k -/
+def stepSpec3 (s : Shape) (L k : Nat) (b : Br3) (lam : Nat) : Nat :=
+  W3 s 1 (k + 1) b + A3 s L 1 (k + 1) b + Ln3 s 1 (k + 1) b + Q3 s 1 (k + 1) b + X3 s 1 (k + 1) lam + draft3 lam b.launch b.cq b.mega k
+/-- "W binds": the weight stream is strictly the largest additive term (Bool so that a regime map is one `decide`) -/
+def bindsW3 (s : Shape) (L B t : Nat) (b : Br3) (lam : Nat) : Bool :=
+  decide (A3 s L B t b < W3 s B t b) && decide (Ln3 s B t b < W3 s B t b) && decide (Q3 s B t b < W3 s B t b) &&
+  decide (X3 s B t lam < W3 s B t b) && decide (D3 t b lam < W3 s B t b)
+def bindsA3 (s : Shape) (L B t : Nat) (b : Br3) (lam : Nat) : Bool :=
+  decide (W3 s B t b < A3 s L B t b) && decide (Ln3 s B t b < A3 s L B t b) && decide (Q3 s B t b < A3 s L B t b) &&
+  decide (X3 s B t lam < A3 s L B t b) && decide (D3 t b lam < A3 s L B t b)
+
+/-! ### Π = 8 blocks, rollout prefixes, tensor-split (fleet.py die_block3, step_tsplit3) -/
+def dieBlock3 (s : Shape) (pos L B t : Nat) (b : Br3) (lam : Nat) : Nat :=
+  s.layers pos * (gemm3 s (B * t) b.fam b.regime b.integ + B * aSeq3 s L t b + (if b.launch then s.nlaunch * tLaunch else 0)
+                  + quantNs s (B * t) b.cq)
+  + (if pos = 7 then headNs s + (if b.launch then 2 * tLaunch else 0) else 0)
+  + (if pos > 0 then tn (act s (B * t)) (h2d (die pos)) + lam else 0)
+  + (if pos < 7 then tn (act s (B * t)) (d2h (die pos)) + lam else tn (logits s (B * t)) (d2h (die pos)) + lam)
+def sumBlocks3 (s : Shape) (L : Nat) (b : Br3) (lam : Nat) : Nat := sumPos (fun p => dieBlock3 s p L 1 1 b lam) 8
+def maxBlock3 (s : Shape) (L : Nat) (b : Br3) (lam : Nat) : Nat := maxOver (fun p => dieBlock3 s p L 1 1 b lam) 7
+def prefix3 (s : Shape) (npos L : Nat) (b : Br3) (lam : Nat) : Nat := sumPos (fun p => dieBlock3 s p L 1 1 b lam) npos
+def gemmTs3 (s : Shape) (rows : Nat) (fam : Fam) (r : XReg) : Nat :=
+  if s.moe then tn s.wStream (8 * rGemm) + 2 * fMoe + s.slabs * dOf fam rows * tSlab3 r / 8 else tn s.wStream (8 * rGemm)
+def stepTs3 (s : Shape) (L B t : Nat) (b : Br3) (lam : Nat) : Nat :=
+  s.nL * (gemmTs3 s (B * t) b.fam b.regime + B * aSeq3 s L t b / 8) + tn s.wHead (8 * rGemm)
+  + (if b.launch then (s.nL * s.nlaunch + 2) * tLaunch else 0) + Q3 s B t b + s.nL * 2 * tReduce lam (B * t) s.d
+
+/-! ### Variant I (ALT-2): two 4-die instances, chain c0.d1 → c0.d0 → c1.d1 → c1.d0, the minimal int4 share x per die -/
+def layers4 (s : Shape) : Nat := if s.moe then 7 else 30
+/-- the candidate bytes per layer for the int4 tier: MoE the expert slabs (attention stays int8), dense the whole layer -/
+def candBytes (s : Shape) : Nat := if s.moe then s.wRes - s.wStream else s.wStream
+def instDieWeights (s : Shape) (pos x : Nat) : Nat :=
+  layers4 s * (s.wRes - candBytes s * x / 2000) + (if pos = 0 then s.wEmbed else 0) + (if pos = 3 then s.wHead else 0)
+  + (if s.moe = false ∧ pos = 1 then draftW + draftKv else 0)
+def instDieKv (s : Shape) (L B : Nat) (i8 : Bool) : Nat := if i8 then layers4 s * s.kvTok * L * B / 2 else layers4 s * s.kvTok * L * B
+def instTotal (s : Shape) (pos L B : Nat) (i8 : Bool) (ort x : Nat) : Nat := instDieWeights s pos x + instDieKv s L B i8 + ws + ort
+/-- the fit on die pos at overhead `ort` (the H8 / H11 hypothesis) and int4 share `x` (thousandths) -/
+abbrev instFits (s : Shape) (pos L B : Nat) (i8 : Bool) (ort x : Nat) : Prop := instTotal s pos L B i8 ort x ≤ dieMem
+def instXchBw (s : Shape) (rows : Nat) : Nat :=
+  sumPos (fun p => hopBw (act s rows) (die p) (die (p + 1))) 3 + tn (logits s rows) (d2h (die 3)) + tn (rows * 4) (h2d (die 0))
+def instXch (s : Shape) (rows lam : Nat) : Nat := instXchBw s rows + 8 * lam
+/-- Zipf(1.0) popularity: rank weights 1/r over 256 experts as exact scaled naturals (Dz = lcm 1..256), as alt.lean -/
+def lcmTo : Nat → Nat
+  | 0 => 1
+  | n + 1 => Nat.lcm (lcmTo n) (n + 1)
+def hSum (D : Nat) : Nat → Nat
+  | 0 => 0
+  | n + 1 => hSum D n + D / (n + 1)
+def Dz : Nat := lcmTo 256
+def hTot : Nat := hSum Dz 256
+/-- the traffic of the coldest nc experts: H(256) − H(256 − nc), scaled by Dz -/
+def hCold (nc : Nat) : Nat := hTot - hSum Dz (256 - nc)
+def ncOf (x : Nat) : Nat := 256 * x / 1000
+inductive Pop where
+  | uniform | zipf10
+  deriving DecidableEq, Repr
+/-- MoE expert time per layer when a share of the streamed slabs is int4: one floor of the exact rational (fleet.py `int(...)`) -/
+def expCold (D x Thot Tc : Nat) : Nat := 3 * D * (Thot * (1000 - x) + Tc * x) / 1000
+def expColdZ (D nc nt Thot Tc : Nat) : Nat := 3 * D * (Thot * (nt - nc) + Tc * nc) / nt
+/-- weights per layer on an instance die: MoE hot / cold expert tiers; dense (1 − x) at the kernel rate + x at the int4 rate -/
+def instWl (s : Shape) (rows x : Nat) (fam : Fam) (pop : Pop) (Thot Tc R4 : Nat) (integ : Bool) : Nat :=
+  if s.moe then
+    tn s.wStream (rW integ) + 2 * fMoe +
+      (if pop = .uniform then expCold (dOf fam rows) x Thot Tc else expColdZ (dOf fam rows) (hCold (ncOf x)) hTot Thot Tc)
+  else (s.wStream * 10 * (1000 - x) * R4 + s.wStream * 10 * x * rW integ) / (1000 * rW integ * R4)
+def sum4 (f : Nat → Nat) : Nat := f 0 + f 1 + f 2 + f 3
+def instNl (s : Shape) : Option Nat → Nat
+  | none => s.nlaunch
+  | some _ => 1
+def instMega (s : Shape) (rows : Nat) : Option Nat → Nat
+  | none => 0
+  | some c => syncs s * c + 2 * tn (redBytes rows s.d) rGemm
+/-- fleet.py inst_step3 (via inst_step3c): the step of ONE 4-die instance with per-die int4 shares xs, hot regime `hot`,
+    cold core-slab time Tc (MoE) / cold W8-equivalent rate R4 (dense) -/
+def instStep3 (s : Shape) (L B t : Nat) (xs : Nat → Nat) (hot : XReg) (Tc R4 : Nat) (pop : Pop) (b : Br3) (lam : Nat) : Nat :=
+  sum4 (fun pos => layers4 s * (instWl s (B * t) (xs pos) b.fam pop (tSlab3 hot) Tc R4 b.integ + B * aSeq3 s L t b
+                                 + instNl s b.mega * tLaunch + quantNs s (B * t) b.cq + instMega s (B * t) b.mega))
+  + tn s.wHead (rW b.integ) + 2 * tLaunch + instXch s (B * t) lam + D3 t b lam
+/-- tokens/s per card of two instances at aggregate concurrency c (H10: thousandths of one instance's throughput;
+    2 000 = both at full solo speed, as fleet.py tps_card_inst; 1 990 = the card-scale measurement; 1 000 = serialised) -/
+def tpsInst (tok c T : Nat) : Nat := tok * c * 1000000 / (4 * T)
+/-- the minimal share vectors fleet.py's min_x finds (proved minimal below) -/
+def xsMoe4k : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 163 else 152
+def xsMoe32k : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 182 else 170
+def xsMoe128k : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 244 else 232
+def xsMoe1M : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 827 else 816
+def xsMoe32kB16 : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 494 else 482
+def xsDense4k : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 303 else if p = 1 then 284 else 259
+def xsDense32k : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 376 else if p = 1 then 358 else 332
+def xsDense128k : Nat → Nat := fun p => if p = 0 ∨ p = 3 then 629 else if p = 1 then 610 else 585
+def xsAll : Nat → Nat := fun _ => 1000
+
+/-! ### Named one-toggle branches of the round-3 step (fleet.py `step3(..., **kw)`) -/
+def br3Lazy : Br3 := { br3 with var := .lazy }
+def br3C : Br3 := { br3 with conv := .C }
+def br3I8 : Br3 := { br3 with i8 := true }
+def br3I8Lazy : Br3 := { br3 with i8 := true, var := .lazy }
+def br3G (G : Nat) : Br3 := { br3 with G := G }
+def br3Reg (r : XReg) : Br3 := { br3 with regime := r }
+def br3Fam (f : Fam) : Br3 := { br3 with fam := f }
+def br3FamReg (f : Fam) (r : XReg) : Br3 := { br3 with fam := f, regime := r }
+def br3Mega (c : Nat) : Br3 := { br3 with mega := some c }
+
+/-- the round-2 limit of the round-3 step: no quant pass (G, chain and λ are then replaced by the round-2 attention and λ) -/
+def br3R2 : Br3 := { br3 with cq := .none }
+/-- fleet.py step4f: the round-3 step with DESIGN-3's round-4 attention term (fresh sets, the P bounce legs, the lazy first-block max) -/
+def step4F (s : Shape) (L B t : Nat) (b : Br3) (legs lam : Nat) : Nat :=
+  W3 s B t b + s.nL * B * attn4 L t (t * gOf s) b.G b.var b.conv legs b.i8 + Ln3 s B t b + Q3 s B t b + X3 s B t lam + D3 t b lam
+/-- the dense verify step (k = 3, rows 64 = four fragments on 256-token blocks, 32k) with the per-block vector chain cost v free —
+    the T3r_spec_dense_split argument (the chain as specified gives v = 27 350 ns, the fixed-shift chain 12 254 ns) -/
+def specDenseV (v : Nat) : Nat :=
+  W3 dense 1 4 br3 + dense.nL * 1 * (128 * max (max (max 6197 v) 1920) 1236 + (2 * v + 344))
+  + Ln3 dense 1 4 br3 + Q3 dense 1 4 br3 + X3 dense 1 4 lam3 + D3 4 br3 lam3
+
+/-! ### fleet.py `pcs`: signed percent change in tenths, as two Nat halves -/
+def pcsUp (n d : Nat) : Nat := (n - d) * 1000 / d
+def pcsDown (n d : Nat) : Nat := (d - n) * 1000 / d
+/-- a ratio a/b in hundredths, round-half-up (the "0.98×" convention of §10) -/
+def x100r (a b : Nat) : Nat := (200 * a + b) / (2 * b)
+end Design3F
+
+open Measured3 Attn3F Design3F
+
+/-! ## Round-3 proofs — one block per Appendix A′ row (R1–R27), then the PROMPT-4P2 targets and the corrections -/
+
+/-! ### R1 (`[R3-xch-*]`, `[R3-inst-*]`): λ measured; T_x = Σbw + 16 λ; the instance chain carries 8 λ -/
+theorem T3r_Tx_form (s : Shape) (rows lam : Nat) : Tx s rows lam = xchBw s rows + 16 * lam ∧ instXch s rows lam = instXchBw s rows + 8 * lam :=
+  ⟨rfl, rfl⟩
+theorem T3r_Tx : lam3 = 12200 ∧ 2 * lam3 = 24400 ∧
+    Tx dense 1 lam3 = 236307 ∧ Tx dense 4 lam3 = 359643 ∧ Tx dense 16 lam3 = 852999 ∧
+    Tx moe 1 lam3 = 219567 ∧ Tx moe 4 lam3 = 292684 ∧ Tx moe 16 lam3 = 585151 ∧
+    xchBw dense 4 = 164443 ∧ xchBw moe 1 = 24367 ∧ xchBw moe 4 = 97484 ∧ xchBw moe 16 = 389951 ∧
+    usR (Tx dense 1 lam3) = 236 ∧ usR (Tx dense 4 lam3) = 360 ∧ usR (Tx dense 16 lam3) = 853 ∧
+    usR (Tx moe 1 lam3) = 220 ∧ usR (Tx moe 4 lam3) = 293 ∧ usR (Tx moe 16 lam3) = 585 ∧
+    usR (Tx dense 1 lamMid) = 1497 ∧ usR (Tx moe 1 lamMid) = 1480 ∧ usR (Tx dense 4 lamMid) = 1620 ∧ usR (Tx dense 16 lamMid) = 2114 ∧
+    usR (Tx dense 4 lamLo) = 324 ∧ usR (Tx dense 4 lamHi) = 8164 ∧ usR (Tx dense 16 lamLo) = 818 ∧ usR (Tx dense 16 lamHi) = 8658 ∧
+    instXch dense 1 lam3 = 125771 ∧ instXch moe 1 lam3 = 118735 ∧ usR (instXch dense 1 lam3) = 126 ∧ usR (instXch moe 1 lam3) = 119 := by
+  decide
+
+/-! ### R2 (`[R3-T8-*]`): the bounce share as an iff over λ — the 32k step is affine in λ with slope 16 -/
+theorem T3r_step_lambda_form (lam : Nat) :
+    step3 dense 32768 1 1 br3 lam = 2386996682 + 41107 + 16 * lam ∧ step3 moe 32768 1 1 br3 lam = 138474340 + 24367 + 16 * lam := by
+  have h : W3 dense 1 1 br3 + A3 dense 32768 1 1 br3 + Ln3 dense 1 1 br3 + Q3 dense 1 1 br3 = 2386996682 ∧
+      W3 moe 1 1 br3 + A3 moe 32768 1 1 br3 + Ln3 moe 1 1 br3 + Q3 moe 1 1 br3 = 138474340 ∧
+      xchBw dense (1 * 1) = 41107 ∧ xchBw moe (1 * 1) = 24367 := by decide
+  have h0 : ∀ lam, D3 1 br3 lam = 0 := fun _ => rfl
+  unfold step3 X3 Tx nLat
+  rw [h0, h.2.2.1, h.2.2.2]
+  omega
+/-- dense: the host bounce reaches 10 % of the 32k step iff λ ≥ 16 573 797 ns (16.57 ms) and 50 % iff λ ≥ 149 184 724 ns (149.2 ms) -/
+theorem T3r_bounce_threshold_dense (lam : Nat) :
+    (step3 dense 32768 1 1 br3 lam ≤ 10 * X3 dense 1 1 lam ↔ 16573797 ≤ lam) ∧
+    (step3 dense 32768 1 1 br3 lam ≤ 2 * X3 dense 1 1 lam ↔ 149184724 ≤ lam) := by
+  rw [(T3r_step_lambda_form lam).1]
+  have hx : X3 dense 1 1 lam = 41107 + 16 * lam := by
+    have : xchBw dense (1 * 1) = 41107 := by decide
+    unfold X3 Tx nLat; rw [this]
+  rw [hx]; constructor <;> constructor <;> intro h <;> omega
+/-- MoE: 10 % iff λ ≥ 960 105 ns (round 2: 918 µs — the step grew by the quant pass), 50 % iff λ ≥ 8 653 124 ns -/
+theorem T3r_bounce_threshold_moe (lam : Nat) :
+    (step3 moe 32768 1 1 br3 lam ≤ 10 * X3 moe 1 1 lam ↔ 960105 ≤ lam) ∧
+    (step3 moe 32768 1 1 br3 lam ≤ 2 * X3 moe 1 1 lam ↔ 8653124 ≤ lam) := by
+  rw [(T3r_step_lambda_form lam).2]
+  have hx : X3 moe 1 1 lam = 24367 + 16 * lam := by
+    have : xchBw moe (1 * 1) = 24367 := by decide
+    unfold X3 Tx nLat; rw [this]
+  rw [hx]; constructor <;> constructor <;> intro h <;> omega
+/-- the cells: 16.57 ms / 960 µs, 149.2 / 8.65 ms; at the measured 12.2 µs the share is 0.01 % / 0.16 %, 1 358× / 78× below the
+    10 % line -/
+theorem T3r_bounce_cells : usR 16573797 = 16574 ∧ usR 149184724 = 149185 ∧ usR 960105 = 960 ∧ usR 8653124 = 8653 ∧
+    pctH (X3 dense 1 1 lam3) (step3 dense 32768 1 1 br3 lam3) = 1 ∧ pctH (X3 moe 1 1 lam3) (step3 moe 32768 1 1 br3 lam3) = 16 ∧
+    16573797 / lam3 = 1358 ∧ 960105 / lam3 = 78 := by decide
+
+/-! ### R3 (`[R3-attn-*]`): the t = 1 attention per layer, ∀ G ≤ 174.6 in closed form, and the measured-G cells -/
+theorem max4_left (a b c d : Nat) (hb : b ≤ a) (hc : c ≤ a) (hd : d ≤ a) : max (max (max a b) c) d = a := by omega
+theorem max4_second (a b c d : Nat) (ha : a ≤ b) (hc : c ≤ b) (hd : d ≤ b) : max (max (max a b) c) d = b := by omega
+/-- one fragment per pass (dense t = 1: rows 16; MoE t = 1 and t ≤ 4: rows ≤ 16) -/
+theorem T3r_mt1 (rows : Nat) (h1 : 1 ≤ rows) (h2 : rows ≤ 16) : passesOf rows = 1 ∧ mtPass rows = 1 ∧ mtOf rows = 1 := by
+  unfold passesOf mtPass mtOf ceilDiv; omega
+/-- the mt = 1 step structure: one pass, 512-token blocks, the four engines of one fragment -/
+theorem T3r_attn_mt1 (L rows G : Nat) (v : Var) (c : Conv) (i8 : Bool) (h1 : 1 ≤ rows) (h2 : rows ≤ 16) :
+    attn3 L rows G v c i8 =
+      max (max (max (nblocks L 1 * ddrBlock G 1 / (if i8 then 2 else 1)) (nblocks L 1 * vblk3 1 v c)) (nblocks L 1 * mmaBlock 1))
+        (nblocks L 1 * loaderBlock 1)
+      + (2 * vblk3 1 v c + drainBlock 1 (rDrainM 1) + tailOps L 1 * unitF32 c * 10 / (rVecCore * 100)) := by
+  obtain ⟨hp, hm, hmo⟩ := T3r_mt1 rows h1 h2
+  unfold attn3 kv3 vecT3 mmaT3 ldrT3 fixed3
+  rw [hp, hm, hmo]; simp only [Nat.one_mul]
+theorem T3r_block_consts : blockOf 1 = 512 ∧ vblk3 1 .rowmax .T = 9276 ∧ vblk3 1 .rowmax .C = 11836 ∧ vblk3 1 .lazy .T = 5530 ∧
+    mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧ drainBlock 1 (rDrainM 1) = 268 ∧ unitF32 .T = 137 ∧ unitF32 .C = 269 ∧
+    ddrBlock g256 1 = 12394 ∧ ddrBlock gShuf64 1 = 12557 ∧ ddrBlock gShuf16 1 = 13635 ∧ ddrBlock gStream 1 = 12011 ∧
+    ddrBlock g3x 1 = 36033 ∧ ddrBlock gSeq64 1 = 12409 ∧ rVecCore * 100 = 43200 ∧
+    pct 9276 12394 = 748 ∧ pct 11836 12394 = 955 := by decide
+/-- every t = 1 cell (rows ≤ 16) on the chain as specified, at every G ≤ 174.6: nb(L)·⌊20 971 520 / G⌋ + 18 820 + the L mod 16 tail
+    (the block is DDR-bound: ⌊20 971 520 / G⌋ ≥ 12 011 > the 9 276 ns chain) -/
+theorem T3r_attn_t1_form (L rows G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) (hr1 : 1 ≤ rows) (hr2 : rows ≤ 16) :
+    attn3 L rows G .rowmax .T false = ((16 * (L / 16) + 511) / 512) * (20971520 / G) + 18820 + (L % 16) * 8192 * 137 * 10 / 43200 := by
+  rw [T3r_attn_mt1 L rows G .rowmax .T false hr1 hr2]
+  have hbl : blockOf 1 = 512 := by decide
+  have hddr : ddrBlock G 1 = 20971520 / G := by unfold ddrBlock tn coreTok; rw [hbl]
+  have hge : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  have hc := T3r_block_consts
+  have e1 : (if false = true then 2 else 1) = 1 := rfl
+  rw [hddr, e1, Nat.div_one, hc.2.1, hc.2.2.2.2.1, hc.2.2.2.2.2.1, hc.2.2.2.2.2.2.1, hc.2.2.2.2.2.2.2.1]
+  have hn9 : nblocks L 1 * 9276 ≤ nblocks L 1 * (20971520 / G) := Nat.mul_le_mul_left _ (by omega)
+  have hn6 : nblocks L 1 * 960 ≤ nblocks L 1 * (20971520 / G) := Nat.mul_le_mul_left _ (by omega)
+  have hn4 : nblocks L 1 * 618 ≤ nblocks L 1 * (20971520 / G) := Nat.mul_le_mul_left _ (by omega)
+  rw [max4_left _ _ _ _ hn9 hn6 hn4]
+  unfold nblocks lMatrix ceilDiv tailOps rVecCore
+  rw [hbl]
+  have ha : (16 * (L / 16) + 512 - 1) / 512 = (16 * (L / 16) + 511) / 512 := by omega
+  rw [ha]
+  omega
+/-- the measured-G cells (ns per layer, one sequence; dense t = 1 rows 16 = MoE t = 1 rows 4): 256 KiB / 64 KiB / 16 KiB / 174.6 /
+    gather3x, the chained corner, the fixed-shift chain, the fixed costs, round 2's stream -/
+theorem T3r_attn_t1 :
+    attn3 4096 16 g256 .rowmax .T false = 117972 ∧ attn3 32768 16 g256 .rowmax .T false = 812036 ∧
+    attn3 131072 16 g256 .rowmax .T false = 3191684 ∧ attn3 1048576 16 g256 .rowmax .T false = 25401732 ∧
+    attn3 4096 16 gShuf64 .rowmax .T false = 119276 ∧ attn3 32768 16 gShuf64 .rowmax .T false = 822468 ∧
+    attn3 131072 16 gShuf64 .rowmax .T false = 3233412 ∧ attn3 1048576 16 gShuf64 .rowmax .T false = 25735556 ∧
+    attn3 4096 16 gShuf16 .rowmax .T false = 127900 ∧ attn3 32768 16 gShuf16 .rowmax .T false = 891460 ∧
+    attn3 131072 16 gShuf16 .rowmax .T false = 3509380 ∧ attn3 1048576 16 gShuf16 .rowmax .T false = 27943300 ∧
+    attn3 4096 16 gStream .rowmax .T false = 114908 ∧ attn3 32768 16 gStream .rowmax .T false = 787524 ∧
+    attn3 131072 16 gStream .rowmax .T false = 3093636 ∧ attn3 1048576 16 gStream .rowmax .T false = 24617348 ∧
+    attn3 4096 16 g3x .rowmax .T false = 307084 ∧ attn3 32768 16 g3x .rowmax .T false = 2324932 ∧
+    attn3 131072 16 g3x .rowmax .T false = 9243268 ∧ attn3 1048576 16 g3x .rowmax .T false = 73814404 ∧
+    attn3 4096 16 g256 .rowmax .C false = 123092 ∧ attn3 32768 16 g256 .rowmax .C false = 817156 ∧
+    attn3 131072 16 g256 .rowmax .C false = 3196804 ∧ attn3 1048576 16 g256 .rowmax .C false = 25406852 ∧
+    attn3 4096 16 g256 .lazy .T false = 110480 ∧ attn3 32768 16 g256 .lazy .T false = 804544 ∧
+    attn3 131072 16 g256 .lazy .T false = 3184192 ∧ attn3 1048576 16 g256 .lazy .T false = 25394240 ∧
+    fixed3 32768 16 .rowmax .T = 18820 ∧ fixed3 32768 16 .lazy .T = 11328 ∧
+    attn3 32768 4 g256 .rowmax .T false = attn3 32768 16 g256 .rowmax .T false ∧
+    attn3 1048576 4 g256 .rowmax .T false = attn3 1048576 16 g256 .rowmax .T false ∧
+    nblocks 32768 1 = 64 ∧ nblocks 1048576 1 = 2048 ∧
+    kvNs dense 32768 1 gStream false = 768715 ∧ kvNs dense 1048576 1 gStream false = 24598896 ∧
+    pct 18820 117972 = 160 ∧ pct 18820 812036 = 23 := by decide
+/-- every t = 1 measured cell is KV-bound (the KV total exceeds the vector, MMA and loader totals) -/
+theorem T3r_attn_t1_bind : vecT3 32768 16 .rowmax .T < kv3 32768 16 g256 false ∧ vecT3 1048576 16 .rowmax .T < kv3 1048576 16 g256 false ∧
+    vecT3 1048576 16 .rowmax .C < kv3 1048576 16 g256 false ∧ vecT3 1048576 16 .rowmax .T < kv3 1048576 16 gStream false ∧
+    mmaT3 1048576 16 < kv3 1048576 16 gStream false ∧ ldrT3 1048576 16 < kv3 1048576 16 gStream false := by decide
+
+/-! ### R4 (`[R3-attn-*]`): verify batches — dense t = 4 is 64 rows = four fragments on 256-token blocks, VECTOR-bound -/
+theorem T3r_attn_t4 :
+    attn3 4096 64 g256 .rowmax .T false = 492644 ∧ attn3 32768 64 g256 .rowmax .T false = 3555844 ∧
+    attn3 131072 64 g256 .rowmax .T false = 14058244 ∧ attn3 1048576 64 g256 .rowmax .T false = 112080644 ∧
+    attn3 4096 64 g256 .lazy .T false = 220916 ∧ attn3 32768 64 g256 .lazy .T false = 1593364 ∧
+    attn3 131072 64 g256 .lazy .T false = 6298900 ∧ attn3 1048576 64 g256 .lazy .T false = 50217236 ∧
+    attn3 4096 16 g256 .rowmax .T false = 117972 ∧ attn3 32768 16 g256 .rowmax .T false = 812036 ∧
+    passesOf 64 = 1 ∧ mtPass 64 = 4 ∧ blockOf 4 = 256 ∧ nblocks 32768 4 = 128 ∧
+    vblk3 4 .rowmax .T = 27350 ∧ vblk3 4 .lazy .T = 12254 ∧ ddrBlock g256 4 = 6197 ∧ x10 27350 6197 = 44 ∧
+    kv3 32768 64 g256 false = 793216 ∧ vecT3 32768 64 .rowmax .T = 3500800 ∧ vecT3 32768 64 .lazy .T = 1568512 ∧
+    kv3 32768 64 g256 false < vecT3 32768 64 .lazy .T ∧ fixed3 32768 64 .rowmax .T = 55044 ∧ fixed3 32768 64 .lazy .T = 24852 := by
+  decide
+
+/-! ### R5 (`[R3-attn-*]`): KV-int8 halves the stream, not the chain — vector-bound at t = 1 on the chain as specified -/
+theorem T3r_attn_i8 :
+    attn3 4096 16 g256 .rowmax .T true = 93028 ∧ attn3 32768 16 g256 .rowmax .T true = 612484 ∧
+    attn3 131072 16 g256 .rowmax .T true = 2393476 ∧ attn3 1048576 16 g256 .rowmax .T true = 19016068 ∧
+    attn3 4096 16 g256 .lazy .T true = 60904 ∧ attn3 32768 16 g256 .lazy .T true = 407936 ∧
+    attn3 131072 16 g256 .lazy .T true = 1597760 ∧ attn3 1048576 16 g256 .lazy .T true = 12702784 ∧
+    kv3 32768 16 g256 true = 396608 ∧ vecT3 32768 16 .rowmax .T = 593664 ∧ vecT3 32768 16 .lazy .T = 353920 ∧
+    kv3 32768 16 g256 true < vecT3 32768 16 .rowmax .T ∧ vecT3 32768 16 .lazy .T < kv3 32768 16 g256 true ∧
+    kv3 1048576 16 g256 true = 12691456 ∧ vecT3 1048576 16 .rowmax .T = 18997248 ∧ vecT3 1048576 16 .lazy .T = 11325440 := by
+  decide
+
+/-! ### R6 (`[R3-layer-*]`): the measured A-quantization pass, 4 per layer -/
+theorem T3r_quant : quantNs dense 1 .fixed = 174800 ∧ quantNs moe 1 .fixed = 174800 ∧
+    dense.nL * quantNs dense 1 .fixed = 20976000 ∧ moe.nL * quantNs moe 1 .fixed = 4894400 ∧
+    ms2 20976000 = 2097 ∧ ms2 4894400 = 489 ∧
+    quantNs dense 1 .prop = 568100 ∧ quantNs dense 4 .prop = 2185000 ∧ quantNs dense 16 .prop = 8740000 ∧
+    quantNs moe 1 .prop = 262200 ∧ quantNs moe 4 .prop = 961400 ∧ quantNs moe 16 .prop = 3845600 ∧
+    quantNs dense 16 .fixed = 174800 := by decide
+/-! ### R7 (`[R3-step]`): the §3.5.2 table, all 31 rows — T_step (ns), parts (hundredths of ms), tokens/s/card, binding.
+    Binding: `bindsW3` = the weight stream is strictly the largest additive term; `bindsA3` = attention is; MEM = ¬feasible
+    (feasibility is round 2's memory model, unchanged: no round-3 term enters it — R27). -/
+theorem T3r_step_dense_4k :
+    step3 dense 4096 1 1 br3 lam3 = 2303945309 ∧
+    ms2 (W3 dense 1 1 br3) = 220287 ∧
+    ms2 (A3 dense 4096 1 1 br3) = 1415 ∧
+    ms2 (Ln3 dense 1 1 br3) = 6570 ∧
+    ms2 (Q3 dense 1 1 br3) = 2097 ∧
+    ms2 (X3 dense 1 1 lam3) = 23 ∧
+    tpsCard 1000 (step3 dense 4096 1 1 br3 lam3) = 108 ∧
+    bindsW3 dense 4096 1 1 br3 lam3 = true ∧
+    step3 dense 4096 1 4 br3 lam3 = 2415418808 ∧
+    ms2 (W3 dense 1 4 br3) = 220287 ∧
+    ms2 (A3 dense 4096 1 4 br3) = 5911 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 4096 1 4 br3 lam3) = 262 ∧
+    bindsW3 dense 4096 1 4 br3 lam3 = true ∧
+    step3 dense 4096 1 4 br3Lazy lam3 = 2382811448 ∧
+    ms2 (W3 dense 1 4 br3Lazy) = 220287 ∧
+    ms2 (A3 dense 4096 1 4 br3Lazy) = 2650 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3Lazy lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 4096 1 4 br3Lazy lam3) = 265 ∧
+    bindsW3 dense 4096 1 4 br3Lazy lam3 = true ∧
+    step3 dense 4096 16 1 br3 lam3 = 2516911601 ∧
+    ms2 (W3 dense 16 1 br3) = 220287 ∧
+    ms2 (A3 dense 4096 16 1 br3) = 22650 ∧
+    ms2 (X3 dense 16 1 lam3) = 85 ∧
+    tpsCard 16000 (step3 dense 4096 16 1 br3 lam3) = 1589 ∧
+    bindsW3 dense 4096 16 1 br3 lam3 = true := by decide
+theorem T3r_step_dense_32k :
+    step3 dense 32768 1 1 br3 lam3 = 2387232989 ∧
+    ms2 (W3 dense 1 1 br3) = 220287 ∧
+    ms2 (A3 dense 32768 1 1 br3) = 9744 ∧
+    ms2 (X3 dense 1 1 lam3) = 23 ∧
+    tpsCard 1000 (step3 dense 32768 1 1 br3 lam3) = 104 ∧
+    bindsW3 dense 32768 1 1 br3 lam3 = true ∧
+    step3 dense 32768 1 4 br3 lam3 = 2783002808 ∧
+    ms2 (W3 dense 1 4 br3) = 220287 ∧
+    ms2 (A3 dense 32768 1 4 br3) = 42670 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 32768 1 4 br3 lam3) = 227 ∧
+    bindsW3 dense 32768 1 4 br3 lam3 = true ∧
+    step3 dense 32768 1 4 br3Lazy lam3 = 2547505208 ∧
+    ms2 (W3 dense 1 4 br3Lazy) = 220287 ∧
+    ms2 (A3 dense 32768 1 4 br3Lazy) = 19120 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3Lazy lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 32768 1 4 br3Lazy lam3) = 248 ∧
+    bindsW3 dense 32768 1 4 br3Lazy lam3 = true ∧
+    step3 dense 32768 16 1 br3 lam3 = 3849514481 ∧
+    ms2 (W3 dense 16 1 br3) = 220287 ∧
+    ms2 (A3 dense 32768 16 1 br3) = 155910 ∧
+    ms2 (X3 dense 16 1 lam3) = 85 ∧
+    tpsCard 16000 (step3 dense 32768 16 1 br3 lam3) = 1039 ∧
+    bindsW3 dense 32768 16 1 br3 lam3 = true := by decide
+theorem T3r_step_dense_128k :
+    step3 dense 131072 1 1 br3 lam3 = 2672790749 ∧
+    ms2 (W3 dense 1 1 br3) = 220287 ∧
+    ms2 (A3 dense 131072 1 1 br3) = 38300 ∧
+    ms2 (X3 dense 1 1 lam3) = 23 ∧
+    tpsCard 1000 (step3 dense 131072 1 1 br3 lam3) = 93 ∧
+    bindsW3 dense 131072 1 1 br3 lam3 = true ∧
+    step3 dense 131072 1 4 br3 lam3 = 4043290808 ∧
+    ms2 (W3 dense 1 4 br3) = 220287 ∧
+    ms2 (A3 dense 131072 1 4 br3) = 168698 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 131072 1 4 br3 lam3) = 156 ∧
+    bindsW3 dense 131072 1 4 br3 lam3 = true ∧
+    step3 dense 131072 1 4 br3Lazy lam3 = 3112169528 ∧
+    ms2 (W3 dense 1 4 br3Lazy) = 220287 ∧
+    ms2 (A3 dense 131072 1 4 br3Lazy) = 75586 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3Lazy lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 131072 1 4 br3Lazy lam3) = 203 ∧
+    bindsW3 dense 131072 1 4 br3Lazy lam3 = true ∧
+    step3 dense 131072 16 1 br3 lam3 = 8418438641 ∧
+    ms2 (W3 dense 16 1 br3) = 220287 ∧
+    ms2 (A3 dense 131072 16 1 br3) = 612803 ∧
+    ms2 (X3 dense 16 1 lam3) = 85 ∧
+    ¬ feasible dense 131072 16 false oRt := by decide
+theorem T3r_step_dense_1M :
+    step3 dense 1048576 1 1 br3 lam3 = 5337996509 ∧
+    ms2 (W3 dense 1 1 br3) = 220287 ∧
+    ms2 (A3 dense 1048576 1 1 br3) = 304820 ∧
+    ms2 (X3 dense 1 1 lam3) = 23 ∧
+    ¬ feasible dense 1048576 1 false oRt ∧
+    step3 dense 1048576 1 1 br3I8 lam3 = 4571716829 ∧
+    ms2 (W3 dense 1 1 br3I8) = 220287 ∧
+    ms2 (A3 dense 1048576 1 1 br3I8) = 228192 ∧
+    ms2 (X3 dense 1 1 lam3) = 23 ∧
+    tpsCard 1000 (step3 dense 1048576 1 1 br3I8 lam3) = 54 ∧
+    bindsA3 dense 1048576 1 1 br3I8 lam3 = true ∧
+    step3 dense 1048576 1 1 br3I8Lazy lam3 = 3814122749 ∧
+    ms2 (W3 dense 1 1 br3I8Lazy) = 220287 ∧
+    ms2 (A3 dense 1048576 1 1 br3I8Lazy) = 152433 ∧
+    ms2 (X3 dense 1 1 lam3) = 23 ∧
+    tpsCard 1000 (step3 dense 1048576 1 1 br3I8Lazy lam3) = 65 ∧
+    bindsW3 dense 1048576 1 1 br3I8Lazy lam3 = true ∧
+    step3 dense 1048576 1 4 br3 lam3 = 15805978808 ∧
+    ms2 (W3 dense 1 4 br3) = 220287 ∧
+    ms2 (A3 dense 1048576 1 4 br3) = 1344967 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    ¬ feasible dense 1048576 1 false oRt ∧
+    step3 dense 1048576 1 4 br3Lazy lam3 = 8382369848 ∧
+    ms2 (W3 dense 1 4 br3Lazy) = 220287 ∧
+    ms2 (A3 dense 1048576 1 4 br3Lazy) = 602606 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3Lazy lam3) = 6638 ∧
+    ¬ feasible dense 1048576 1 false oRt ∧
+    step3 dense 1048576 1 4 br3I8 lam3 = 15805978808 ∧
+    ms2 (W3 dense 1 4 br3I8) = 220287 ∧
+    ms2 (A3 dense 1048576 1 4 br3I8) = 1344967 ∧
+    ms2 (X3 dense 1 4 lam3) = 35 ∧
+    ms2 (D3 4 br3I8 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 dense 1048576 1 4 br3I8 lam3) = 40 ∧
+    bindsA3 dense 1048576 1 4 br3I8 lam3 = true ∧
+    step3 dense 1048576 16 1 br3 lam3 = 51061730801 ∧
+    ms2 (W3 dense 16 1 br3) = 220287 ∧
+    ms2 (A3 dense 1048576 16 1 br3) = 4877132 ∧
+    ms2 (X3 dense 16 1 lam3) = 85 ∧
+    ¬ feasible dense 1048576 16 false oRt := by decide
+theorem T3r_step_moe_4k :
+    step3 moe 4096 1 1 br3 lam3 = 119260115 ∧
+    ms2 (W3 moe 1 1 br3) = 9282 ∧
+    ms2 (A3 moe 4096 1 1 br3) = 330 ∧
+    ms2 (Ln3 moe 1 1 br3) = 1801 ∧
+    ms2 (Q3 moe 1 1 br3) = 489 ∧
+    ms2 (X3 moe 1 1 lam3) = 21 ∧
+    tpsCard 1000 (step3 moe 4096 1 1 br3 lam3) = 2096 ∧
+    bindsW3 moe 4096 1 1 br3 lam3 = true ∧
+    step3 moe 4096 1 4 br3 lam3 = 433648419 ∧
+    ms2 (W3 moe 1 4 br3) = 34075 ∧
+    ms2 (A3 moe 4096 1 4 br3) = 330 ∧
+    ms2 (X3 moe 1 4 lam3) = 29 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 moe 4096 1 4 br3 lam3) = 1460 ∧
+    bindsW3 moe 4096 1 4 br3 lam3 = true ∧
+    step3 moe 4096 16 1 br3 lam3 = 1408802259 ∧
+    ms2 (W3 moe 16 1 br3) = 133245 ∧
+    ms2 (A3 moe 4096 16 1 br3) = 5285 ∧
+    ms2 (X3 moe 16 1 lam3) = 58 ∧
+    tpsCard 16000 (step3 moe 4096 16 1 br3 lam3) = 2839 ∧
+    bindsW3 moe 4096 16 1 br3 lam3 = true := by decide
+theorem T3r_step_moe_32k :
+    step3 moe 32768 1 1 br3 lam3 = 138693907 ∧
+    ms2 (W3 moe 1 1 br3) = 9282 ∧
+    ms2 (A3 moe 32768 1 1 br3) = 2273 ∧
+    ms2 (X3 moe 1 1 lam3) = 21 ∧
+    tpsCard 1000 (step3 moe 32768 1 1 br3 lam3) = 1802 ∧
+    bindsW3 moe 32768 1 1 br3 lam3 = true ∧
+    step3 moe 32768 1 4 br3 lam3 = 453082211 ∧
+    ms2 (W3 moe 1 4 br3) = 34075 ∧
+    ms2 (A3 moe 32768 1 4 br3) = 2273 ∧
+    ms2 (X3 moe 1 4 lam3) = 29 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 moe 32768 1 4 br3 lam3) = 1397 ∧
+    bindsW3 moe 32768 1 4 br3 lam3 = true ∧
+    step3 moe 32768 16 1 br3 lam3 = 1719742931 ∧
+    ms2 (W3 moe 16 1 br3) = 133245 ∧
+    ms2 (A3 moe 32768 16 1 br3) = 36379 ∧
+    ms2 (X3 moe 16 1 lam3) = 58 ∧
+    tpsCard 16000 (step3 moe 32768 16 1 br3 lam3) = 2325 ∧
+    bindsW3 moe 32768 16 1 br3 lam3 = true := by decide
+theorem T3r_step_moe_128k :
+    step3 moe 131072 1 1 br3 lam3 = 205324051 ∧
+    ms2 (W3 moe 1 1 br3) = 9282 ∧
+    ms2 (A3 moe 131072 1 1 br3) = 8936 ∧
+    ms2 (X3 moe 1 1 lam3) = 21 ∧
+    tpsCard 1000 (step3 moe 131072 1 1 br3 lam3) = 1217 ∧
+    bindsW3 moe 131072 1 1 br3 lam3 = true ∧
+    step3 moe 131072 1 4 br3 lam3 = 519712355 ∧
+    ms2 (W3 moe 1 4 br3) = 34075 ∧
+    ms2 (A3 moe 131072 1 4 br3) = 8936 ∧
+    ms2 (X3 moe 1 4 lam3) = 29 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 moe 131072 1 4 br3 lam3) = 1218 ∧
+    bindsW3 moe 131072 1 4 br3 lam3 = true ∧
+    step3 moe 131072 16 1 br3 lam3 = 2785825235 ∧
+    ms2 (W3 moe 16 1 br3) = 133245 ∧
+    ms2 (A3 moe 131072 16 1 br3) = 142987 ∧
+    ms2 (X3 moe 16 1 lam3) = 58 ∧
+    ¬ feasible moe 131072 16 false oRt := by decide
+theorem T3r_step_moe_1M :
+    step3 moe 1048576 1 1 br3 lam3 = 827205395 ∧
+    ms2 (W3 moe 1 1 br3) = 9282 ∧
+    ms2 (A3 moe 1048576 1 1 br3) = 71124 ∧
+    ms2 (X3 moe 1 1 lam3) = 21 ∧
+    tpsCard 1000 (step3 moe 1048576 1 1 br3 lam3) = 302 ∧
+    bindsA3 moe 1048576 1 1 br3 lam3 = true ∧
+    step3 moe 1048576 1 4 br3 lam3 = 1141593699 ∧
+    ms2 (W3 moe 1 4 br3) = 34075 ∧
+    ms2 (A3 moe 1048576 1 4 br3) = 71124 ∧
+    ms2 (X3 moe 1 4 lam3) = 29 ∧
+    ms2 (D3 4 br3 lam3) = 6638 ∧
+    tpsCard (tau 700 3) (step3 moe 1048576 1 4 br3 lam3) = 554 ∧
+    bindsA3 moe 1048576 1 4 br3 lam3 = true ∧
+    step3 moe 1048576 16 1 br3 lam3 = 12735926739 ∧
+    ms2 (W3 moe 16 1 br3) = 133245 ∧
+    ms2 (A3 moe 1048576 16 1 br3) = 1137997 ∧
+    ms2 (X3 moe 16 1 lam3) = 58 ∧
+    ¬ feasible moe 1048576 16 false oRt := by decide
+
+/-! ### R8 (`[R3-moved-*]`): every round-2 step cell (a theorem of the round-2 model above) → its round-3 value; the headline moves -/
+theorem T3r_moved_cells :
+    stepNs dense 4096 1 1 br0 lamMid 0 = 2281604149 ∧ step3 dense 4096 1 1 br3 lam3 = 2303945309 ∧
+    stepNs dense 4096 1 4 br0 lamMid 0 = 2336004208 ∧ step3 dense 4096 1 4 br3 lam3 = 2415418808 ∧
+    stepNs dense 4096 16 1 br0 lamMid 0 = 2455181881 ∧ step3 dense 4096 16 1 br3 lam3 = 2516911601 ∧
+    stepNs dense 32768 1 1 br0 lamMid 0 = 2362319269 ∧ step3 dense 32768 1 1 br3 lam3 = 2387232989 ∧
+    stepNs dense 32768 1 4 br0 lamMid 0 = 2416719328 ∧ step3 dense 32768 1 4 br3 lam3 = 2783002808 ∧
+    stepNs dense 32768 16 1 br0 lamMid 0 = 3746623921 ∧ step3 dense 32768 16 1 br3 lam3 = 3849514481 ∧
+    stepNs dense 131072 1 1 br0 lamMid 0 = 2639056909 ∧ step3 dense 131072 1 1 br3 lam3 = 2672790749 ∧
+    stepNs dense 131072 1 4 br0 lamMid 0 = 2693456968 ∧ step3 dense 131072 1 4 br3 lam3 = 4043290808 ∧
+    stepNs dense 131072 16 1 br0 lamMid 0 = 8174425201 ∧ step3 dense 131072 16 1 br3 lam3 = 8418438641 ∧
+    stepNs dense 1048576 1 1 br0 lamMid 0 = 5221940989 ∧ step3 dense 1048576 1 1 br3 lam3 = 5337996509 ∧
+    stepNs dense 1048576 1 4 br0 lamMid 0 = 5276341048 ∧ step3 dense 1048576 1 4 br3 lam3 = 15805978808 ∧
+    stepNs dense 1048576 16 1 br0 lamMid 0 = 49500570961 ∧ step3 dense 1048576 16 1 br3 lam3 = 51061730801 ∧
+    stepNs dense 1048576 1 1 brI8 lamMid 0 = 3746007229 ∧ step3 dense 1048576 1 1 br3I8 lam3 = 4571716829 ∧
+    stepNs dense 1048576 1 4 brI8 lamMid 0 = 3800407288 ∧ step3 dense 1048576 1 4 br3I8 lam3 = 15805978808 ∧
+    stepNs moe 4096 1 1 br0 lamMid 0 = 115013791 ∧ step3 moe 4096 1 1 br3 lam3 = 119260115 ∧
+    stepNs moe 4096 1 4 br0 lamMid 0 = 417289295 ∧ step3 moe 4096 1 4 br3 lam3 = 433648419 ∧
+    stepNs moe 4096 16 1 br0 lamMid 0 = 1395365271 ∧ step3 moe 4096 16 1 br3 lam3 = 1408802259 ∧
+    stepNs moe 32768 1 1 br0 lamMid 0 = 133847319 ∧ step3 moe 32768 1 1 br3 lam3 = 138693907 ∧
+    stepNs moe 32768 1 4 br0 lamMid 0 = 436122823 ∧ step3 moe 32768 1 4 br3 lam3 = 453082211 ∧
+    stepNs moe 32768 16 1 br0 lamMid 0 = 1696701747 ∧ step3 moe 32768 16 1 br3 lam3 = 1719742931 ∧
+    stepNs moe 131072 1 1 br0 lamMid 0 = 198419435 ∧ step3 moe 131072 1 1 br3 lam3 = 205324051 ∧
+    stepNs moe 131072 1 4 br0 lamMid 0 = 500694939 ∧ step3 moe 131072 1 4 br3 lam3 = 519712355 ∧
+    stepNs moe 131072 16 1 br0 lamMid 0 = 2729855379 ∧ step3 moe 131072 16 1 br3 lam3 = 2785825235 ∧
+    stepNs moe 1048576 1 1 br0 lamMid 0 = 801092387 ∧ step3 moe 1048576 1 1 br3 lam3 = 827205395 ∧
+    stepNs moe 1048576 1 4 br0 lamMid 0 = 1103367891 ∧ step3 moe 1048576 1 4 br3 lam3 = 1141593699 ∧
+    stepNs moe 1048576 16 1 br0 lamMid 0 = 12372622723 ∧ step3 moe 1048576 16 1 br3 lam3 = 12735926739 := by decide
+/-- the moved headline cells in tenths of a percent (fleet.py `pcs`): dense t = 1 −0.9 %, MoE −3.4 %, dense spec −13.3 %, dense 1M
+    KV-int8 −18.1 %, MoE 1M −3.2 %, dense 128k spec −33.6 %; the others −0.9 … −3.5 %; dense 1M spec on KV-int8 −75.9 % -/
+theorem T3r_moved_pct : pcsDown 104 105 = 9 ∧ pcsDown 1802 1867 = 34 ∧ pcsDown 227 262 = 133 ∧ pcsDown 54 66 = 181 ∧ pcsDown 302 312 = 32 ∧ pcsDown 156 235 = 336 ∧ pcsDown 108 109 = 9 ∧ pcsDown 93 94 = 10 ∧ pcsDown 2096 2173 = 35 ∧ pcsDown 1217 1259 = 33 ∧ pcsDown 40 166 = 759 ∧ pcsDown 1039 1067 = 26 ∧ pcsDown 2325 2357 = 13 := by decide
+/-! ### R9 (`[R3-branch-*]`): every branch at 32k toggled one at a time, and the whole λ bracket at once -/
+theorem T3r_branches_dense :
+    step3 dense 32768 1 1 br3 lam3 = 2387232989 ∧ tpsCard 1000 (step3 dense 32768 1 1 br3 lam3) = 104 ∧
+    step3 dense 32768 1 1 (br3G gShuf64) lam3 = 2388484829 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3G gShuf64) lam3) = 104 ∧
+    step3 dense 32768 1 1 (br3G gSeq64) lam3 = 2387348189 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3G gSeq64) lam3) = 104 ∧
+    step3 dense 32768 1 1 (br3G gShuf16) lam3 = 2396763869 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3G gShuf16) lam3) = 104 ∧
+    step3 dense 32768 1 1 (br3G gStream) lam3 = 2384291549 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3G gStream) lam3) = 104 ∧
+    step3 dense 32768 1 1 (br3G g3x) lam3 = 2568780509 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3G g3x) lam3) = 97 ∧
+    step3 dense 32768 1 1 br3Lazy lam3 = 2386333949 ∧ tpsCard 1000 (step3 dense 32768 1 1 br3Lazy lam3) = 104 ∧
+    step3 dense 32768 1 1 br3C lam3 = 2387847389 ∧ tpsCard 1000 (step3 dense 32768 1 1 br3C lam3) = 104 ∧
+    step3 dense 32768 1 1 br3 lamLo = 2387197789 ∧ tpsCard 1000 (step3 dense 32768 1 1 br3 lamLo) = 104 ∧
+    step3 dense 32768 1 1 br3 lamMid = 2388493789 ∧ tpsCard 1000 (step3 dense 32768 1 1 br3 lamMid) = 104 ∧
+    step3 dense 32768 1 1 br3 lamHi = 2395037789 ∧ tpsCard 1000 (step3 dense 32768 1 1 br3 lamHi) = 104 ∧
+    step3 dense 32768 1 1 { br3 with launch := false } lam3 = 2321530989 ∧ tpsCard 1000 (step3 dense 32768 1 1 { br3 with launch := false } lam3) = 107 ∧
+    step3 dense 32768 1 1 { br3 with cq := .none } lam3 = 2366256989 ∧ tpsCard 1000 (step3 dense 32768 1 1 { br3 with cq := .none } lam3) = 105 ∧
+    step3 dense 32768 1 1 { br3 with cq := .prop } lam3 = 2434428989 ∧ tpsCard 1000 (step3 dense 32768 1 1 { br3 with cq := .prop } lam3) = 102 ∧
+    step3 dense 32768 1 1 { br3 with integ := true } lam3 = 3022896357 ∧ tpsCard 1000 (step3 dense 32768 1 1 { br3 with integ := true } lam3) = 82 ∧
+    step3 dense 32768 1 1 (br3Mega 2000) lam3 = 2335439549 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3Mega 2000) lam3) = 107 ∧
+    step3 dense 32768 1 1 (br3Mega 5000) lam3 = 2336879549 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3Mega 5000) lam3) = 106 ∧
+    step3 dense 32768 1 1 (br3Mega 20000) lam3 = 2344079549 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3Mega 20000) lam3) = 106 ∧
+    step3 dense 32768 1 1 { br3 with G := gShuf16, conv := .C, integ := true, cq := .none } lamHi = 3019870437 ∧ tpsCard 1000 (step3 dense 32768 1 1 { br3 with G := gShuf16, conv := .C, integ := true, cq := .none } lamHi) = 82 ∧
+    step3 dense 32768 1 1 { br3 with var := .lazy, launch := false, cq := .none } lamLo = 2299620749 ∧ tpsCard 1000 (step3 dense 32768 1 1 { br3 with var := .lazy, launch := false, cq := .none } lamLo) = 108 ∧
+    pcsDown 82 104 = 211 ∧ pcsUp 108 104 = 38 := by decide
+theorem T3r_branches_moe :
+    step3 moe 32768 1 1 br3 lam3 = 138693907 ∧ tpsCard 1000 (step3 moe 32768 1 1 br3 lam3) = 1802 ∧
+    step3 moe 32768 1 1 (br3G gShuf64) lam3 = 138986003 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3G gShuf64) lam3) = 1798 ∧
+    step3 moe 32768 1 1 (br3G gSeq64) lam3 = 138720787 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3G gSeq64) lam3) = 1802 ∧
+    step3 moe 32768 1 1 (br3G gShuf16) lam3 = 140917779 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3G gShuf16) lam3) = 1774 ∧
+    step3 moe 32768 1 1 (br3G gStream) lam3 = 138007571 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3G gStream) lam3) = 1811 ∧
+    step3 moe 32768 1 1 (br3G g3x) lam3 = 181054995 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3G g3x) lam3) = 1380 ∧
+    step3 moe 32768 1 1 br3Lazy lam3 = 138484131 ∧ tpsCard 1000 (step3 moe 32768 1 1 br3Lazy lam3) = 1805 ∧
+    step3 moe 32768 1 1 br3C lam3 = 138837267 ∧ tpsCard 1000 (step3 moe 32768 1 1 br3C lam3) = 1800 ∧
+    step3 moe 32768 1 1 br3 lamLo = 138658707 ∧ tpsCard 1000 (step3 moe 32768 1 1 br3 lamLo) = 1802 ∧
+    step3 moe 32768 1 1 br3 lamMid = 139954707 ∧ tpsCard 1000 (step3 moe 32768 1 1 br3 lamMid) = 1786 ∧
+    step3 moe 32768 1 1 br3 lamHi = 146498707 ∧ tpsCard 1000 (step3 moe 32768 1 1 br3 lamHi) = 1706 ∧
+    step3 moe 32768 1 1 { br3 with launch := false } lam3 = 120675907 ∧ tpsCard 1000 (step3 moe 32768 1 1 { br3 with launch := false } lam3) = 2071 ∧
+    step3 moe 32768 1 1 { br3 with cq := .none } lam3 = 133799507 ∧ tpsCard 1000 (step3 moe 32768 1 1 { br3 with cq := .none } lam3) = 1868 ∧
+    step3 moe 32768 1 1 { br3 with cq := .prop } lam3 = 141141107 ∧ tpsCard 1000 (step3 moe 32768 1 1 { br3 with cq := .prop } lam3) = 1771 ∧
+    step3 moe 32768 1 1 { br3 with integ := true } lam3 = 141503061 ∧ tpsCard 1000 (step3 moe 32768 1 1 { br3 with integ := true } lam3) = 1766 ∧
+    step3 moe 32768 1 1 (br3Reg .directSer) lam3 = 122831347 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Reg .directSer) lam3) = 2035 ∧
+    step3 moe 32768 1 1 (br3Reg .directOvl) lam3 = 120623827 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Reg .directOvl) lam3) = 2072 ∧
+    step3 moe 32768 1 1 (br3Reg .pp) lam3 = 121246099 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Reg .pp) lam3) = 2061 ∧
+    step3 moe 32768 1 1 (br3Fam .zipf15) lam3 = 138693907 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Fam .zipf15) lam3) = 1802 ∧
+    step3 moe 32768 1 1 (br3Mega 2000) lam3 = 123793595 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Mega 2000) lam3) = 2019 ∧
+    step3 moe 32768 1 1 (br3Mega 5000) lam3 = 124213595 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Mega 5000) lam3) = 2012 ∧
+    step3 moe 32768 1 1 (br3Mega 20000) lam3 = 126313595 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Mega 20000) lam3) = 1979 ∧
+    step3 moe 32768 1 1 { br3 with G := gShuf16, conv := .C, integ := true, cq := .none } lamHi = 146780693 ∧ tpsCard 1000 (step3 moe 32768 1 1 { br3 with G := gShuf16, conv := .C, integ := true, cq := .none } lamHi) = 1703 ∧
+    step3 moe 32768 1 1 { br3 with var := .lazy, launch := false, cq := .none, regime := .directOvl } lamLo = 97466451 ∧ tpsCard 1000 (step3 moe 32768 1 1 { br3 with var := .lazy, launch := false, cq := .none, regime := .directOvl } lamLo) = 2564 ∧
+    pcsDown 1703 1802 = 54 ∧ pcsUp 2564 1802 = 422 := by decide
+/-- the round-to-hundredths ratios §10 quotes (x100r a b = round(100·a/b)): quant reading 0.98× / 0.98×, the integrated reading 0.80×
+    (dense), page size 1.00× / 0.98×, λ 1.00× / 0.95×, launch pipelining 1.03× / 1.15×, the MoE regime 1.13× (direct, A lift serialised;
+    1.15× overlapped, 1.14× ping-pong), MoE 1M at 16 KiB 0.92×, dense 1M KV-int8 fixed-shift / as specified 1.20× -/
+theorem T3r_branch_ratios : x100r 102 104 = 98 ∧ x100r 1771 1802 = 98 ∧ x100r 83 104 = 80 ∧ x100r 104 104 = 100 ∧ x100r 1774 1802 = 98 ∧
+    x100r 1706 1802 = 95 ∧ x100r 107 104 = 103 ∧ x100r 2071 1802 = 115 ∧ x100r 2035 1802 = 113 ∧ x100r 2072 1802 = 115 ∧
+    x100r 2061 1802 = 114 ∧ x100r 278 302 = 92 ∧ x100r 65 54 = 120 := by decide
+theorem T3r_step_lambda_bracket (lam : Nat) (h1 : lamLo ≤ lam) (h2 : lam ≤ lamHi) :
+    tpsCard 1000 (step3 dense 32768 1 1 br3 lam) = 104 ∧
+    1706 ≤ tpsCard 1000 (step3 moe 32768 1 1 br3 lam) ∧ tpsCard 1000 (step3 moe 32768 1 1 br3 lam) ≤ 1802 := by
+  have hl : lamLo = 10000 ∧ lamHi = 500000 := by decide
+  rw [(T3r_step_lambda_form lam).1, (T3r_step_lambda_form lam).2]
+  unfold tpsCard
+  refine ⟨?_, ?_, ?_⟩
+  · have a : 104 ≤ 1000 * 1000000000 / (4 * (2386996682 + 41107 + 16 * lam)) := by
+      rw [Nat.le_div_iff_mul_le (by omega)]; omega
+    have b : 1000 * 1000000000 / (4 * (2386996682 + 41107 + 16 * lam)) < 105 := by
+      rw [Nat.div_lt_iff_lt_mul (by omega)]; omega
+    omega
+  · rw [Nat.le_div_iff_mul_le (by omega)]; omega
+  · have b : 1000 * 1000000000 / (4 * (138474340 + 24367 + 16 * lam)) < 1803 := by
+      rw [Nat.div_lt_iff_lt_mul (by omega)]; omega
+    omega
+
+/-! ### R10 (`[R3-B16-*]`): MoE B = 16 by routing family (D(16) = 128 / 68 / 45, EMPIRICAL — H9), anchored and direct path -/
+theorem T3r_moe_families :
+    dOf .uniform 16 = 128 ∧ step3 moe 32768 16 1 (br3Fam .uniform) lam3 = 1719742931 ∧ tpsCard 16000 (step3 moe 32768 16 1 (br3Fam .uniform) lam3) = 2325 ∧ ms2 (W3 moe 16 1 (br3Fam .uniform)) = 133245 ∧ step3 moe 32768 16 1 (br3FamReg .uniform .directSer) lam3 = 1465941971 ∧ tpsCard 16000 (step3 moe 32768 16 1 (br3FamReg .uniform .directSer) lam3) = 2728 ∧
+    dOf .zipf10 16 = 68 ∧ step3 moe 32768 16 1 (br3Fam .zipf10) lam3 = 1099928771 ∧ tpsCard 16000 (step3 moe 32768 16 1 (br3Fam .zipf10) lam3) = 3636 ∧ ms2 (W3 moe 16 1 (br3Fam .zipf10)) = 71263 ∧ step3 moe 32768 16 1 (br3FamReg .zipf10 .directSer) lam3 = 965097011 ∧ tpsCard 16000 (step3 moe 32768 16 1 (br3FamReg .zipf10 .directSer) lam3) = 4144 ∧
+    dOf .zipf15 16 = 45 ∧ step3 moe 32768 16 1 (br3Fam .zipf15) lam3 = 862333343 ∧ tpsCard 16000 (step3 moe 32768 16 1 (br3Fam .zipf15) lam3) = 4638 ∧ ms2 (W3 moe 16 1 (br3Fam .zipf15)) = 47504 ∧ step3 moe 32768 16 1 (br3FamReg .zipf15 .directSer) lam3 = 773106443 ∧ tpsCard 16000 (step3 moe 32768 16 1 (br3FamReg .zipf15 .directSer) lam3) = 5173 ∧
+    ms2 (A3 moe 32768 16 1 br3) = 36379 ∧ pct (A3 moe 32768 16 1 br3) (step3 moe 32768 16 1 br3 lam3) = 212 ∧ ¬ feasible moe 1048576 16 false oRt := by decide
+
+/-! ### R11 (`[R3-regime]`): the binding term per (shape, L, rows), its share and the attention share (tenths of a percent);
+    the bounce share in hundredths (CORRECTED: ≤ 0.18 % — the MoE 4k cell — not "≤ 0.16 % everywhere"), quant and launch shares -/
+theorem T3r_regime_dense_4k :
+    bindsW3 dense 4096 1 1 br3 lam3 = true ∧ pct (W3 dense 1 1 br3) (step3 dense 4096 1 1 br3 lam3) = 956 ∧ pct (A3 dense 4096 1 1 br3) (step3 dense 4096 1 1 br3 lam3) = 6 ∧
+    pctH (X3 dense 1 1 lam3) (step3 dense 4096 1 1 br3 lam3) = 1 ∧
+    pct (Q3 dense 1 1 br3) (step3 dense 4096 1 1 br3 lam3) = 9 ∧ pct (Ln3 dense 1 1 br3) (step3 dense 4096 1 1 br3 lam3) = 29 ∧
+    bindsW3 dense 4096 1 4 br3 lam3 = true ∧ pct (W3 dense 1 4 br3) (step3 dense 4096 1 4 br3 lam3) = 912 ∧ pct (A3 dense 4096 1 4 br3) (step3 dense 4096 1 4 br3 lam3) = 24 ∧
+    pctH (X3 dense 1 4 lam3) (step3 dense 4096 1 4 br3 lam3) = 1 ∧
+    bindsW3 dense 4096 16 1 br3 lam3 = true ∧ pct (W3 dense 16 1 br3) (step3 dense 4096 16 1 br3 lam3) = 875 ∧ pct (A3 dense 4096 16 1 br3) (step3 dense 4096 16 1 br3 lam3) = 90 ∧
+    pctH (X3 dense 16 1 lam3) (step3 dense 4096 16 1 br3 lam3) = 3 := by decide
+theorem T3r_regime_dense_32k :
+    bindsW3 dense 32768 1 1 br3 lam3 = true ∧ pct (W3 dense 1 1 br3) (step3 dense 32768 1 1 br3 lam3) = 923 ∧ pct (A3 dense 32768 1 1 br3) (step3 dense 32768 1 1 br3 lam3) = 41 ∧
+    pctH (X3 dense 1 1 lam3) (step3 dense 32768 1 1 br3 lam3) = 1 ∧
+    pct (Q3 dense 1 1 br3) (step3 dense 32768 1 1 br3 lam3) = 9 ∧ pct (Ln3 dense 1 1 br3) (step3 dense 32768 1 1 br3 lam3) = 28 ∧
+    bindsW3 dense 32768 1 4 br3 lam3 = true ∧ pct (W3 dense 1 4 br3) (step3 dense 32768 1 4 br3 lam3) = 792 ∧ pct (A3 dense 32768 1 4 br3) (step3 dense 32768 1 4 br3 lam3) = 153 ∧
+    pctH (X3 dense 1 4 lam3) (step3 dense 32768 1 4 br3 lam3) = 1 ∧
+    bindsW3 dense 32768 16 1 br3 lam3 = true ∧ pct (W3 dense 16 1 br3) (step3 dense 32768 16 1 br3 lam3) = 572 ∧ pct (A3 dense 32768 16 1 br3) (step3 dense 32768 16 1 br3 lam3) = 405 ∧
+    pctH (X3 dense 16 1 lam3) (step3 dense 32768 16 1 br3 lam3) = 2 := by decide
+theorem T3r_regime_dense_128k :
+    bindsW3 dense 131072 1 1 br3 lam3 = true ∧ pct (W3 dense 1 1 br3) (step3 dense 131072 1 1 br3 lam3) = 824 ∧ pct (A3 dense 131072 1 1 br3) (step3 dense 131072 1 1 br3 lam3) = 143 ∧
+    pctH (X3 dense 1 1 lam3) (step3 dense 131072 1 1 br3 lam3) = 1 ∧
+    pct (Q3 dense 1 1 br3) (step3 dense 131072 1 1 br3 lam3) = 8 ∧ pct (Ln3 dense 1 1 br3) (step3 dense 131072 1 1 br3 lam3) = 25 ∧
+    bindsW3 dense 131072 1 4 br3 lam3 = true ∧ pct (W3 dense 1 4 br3) (step3 dense 131072 1 4 br3 lam3) = 545 ∧ pct (A3 dense 131072 1 4 br3) (step3 dense 131072 1 4 br3 lam3) = 417 ∧
+    pctH (X3 dense 1 4 lam3) (step3 dense 131072 1 4 br3 lam3) = 1 ∧
+    ¬ feasible dense 131072 16 false oRt ∧ pct (A3 dense 131072 16 1 br3) (step3 dense 131072 16 1 br3 lam3) = 728 := by decide
+theorem T3r_regime_dense_1M :
+    ¬ feasible dense 1048576 1 false oRt ∧ pct (A3 dense 1048576 1 1 br3) (step3 dense 1048576 1 1 br3 lam3) = 571 ∧
+    ¬ feasible dense 1048576 1 false oRt ∧ pct (A3 dense 1048576 1 4 br3) (step3 dense 1048576 1 4 br3 lam3) = 851 ∧
+    ¬ feasible dense 1048576 16 false oRt ∧ pct (A3 dense 1048576 16 1 br3) (step3 dense 1048576 16 1 br3 lam3) = 955 ∧
+    bindsA3 dense 1048576 1 1 br3I8 lam3 = true ∧ pct (A3 dense 1048576 1 1 br3I8) (step3 dense 1048576 1 1 br3I8 lam3) = 499 ∧ kv3 1048576 16 g256 true < vecT3 1048576 16 .rowmax .T ∧
+    bindsA3 dense 1048576 1 4 br3I8 lam3 = true ∧ pct (A3 dense 1048576 1 4 br3I8) (step3 dense 1048576 1 4 br3I8 lam3) = 851 ∧
+    bindsW3 dense 1048576 1 1 br3I8Lazy lam3 = true := by decide
+theorem T3r_regime_moe_4k :
+    bindsW3 moe 4096 1 1 br3 lam3 = true ∧ pct (W3 moe 1 1 br3) (step3 moe 4096 1 1 br3 lam3) = 778 ∧ pct (A3 moe 4096 1 1 br3) (step3 moe 4096 1 1 br3 lam3) = 28 ∧
+    pctH (X3 moe 1 1 lam3) (step3 moe 4096 1 1 br3 lam3) = 18 ∧
+    pct (Q3 moe 1 1 br3) (step3 moe 4096 1 1 br3 lam3) = 41 ∧ pct (Ln3 moe 1 1 br3) (step3 moe 4096 1 1 br3 lam3) = 151 ∧
+    bindsW3 moe 4096 1 4 br3 lam3 = true ∧ pct (W3 moe 1 4 br3) (step3 moe 4096 1 4 br3 lam3) = 786 ∧ pct (A3 moe 4096 1 4 br3) (step3 moe 4096 1 4 br3 lam3) = 8 ∧
+    pctH (X3 moe 1 4 lam3) (step3 moe 4096 1 4 br3 lam3) = 7 ∧
+    bindsW3 moe 4096 16 1 br3 lam3 = true ∧ pct (W3 moe 16 1 br3) (step3 moe 4096 16 1 br3 lam3) = 946 ∧ pct (A3 moe 4096 16 1 br3) (step3 moe 4096 16 1 br3 lam3) = 38 ∧
+    pctH (X3 moe 16 1 lam3) (step3 moe 4096 16 1 br3 lam3) = 4 := by decide
+theorem T3r_regime_moe_32k :
+    bindsW3 moe 32768 1 1 br3 lam3 = true ∧ pct (W3 moe 1 1 br3) (step3 moe 32768 1 1 br3 lam3) = 669 ∧ pct (A3 moe 32768 1 1 br3) (step3 moe 32768 1 1 br3 lam3) = 164 ∧
+    pctH (X3 moe 1 1 lam3) (step3 moe 32768 1 1 br3 lam3) = 16 ∧
+    pct (Q3 moe 1 1 br3) (step3 moe 32768 1 1 br3 lam3) = 35 ∧ pct (Ln3 moe 1 1 br3) (step3 moe 32768 1 1 br3 lam3) = 130 ∧
+    bindsW3 moe 32768 1 4 br3 lam3 = true ∧ pct (W3 moe 1 4 br3) (step3 moe 32768 1 4 br3 lam3) = 752 ∧ pct (A3 moe 32768 1 4 br3) (step3 moe 32768 1 4 br3 lam3) = 50 ∧
+    pctH (X3 moe 1 4 lam3) (step3 moe 32768 1 4 br3 lam3) = 6 ∧
+    bindsW3 moe 32768 16 1 br3 lam3 = true ∧ pct (W3 moe 16 1 br3) (step3 moe 32768 16 1 br3 lam3) = 775 ∧ pct (A3 moe 32768 16 1 br3) (step3 moe 32768 16 1 br3 lam3) = 212 ∧
+    pctH (X3 moe 16 1 lam3) (step3 moe 32768 16 1 br3 lam3) = 3 := by decide
+theorem T3r_regime_moe_128k :
+    bindsW3 moe 131072 1 1 br3 lam3 = true ∧ pct (W3 moe 1 1 br3) (step3 moe 131072 1 1 br3 lam3) = 452 ∧ pct (A3 moe 131072 1 1 br3) (step3 moe 131072 1 1 br3 lam3) = 435 ∧
+    pctH (X3 moe 1 1 lam3) (step3 moe 131072 1 1 br3 lam3) = 11 ∧
+    pct (Q3 moe 1 1 br3) (step3 moe 131072 1 1 br3 lam3) = 24 ∧ pct (Ln3 moe 1 1 br3) (step3 moe 131072 1 1 br3 lam3) = 88 ∧
+    bindsW3 moe 131072 1 4 br3 lam3 = true ∧ pct (W3 moe 1 4 br3) (step3 moe 131072 1 4 br3 lam3) = 656 ∧ pct (A3 moe 131072 1 4 br3) (step3 moe 131072 1 4 br3 lam3) = 172 ∧
+    pctH (X3 moe 1 4 lam3) (step3 moe 131072 1 4 br3 lam3) = 6 ∧
+    ¬ feasible moe 131072 16 false oRt ∧ pct (A3 moe 131072 16 1 br3) (step3 moe 131072 16 1 br3 lam3) = 513 := by decide
+theorem T3r_regime_moe_1M :
+    bindsA3 moe 1048576 1 1 br3 lam3 = true ∧ pct (A3 moe 1048576 1 1 br3) (step3 moe 1048576 1 1 br3 lam3) = 860 ∧
+    pctH (X3 moe 1 1 lam3) (step3 moe 1048576 1 1 br3 lam3) = 3 ∧
+    pct (Q3 moe 1 1 br3) (step3 moe 1048576 1 1 br3 lam3) = 6 ∧ pct (Ln3 moe 1 1 br3) (step3 moe 1048576 1 1 br3 lam3) = 22 ∧
+    bindsA3 moe 1048576 1 4 br3 lam3 = true ∧ pct (A3 moe 1048576 1 4 br3) (step3 moe 1048576 1 4 br3 lam3) = 623 ∧
+    pctH (X3 moe 1 4 lam3) (step3 moe 1048576 1 4 br3 lam3) = 3 ∧
+    ¬ feasible moe 1048576 16 false oRt ∧ pct (A3 moe 1048576 16 1 br3) (step3 moe 1048576 16 1 br3 lam3) = 894 ∧
+    vecT3 1048576 4 .rowmax .T < kv3 1048576 4 g256 false := by decide
+/-- the bounce share over the whole 24-cell map: at most 0.18 % (MoE 4k t = 1), 0.16 % at MoE 32k; dense ≤ 0.03 % -/
+theorem T3r_bounce_share_max : pctH (X3 moe 1 1 lam3) (step3 moe 4096 1 1 br3 lam3) = 18 ∧ pctH (X3 moe 1 1 lam3) (step3 moe 32768 1 1 br3 lam3) = 16 ∧
+    pctH (X3 dense 16 1 lam3) (step3 dense 4096 16 1 br3 lam3) = 3 ∧ 16 < 18 := by decide
+/-! ### R12 (`[R3-Lkv-*]`): the KV crossover on the block model as an iff over EVERY L.
+    CORRECTION (prover-forced): fleet.py's `Lstar_kv3` claims "smallest L … exact over every L" and checks only L* and L* − 16. The
+    t = 1 attention is nb(L)·blk + fixed + tail(L mod 16) with a vector tail of up to 3 896 ns (15 tokens), so it is NOT monotone in
+    L: in 13 of the 40 cells some lengths in the block just below L* are already attention-bound (every L ≡ τ…15 mod 16 in
+    [L* − 512, L* − 1]). L* is the length from which EVERY longer context is attention-bound; the first attention-bound length is
+    L* − 512 + τ. Design-relevant: MoE anchored at 256 KiB is first attention-bound at 131 103 (τ = 15; L* = 131 600) — 128k = 131 072
+    stays weights-bound (tail 0); dense KV-int8 at 1 006 102 (τ = 6; L* = 1 006 608). Every design cell (L a multiple of 16) is unchanged. -/
+theorem T3r_nb1 (L : Nat) : nblocks L 1 = (16 * (L / 16) + 511) / 512 := by
+  unfold nblocks lMatrix ceilDiv
+  rw [show blockOf 1 = 512 from rfl]
+  omega
+theorem T3r_tail1 (L : Nat) : tailOps L 1 * unitF32 .T * 10 / (rVecCore * 100) = (L % 16) * 8192 * 137 * 10 / 43200 := by
+  unfold tailOps rVecCore; rw [show unitF32 .T = 137 from rfl]; omega
+theorem T3r_Lstar_dense_p256k_anchor_rowmax (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g256 .rowmax .T false ↔ 753168 ≤ L := by
+  rw [T3r_attn_mt1 L 16 g256 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_p256k_anchor_lazy (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g256 .lazy .T false ↔ (753680 ≤ L ∨ (753168 ≤ L ∧ 7 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 g256 .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_p256k_anchor_rowmax_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g256 .rowmax .T true ↔ (1006608 ≤ L ∨ (1006096 ≤ L ∧ 6 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 g256 .rowmax .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_p256k_anchor_lazy_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g256 .lazy .T true ↔ (1507344 ≤ L ∨ (1506832 ≤ L ∧ 7 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 g256 .lazy .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf64k_anchor_rowmax (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf64 .rowmax .T false ↔ 743440 ≤ L := by
+  rw [T3r_attn_mt1 L 16 gShuf64 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf64k_anchor_lazy (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf64 .lazy .T false ↔ (743952 ≤ L ∨ (743440 ≤ L ∧ 2 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gShuf64 .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf64k_anchor_rowmax_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf64 .rowmax .T true ↔ (1006608 ≤ L ∨ (1006096 ≤ L ∧ 6 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gShuf64 .rowmax .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf64k_anchor_lazy_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf64 .lazy .T true ↔ (1487888 ≤ L ∨ (1487376 ≤ L ∧ 2 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gShuf64 .lazy .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf16k_anchor_rowmax (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf16 .rowmax .T false ↔ 684560 ≤ L := by
+  rw [T3r_attn_mt1 L 16 gShuf16 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf16k_anchor_lazy (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf16 .lazy .T false ↔ (685072 ≤ L ∨ (684560 ≤ L ∧ 8 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gShuf16 .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf16k_anchor_rowmax_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf16 .rowmax .T true ↔ (1006608 ≤ L ∨ (1006096 ≤ L ∧ 6 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gShuf16 .rowmax .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_shuf16k_anchor_lazy_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gShuf16 .lazy .T true ↔ (1370128 ≤ L ∨ (1369616 ≤ L ∧ 8 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gShuf16 .lazy .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_stream174_anchor_rowmax (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gStream .rowmax .T false ↔ 777232 ≤ L := by
+  rw [T3r_attn_mt1 L 16 gStream .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_stream174_anchor_lazy (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gStream .lazy .T false ↔ (777744 ≤ L ∨ (777232 ≤ L ∧ 4 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gStream .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_stream174_anchor_rowmax_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gStream .rowmax .T true ↔ (1006608 ≤ L ∨ (1006096 ≤ L ∧ 6 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gStream .rowmax .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_stream174_anchor_lazy_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 gStream .lazy .T true ↔ (1555472 ≤ L ∨ (1554960 ≤ L ∧ 4 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 16 gStream .lazy .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_gather3x_anchor_rowmax (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g3x .rowmax .T false ↔ 259088 ≤ L := by
+  rw [T3r_attn_mt1 L 16 g3x .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_gather3x_anchor_lazy (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g3x .lazy .T false ↔ 259088 ≤ L := by
+  rw [T3r_attn_mt1 L 16 g3x .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_gather3x_anchor_rowmax_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g3x .rowmax .T true ↔ 518160 ≤ L := by
+  rw [T3r_attn_mt1 L 16 g3x .rowmax .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_dense_gather3x_anchor_lazy_i8 (L : Nat) : tw3 dense .anchor ≤ attn3 L 16 g3x .lazy .T true ↔ 518160 ≤ L := by
+  rw [T3r_attn_mt1 L 16 g3x .lazy .T true (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 dense .anchor = 18256993 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if true = true then 2 else 1) = 2 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_p256k_anchor_rowmax (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 g256 .rowmax .T false ↔ (131600 ≤ L ∨ (131088 ≤ L ∧ 15 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 4 g256 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_p256k_directser_rowmax (L : Nat) : tw3 moe .directSer ≤ attn3 L 4 g256 .rowmax .T false ↔ 108048 ≤ L := by
+  rw [T3r_attn_mt1 L 4 g256 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .directSer = 2641199 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_p256k_pp_rowmax (L : Nat) : tw3 moe .pp ≤ attn3 L 4 g256 .rowmax .T false ↔ (106000 ≤ L ∨ (105488 ≤ L ∧ 1 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 4 g256 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .pp = 2584583 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_p256k_anchor_lazy (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 g256 .lazy .T false ↔ 131600 ≤ L := by
+  rw [T3r_attn_mt1 L 4 g256 .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock g256 1 = 12394 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf64k_anchor_rowmax (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 gShuf64 .rowmax .T false ↔ 129552 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf64 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf64k_directser_rowmax (L : Nat) : tw3 moe .directSer ≤ attn3 L 4 gShuf64 .rowmax .T false ↔ 106512 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf64 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .directSer = 2641199 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf64k_pp_rowmax (L : Nat) : tw3 moe .pp ≤ attn3 L 4 gShuf64 .rowmax .T false ↔ 104464 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf64 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .pp = 2584583 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf64k_anchor_lazy (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 gShuf64 .lazy .T false ↔ 130064 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf64 .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock gShuf64 1 = 12557 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf16k_anchor_rowmax (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 gShuf16 .rowmax .T false ↔ 119312 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf16 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf16k_directser_rowmax (L : Nat) : tw3 moe .directSer ≤ attn3 L 4 gShuf16 .rowmax .T false ↔ 98320 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf16 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .directSer = 2641199 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf16k_pp_rowmax (L : Nat) : tw3 moe .pp ≤ attn3 L 4 gShuf16 .rowmax .T false ↔ (96272 ≤ L ∨ (95760 ≤ L ∧ 10 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 4 gShuf16 .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .pp = 2584583 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_shuf16k_anchor_lazy (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 gShuf16 .lazy .T false ↔ 119824 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gShuf16 .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock gShuf16 1 = 13635 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_stream174_anchor_rowmax (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 gStream .rowmax .T false ↔ 135696 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gStream .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_stream174_directser_rowmax (L : Nat) : tw3 moe .directSer ≤ attn3 L 4 gStream .rowmax .T false ↔ 111632 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gStream .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .directSer = 2641199 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_stream174_pp_rowmax (L : Nat) : tw3 moe .pp ≤ attn3 L 4 gStream .rowmax .T false ↔ 109072 ≤ L := by
+  rw [T3r_attn_mt1 L 4 gStream .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .pp = 2584583 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_stream174_anchor_lazy (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 gStream .lazy .T false ↔ (136208 ≤ L ∨ (135696 ≤ L ∧ 6 ≤ L % 16)) := by
+  rw [T3r_attn_mt1 L 4 gStream .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock gStream 1 = 12011 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_gather3x_anchor_rowmax (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 g3x .rowmax .T false ↔ 45072 ≤ L := by
+  rw [T3r_attn_mt1 L 4 g3x .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_gather3x_directser_rowmax (L : Nat) : tw3 moe .directSer ≤ attn3 L 4 g3x .rowmax .T false ↔ 36880 ≤ L := by
+  rw [T3r_attn_mt1 L 4 g3x .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .directSer = 2641199 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_gather3x_pp_rowmax (L : Nat) : tw3 moe .pp ≤ attn3 L 4 g3x .rowmax .T false ↔ 36368 ≤ L := by
+  rw [T3r_attn_mt1 L 4 g3x .rowmax .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .pp = 2584583 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+theorem T3r_Lstar_moe_gather3x_anchor_lazy (L : Nat) : tw3 moe .anchor ≤ attn3 L 4 g3x .lazy .T false ↔ 45072 ≤ L := by
+  rw [T3r_attn_mt1 L 4 g3x .lazy .T false (by decide) (by decide), T3r_nb1, T3r_tail1]
+  have h : tw3 moe .anchor = 3207719 ∧ ddrBlock g3x 1 = 36033 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2]
+  constructor <;> intro h <;> omega
+/-- the design-relevant L* cells of §4.3 / T5′ (the cells at L = 4k … 1M are unchanged by the correction) -/
+theorem T3r_Lstar_kv : tw3 dense .anchor = 18256993 ∧ tw3 moe .anchor = 3207719 ∧ tw3 moe .directSer = 2641199 ∧ tw3 moe .pp = 2584583 ∧
+    attn3 753168 16 g256 .rowmax .T false = 18262788 ∧ attn3 753152 16 g256 .rowmax .T false = 18250394 ∧
+    attn3 131600 4 g256 .rowmax .T false = 3216472 ∧ attn3 131599 4 g256 .rowmax .T false = 3207974 ∧ attn3 131598 4 g256 .rowmax .T false = 3207715 ∧
+    attn3 131103 4 g256 .rowmax .T false = 3207974 ∧ attn3 131072 4 g256 .rowmax .T false = 3191684 ∧
+    attn3 1006608 16 g256 .rowmax .T true = 18264712 ∧ attn3 1006102 16 g256 .rowmax .T true = 18256994 ∧ attn3 1006101 16 g256 .rowmax .T true < 18256993 ∧
+    131600 - 131072 = 528 ∧ 131103 - 131072 = 31 ∧ 131072 - 129552 = 1520 ∧ 1048576 - 1006608 = 41968 := by decide
+
+/-! ### R13 (`[R3-Gstar-*]`): attention-bound iff G ≤ G* — over EVERY G > 0 (not only G ≤ 174.6): for G above ⌊20 971 520 / 9 276⌋ = 2 260
+    the block is vector-bound, so the iff needs the per-block chain (9 276 ns) below the line ⌈(T_w − 18 820) / nb⌉.
+    CORRECTION (prover-forced, as PROMPT-4P2 anticipated): at 1M the vector chain alone exceeds the weight time (2 048 · 9 276 + 18 820 =
+    19 016 068 ≥ 18 256 993 dense, ≥ 3 207 719 / 2 641 199 / 2 584 583 MoE), so the printed "iff G ≤ 235.4 / 1 346.0 / 1 637.1 / 1 673.7"
+    lines are false above them: the 1M cells are attention-bound at EVERY G (T3r_fleet_G_1M_everyG). -/
+theorem T3r_attn_G_form (L rows G : Nat) (hr1 : 1 ≤ rows) (hr2 : rows ≤ 16) :
+    attn3 L rows G .rowmax .T false = max (max (max (nblocks L 1 * (20971520 / G)) (nblocks L 1 * 9276)) (nblocks L 1 * 960)) (nblocks L 1 * 618)
+      + (18820 + tailOps L 1 * unitF32 .T * 10 / (rVecCore * 100)) := by
+  rw [T3r_attn_mt1 L rows G .rowmax .T false hr1 hr2]
+  have hbl : blockOf 1 = 512 := by decide
+  have hddr : ddrBlock G 1 = 20971520 / G := by unfold ddrBlock tn coreTok; rw [hbl]
+  have h : vblk3 1 .rowmax .T = 9276 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧ drainBlock 1 (rDrainM 1) = 268 ∧
+      (if false = true then 2 else 1) = 1 := by decide
+  rw [hddr, h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2, Nat.div_one]
+theorem T3r_fleet_G_dense_4k_anchor (G : Nat) (h1 : 0 < G) : tw3 dense .anchor ≤ attn3 4096 16 G .rowmax .T false ↔ G ≤ 9 := by
+  rw [T3r_attn_G_form 4096 16 G (by decide) (by decide)]
+  have h : tw3 dense .anchor = 18256993 ∧ nblocks 4096 1 = 8 ∧ tailOps 4096 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 2279772 ≤ 20971520 / G ↔ G ≤ 9 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_dense_32k_anchor (G : Nat) (h1 : 0 < G) : tw3 dense .anchor ≤ attn3 32768 16 G .rowmax .T false ↔ G ≤ 73 := by
+  rw [T3r_attn_G_form 32768 16 G (by decide) (by decide)]
+  have h : tw3 dense .anchor = 18256993 ∧ nblocks 32768 1 = 64 ∧ tailOps 32768 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 284972 ≤ 20971520 / G ↔ G ≤ 73 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_dense_128k_anchor (G : Nat) (h1 : 0 < G) : tw3 dense .anchor ≤ attn3 131072 16 G .rowmax .T false ↔ G ≤ 294 := by
+  rw [T3r_attn_G_form 131072 16 G (by decide) (by decide)]
+  have h : tw3 dense .anchor = 18256993 ∧ nblocks 131072 1 = 256 ∧ tailOps 131072 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 71243 ≤ 20971520 / G ↔ G ≤ 294 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_4k_anchor (G : Nat) (h1 : 0 < G) : tw3 moe .anchor ≤ attn3 4096 4 G .rowmax .T false ↔ G ≤ 52 := by
+  rw [T3r_attn_G_form 4096 4 G (by decide) (by decide)]
+  have h : tw3 moe .anchor = 3207719 ∧ nblocks 4096 1 = 8 ∧ tailOps 4096 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 398613 ≤ 20971520 / G ↔ G ≤ 52 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_4k_directser (G : Nat) (h1 : 0 < G) : tw3 moe .directSer ≤ attn3 4096 4 G .rowmax .T false ↔ G ≤ 63 := by
+  rw [T3r_attn_G_form 4096 4 G (by decide) (by decide)]
+  have h : tw3 moe .directSer = 2641199 ∧ nblocks 4096 1 = 8 ∧ tailOps 4096 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 327798 ≤ 20971520 / G ↔ G ≤ 63 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_4k_pp (G : Nat) (h1 : 0 < G) : tw3 moe .pp ≤ attn3 4096 4 G .rowmax .T false ↔ G ≤ 65 := by
+  rw [T3r_attn_G_form 4096 4 G (by decide) (by decide)]
+  have h : tw3 moe .pp = 2584583 ∧ nblocks 4096 1 = 8 ∧ tailOps 4096 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 320721 ≤ 20971520 / G ↔ G ≤ 65 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_32k_anchor (G : Nat) (h1 : 0 < G) : tw3 moe .anchor ≤ attn3 32768 4 G .rowmax .T false ↔ G ≤ 420 := by
+  rw [T3r_attn_G_form 32768 4 G (by decide) (by decide)]
+  have h : tw3 moe .anchor = 3207719 ∧ nblocks 32768 1 = 64 ∧ tailOps 32768 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 49827 ≤ 20971520 / G ↔ G ≤ 420 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_32k_directser (G : Nat) (h1 : 0 < G) : tw3 moe .directSer ≤ attn3 32768 4 G .rowmax .T false ↔ G ≤ 511 := by
+  rw [T3r_attn_G_form 32768 4 G (by decide) (by decide)]
+  have h : tw3 moe .directSer = 2641199 ∧ nblocks 32768 1 = 64 ∧ tailOps 32768 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 40975 ≤ 20971520 / G ↔ G ≤ 511 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_32k_pp (G : Nat) (h1 : 0 < G) : tw3 moe .pp ≤ attn3 32768 4 G .rowmax .T false ↔ G ≤ 523 := by
+  rw [T3r_attn_G_form 32768 4 G (by decide) (by decide)]
+  have h : tw3 moe .pp = 2584583 ∧ nblocks 32768 1 = 64 ∧ tailOps 32768 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 40091 ≤ 20971520 / G ↔ G ≤ 523 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_128k_anchor (G : Nat) (h1 : 0 < G) : tw3 moe .anchor ≤ attn3 131072 4 G .rowmax .T false ↔ G ≤ 1683 := by
+  rw [T3r_attn_G_form 131072 4 G (by decide) (by decide)]
+  have h : tw3 moe .anchor = 3207719 ∧ nblocks 131072 1 = 256 ∧ tailOps 131072 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 12457 ≤ 20971520 / G ↔ G ≤ 1683 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_128k_directser (G : Nat) (h1 : 0 < G) : tw3 moe .directSer ≤ attn3 131072 4 G .rowmax .T false ↔ G ≤ 2047 := by
+  rw [T3r_attn_G_form 131072 4 G (by decide) (by decide)]
+  have h : tw3 moe .directSer = 2641199 ∧ nblocks 131072 1 = 256 ∧ tailOps 131072 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 10244 ≤ 20971520 / G ↔ G ≤ 2047 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T3r_fleet_G_moe_128k_pp (G : Nat) (h1 : 0 < G) : tw3 moe .pp ≤ attn3 131072 4 G .rowmax .T false ↔ G ≤ 2092 := by
+  rw [T3r_attn_G_form 131072 4 G (by decide) (by decide)]
+  have h : tw3 moe .pp = 2584583 ∧ nblocks 131072 1 = 256 ∧ tailOps 131072 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2]
+  have key : 10023 ≤ 20971520 / G ↔ G ≤ 2092 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+/-- CORRECTED STATEMENT: at 1M every fleet cell is attention-bound at EVERY G (no hypothesis on G at all) — the vector chain alone
+    (2 048 blocks × 9 276 ns + 18 820) exceeds the dense, anchored, direct-path and ping-pong weight times -/
+theorem T3r_fleet_G_1M_everyG (G : Nat) :
+    tw3 dense .anchor ≤ attn3 1048576 16 G .rowmax .T false ∧ tw3 moe .anchor ≤ attn3 1048576 4 G .rowmax .T false ∧
+    tw3 moe .directSer ≤ attn3 1048576 4 G .rowmax .T false ∧ tw3 moe .pp ≤ attn3 1048576 4 G .rowmax .T false := by
+  rw [T3r_attn_G_form 1048576 16 G (by decide) (by decide), T3r_attn_G_form 1048576 4 G (by decide) (by decide)]
+  have h : tw3 dense .anchor = 18256993 ∧ tw3 moe .anchor = 3207719 ∧ tw3 moe .directSer = 2641199 ∧ tw3 moe .pp = 2584583 ∧
+      nblocks 1048576 1 = 2048 ∧ tailOps 1048576 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2]
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> omega
+/-- …and the printed iff lines are FALSE as iffs over G > 0: at G one tenth above each printed G* the cell is still attention-bound -/
+theorem T3r_fleet_G_1M_iff_false :
+    tw3 dense .anchor ≤ attn3 1048576 16 2355 .rowmax .T false ∧ tw3 moe .anchor ≤ attn3 1048576 4 13461 .rowmax .T false ∧
+    tw3 moe .directSer ≤ attn3 1048576 4 16372 .rowmax .T false ∧ tw3 moe .pp ≤ attn3 1048576 4 16738 .rowmax .T false ∧
+    20971520 / 8906 = 2354 ∧ 20971520 / 1558 = 13460 ∧ 20971520 / 1281 = 16371 ∧ 20971520 / 1253 = 16737 ∧
+    2048 * 9276 + 18820 = 19016068 := by decide
+/-- the fixed-shift chain (E35, LICENSED) keeps a real G-line at dense 1M: 2 048 · 5 530 + 11 328 = 11 336 768 < 18 256 993 —
+    attention-bound iff G ≤ 235.3 (every G ≤ 174.6, as before) -/
+theorem T3r_fleet_G_dense_1M_lazy (G : Nat) (h1 : 0 < G) : tw3 dense .anchor ≤ attn3 1048576 16 G .lazy .T false ↔ G ≤ 2353 := by
+  rw [T3r_attn_mt1 1048576 16 G .lazy .T false (by decide) (by decide)]
+  have hbl : blockOf 1 = 512 := by decide
+  have hddr : ddrBlock G 1 = 20971520 / G := by unfold ddrBlock tn coreTok; rw [hbl]
+  have h : tw3 dense .anchor = 18256993 ∧ nblocks 1048576 1 = 2048 ∧ vblk3 1 .lazy .T = 5530 ∧ mmaBlock 1 = 960 ∧ loaderBlock 1 = 618 ∧
+      drainBlock 1 (rDrainM 1) = 268 ∧ (if false = true then 2 else 1) = 1 ∧ tailOps 1048576 1 * unitF32 .T * 10 / (rVecCore * 100) = 0 := by decide
+  rw [hddr, h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2.1, Nat.div_one, h.2.2.2.2.2.2.2]
+  have key : 8910 ≤ 20971520 / G ↔ G ≤ 2353 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+/-- the MoE-128k cells of R13 (per layer, t = 1): anchored W by 16 µs (0.5 %) at 256 KiB, ATTN by 25.7 µs (0.8 %) at 64 KiB, by 301.7 µs
+    (9.4 %) at 16 KiB; direct path ATTN at every page size (550.5 µs = 20.8 % at 256 KiB) -/
+theorem T3r_moe_128k_cells :
+    tw3 moe .anchor - attn3 131072 4 g256 .rowmax .T false = 16035 ∧ pct 16035 (tw3 moe .anchor) = 5 ∧
+    attn3 131072 4 gShuf64 .rowmax .T false - tw3 moe .anchor = 25693 ∧ pct 25693 (tw3 moe .anchor) = 8 ∧
+    attn3 131072 4 gShuf16 .rowmax .T false - tw3 moe .anchor = 301661 ∧ pct 301661 (tw3 moe .anchor) = 94 ∧
+    tw3 moe .anchor - attn3 131072 4 gSeq64 .rowmax .T false = 12195 ∧ tw3 moe .anchor - attn3 131072 4 gStream .rowmax .T false = 114083 ∧
+    attn3 131072 4 g256 .rowmax .T false - tw3 moe .directSer = 550485 ∧ pct 550485 (tw3 moe .directSer) = 208 ∧
+    attn3 131072 4 gStream .rowmax .T false - tw3 moe .directSer = 452437 ∧ pct 452437 (tw3 moe .directSer) = 171 ∧
+    usR 16035 = 16 ∧ usR 25693 = 26 ∧ usR 301661 = 302 ∧ usR 550485 = 550 := by decide
+
+/-! ### R14 (`[R3-tstar-*]`): the softmax crossover — per block, vector ≥ KV from rows* = 16·mt* (L cancels), as an iff over every t ≤ 16 -/
+def vecGeKv (g t : Nat) (v : Var) (c : Conv) (i8 : Bool) : Bool :=
+  decide (ddrBlock g256 (mtPass (t * g)) / (if i8 then 2 else 1) ≤ vblk3 (mtPass (t * g)) v c)
+theorem T3r_tstar_dense_rowmaxT :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .rowmax .T false = true ↔ 2 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .rowmax .T true = true ↔ 1 ≤ t)) := by decide
+theorem T3r_tstar_dense_rowmaxC :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .rowmax .C false = true ↔ 2 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .rowmax .C true = true ↔ 1 ≤ t)) := by decide
+theorem T3r_tstar_dense_lazyT :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .lazy .T false = true ↔ 3 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .lazy .T true = true ↔ 2 ≤ t)) := by decide
+theorem T3r_tstar_dense_lazyC :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .lazy .C false = true ↔ 2 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 16 t .lazy .C true = true ↔ 1 ≤ t)) := by decide
+theorem T3r_tstar_moe_rowmaxT :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .rowmax .T false = true ↔ 5 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .rowmax .T true = true ↔ 1 ≤ t)) := by decide
+theorem T3r_tstar_moe_rowmaxC :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .rowmax .C false = true ↔ 5 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .rowmax .C true = true ↔ 1 ≤ t)) := by decide
+theorem T3r_tstar_moe_lazyT :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .lazy .T false = true ↔ 9 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .lazy .T true = true ↔ 5 ≤ t)) := by decide
+theorem T3r_tstar_moe_lazyC :
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .lazy .C false = true ↔ 5 ≤ t)) ∧
+    (∀ t, t < 17 → 1 ≤ t → (vecGeKv 4 t .lazy .C true = true ↔ 1 ≤ t)) := by decide
+theorem T3r_tstar_cells : vblk3 1 .rowmax .T = 9276 ∧ vblk3 2 .rowmax .T = 18552 ∧ ddrBlock g256 2 = 12394 ∧ vblk3 2 .lazy .T = 11061 ∧
+    vblk3 3 .lazy .T = 9190 ∧ ddrBlock g256 3 = 6197 ∧ ddrBlock g256 1 / 2 = 6197 ∧ vblk3 1 .lazy .T = 5530 ∧ x10 9276 12394 = 7 := by decide
+
+/-! ### R15 (`[R3-whatif-*]`): P2P, tensor-split, Π = 8 — each a bound or a decomposition with its premise explicit -/
+/-- P2P at ANY rate: replacing the bounce by any cost x saves at most T_x (236 / 220 µs = 0.01 % / 0.16 %) -/
+theorem T3r_p2p_bound (x : Nat) :
+    step3 dense 32768 1 1 br3 lam3 - X3 dense 1 1 lam3 + x + X3 dense 1 1 lam3 = step3 dense 32768 1 1 br3 lam3 + x ∧
+    step3 moe 32768 1 1 br3 lam3 - X3 moe 1 1 lam3 + x + X3 moe 1 1 lam3 = step3 moe 32768 1 1 br3 lam3 + x ∧
+    X3 dense 1 1 lam3 = 236307 ∧ X3 moe 1 1 lam3 = 219567 ∧ usR 236307 = 236 ∧ usR 219567 = 220 := by
+  have h : X3 dense 1 1 lam3 ≤ step3 dense 32768 1 1 br3 lam3 ∧ X3 moe 1 1 lam3 ≤ step3 moe 32768 1 1 br3 lam3 ∧
+      X3 dense 1 1 lam3 = 236307 ∧ X3 moe 1 1 lam3 = 219567 ∧ usR 236307 = 236 ∧ usR 219567 = 220 := by decide
+  refine ⟨by omega, by omega, h.2.2.1, h.2.2.2.1, h.2.2.2.2.1, h.2.2.2.2.2⟩
+/-- tensor-split (the runtime faults on it — a what-if): 382.32 ms = W/8 + ATTN/8 + lm_head/8 + launches + quant + 2·n_L host
+    reductions of 34 µs (round 2: 191) → 0.653 (6.2×); MoE 39.24 → 6.369 (3.5×), reductions 27 µs (184); launch 17 % / 46 % of it -/
+theorem T3r_tsplit : stepTs3 dense 32768 1 1 br3 lam3 = 382328080 ∧ stepTs3 moe 32768 1 1 br3 lam3 = 39247436 ∧
+    dense.nL * gemmTs3 dense 1 .uniform .anchor = 273854880 ∧ dense.nL * (aSeq3 dense 32768 1 br3 / 8) = 12180480 ∧
+    tn dense.wHead (8 * rGemm) = 1504400 ∧ dense.nL * 2 * tReduce lam3 1 dense.d = 8110320 ∧
+    moe.nL * gemmTs3 moe 1 .uniform .anchor = 11618992 ∧ moe.nL * (aSeq3 moe 32768 1 br3 / 8) = 2842112 ∧
+    tn moe.wHead (8 * rGemm) = 376100 ∧ moe.nL * 2 * tReduce lam3 1 moe.d = 1497832 ∧
+    tReduce lam3 1 dense.d = 33793 ∧ usR 33793 = 34 ∧ usR (tReduce lamMid 1 dense.d) = 191 ∧
+    tReduce lam3 1 moe.d = 26747 ∧ usR 26747 = 27 ∧ usR (tReduce lamMid 1 moe.d) = 184 ∧
+    tpsCard 1000 382328080 = 653 ∧ tpsCard 1000 39247436 = 6369 ∧ x10 2387232989 382328080 = 62 ∧ x10 138693907 39247436 = 35 ∧
+    pct 65702000 382328080 = 172 ∧ pct 20976000 382328080 = 55 ∧ pct 18018000 39247436 = 459 ∧ pct 4894400 39247436 = 125 := by decide
+/-- Π = 8: the per-die blocks, Σ blocks + λ = T_step EXACTLY at the measured λ, the max block and the 7.7× / 7.1× cells -/
+theorem T3r_pipelining_blocks :
+    dieBlock3 dense 0 32768 1 1 br3 lam3 = 296861359 ∧ dieBlock3 dense 1 32768 1 1 br3 lam3 = 296874222 ∧
+    dieBlock3 dense 2 32768 1 1 br3 lam3 = 296875916 ∧ dieBlock3 dense 7 32768 1 1 br3 lam3 = 309109016 ∧
+    maxBlock3 dense 32768 br3 lam3 = 309109016 ∧
+    dieBlock3 moe 0 32768 1 1 br3 lam3 = 19338851 ∧ dieBlock3 moe 1 32768 1 1 br3 lam3 = 14519661 ∧
+    dieBlock3 moe 2 32768 1 1 br3 lam3 = 19351640 ∧ dieBlock3 moe 7 32768 1 1 br3 lam3 = 17728953 ∧
+    maxBlock3 moe 32768 br3 lam3 = 19351640 ∧
+    tpsFleet 1000 309109016 = 3235 ∧ tpsCard 1000 309109016 = 808 ∧ tpsFleet 1000 19351640 = 51675 ∧ tpsCard 1000 19351640 = 12918 ∧
+    x10 2387232989 309109016 = 77 ∧ x10 138693907 19351640 = 71 ∧
+    pct (8 * 309109016 - (2387232989 - lam3)) (8 * 309109016) = 35 ∧ pct (8 * 19351640 - (138693907 - lam3)) (8 * 19351640) = 104 := by
+  decide
+theorem T3r_pipelining_decomposition :
+    step3 dense 32768 1 1 br3 lam3 = sumBlocks3 dense 32768 br3 lam3 + lam3 ∧
+    step3 moe 32768 1 1 br3 lam3 = sumBlocks3 moe 32768 br3 lam3 + lam3 ∧
+    step3 dense 32768 1 1 br3 lam3 ≤ 8 * maxBlock3 dense 32768 br3 lam3 + lam3 ∧
+    step3 moe 32768 1 1 br3 lam3 ≤ 8 * maxBlock3 moe 32768 br3 lam3 + lam3 := by decide
+
+/-! ### R16 (`[R3-mega-*]`): the per-layer megakernel pays iff c_sync ≤ 109 903 ns (dense; a TIE there, strict iff ≤ 109 902) /
+    108 430 ns (MoE) — an iff over every c_sync (E31 measures it) -/
+theorem T3r_mega_form (c : Nat) :
+    step3 dense 32768 1 1 (br3Mega c) lam3 = 2334479549 + 480 * c ∧ step3 moe 32768 1 1 (br3Mega c) lam3 = 123513595 + 140 * c := by
+  have hd : W3 dense 1 1 (br3Mega c) = W3 dense 1 1 br3 ∧ A3 dense 32768 1 1 (br3Mega c) = A3 dense 32768 1 1 br3 ∧
+      Q3 dense 1 1 (br3Mega c) = Q3 dense 1 1 br3 ∧ D3 1 (br3Mega c) lam3 = 0 ∧
+      W3 moe 1 1 (br3Mega c) = W3 moe 1 1 br3 ∧ A3 moe 32768 1 1 (br3Mega c) = A3 moe 32768 1 1 br3 ∧
+      Q3 moe 1 1 (br3Mega c) = Q3 moe 1 1 br3 ∧ D3 1 (br3Mega c) lam3 = 0 :=
+    ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+  have hL : Ln3 dense 1 1 (br3Mega c) = 11102000 + 120 * (4 * c + 15388) ∧ Ln3 moe 1 1 (br3Mega c) = 2730000 + 28 * (5 * c + 3846) :=
+    ⟨rfl, rfl⟩
+  have hk : W3 dense 1 1 br3 + A3 dense 32768 1 1 br3 + Q3 dense 1 1 br3 + X3 dense 1 1 lam3 = 2321530989 ∧
+      W3 moe 1 1 br3 + A3 moe 32768 1 1 br3 + Q3 moe 1 1 br3 + X3 moe 1 1 lam3 = 120675907 := by decide
+  unfold step3
+  rw [hd.1, hd.2.1, hd.2.2.1, hd.2.2.2.1, hd.2.2.2.2.1, hd.2.2.2.2.2.1, hd.2.2.2.2.2.2.1, hL.1, hL.2]
+  omega
+theorem T3r_mega_threshold (c : Nat) :
+    (step3 dense 32768 1 1 (br3Mega c) lam3 ≤ step3 dense 32768 1 1 br3 lam3 ↔ c ≤ 109903) ∧
+    (step3 dense 32768 1 1 (br3Mega c) lam3 < step3 dense 32768 1 1 br3 lam3 ↔ c ≤ 109902) ∧
+    (step3 moe 32768 1 1 (br3Mega c) lam3 ≤ step3 moe 32768 1 1 br3 lam3 ↔ c ≤ 108430) ∧
+    (step3 moe 32768 1 1 (br3Mega c) lam3 < step3 moe 32768 1 1 br3 lam3 ↔ c ≤ 108430) := by
+  rw [(T3r_mega_form c).1, (T3r_mega_form c).2]
+  have h : step3 dense 32768 1 1 br3 lam3 = 2387232989 ∧ step3 moe 32768 1 1 br3 lam3 = 138693907 := by decide
+  rw [h.1, h.2]
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T3r_mega_cells : (dense.nlaunch - 1) * tLaunch = 455000 ∧ 2 * tn (redBytes 1 dense.d) rGemm = 15388 ∧ (455000 - 15388) / 4 = 109903 ∧
+    (moe.nlaunch - 1) * tLaunch = 546000 ∧ 2 * tn (redBytes 1 moe.d) rGemm = 3846 ∧ (546000 - 3846) / 5 = 108430 ∧
+    dense.nL * 455000 = 54600000 ∧ moe.nL * 546000 = 15288000 ∧ dense.nL * 15388 = 1846560 ∧ moe.nL * 3846 = 107688 ∧
+    dense.nL * syncs dense = 480 ∧ moe.nL * syncs moe = 140 ∧ usR 109903 = 110 ∧ usR 108430 = 108 ∧
+    tpsCard 1000 (step3 dense 32768 1 1 (br3Mega 2000) lam3) = 107 ∧ tpsCard 1000 (step3 dense 32768 1 1 (br3Mega 5000) lam3) = 106 ∧
+    tpsCard 1000 (step3 dense 32768 1 1 (br3Mega 20000) lam3) = 106 ∧
+    tpsCard 1000 (step3 moe 32768 1 1 (br3Mega 2000) lam3) = 2019 ∧ tpsCard 1000 (step3 moe 32768 1 1 (br3Mega 5000) lam3) = 2012 ∧
+    tpsCard 1000 (step3 moe 32768 1 1 (br3Mega 20000) lam3) = 1979 ∧
+    step3 moe 32768 1 1 { br3 with regime := .directSer, mega := some 5000 } lam3 = 108351035 ∧
+    tpsCard 1000 108351035 = 2307 ∧ pcsUp 2307 1802 = 280 ∧ pcsUp 2012 1802 = 116 ∧ pcsUp 2019 1802 = 120 ∧ pcsUp 1979 1802 = 98 ∧
+    pcsUp 107 104 = 28 ∧ pcsUp 106 104 = 19 := by decide
+
+/-! ### R21 (`[R3-draft]`): the draft token and the verify step on the measured constants -/
+theorem T3r_draft : tn draftW rGemm = 5727376 ∧ tn draftKv rGemm = 1153073 ∧ draftLaunch * tLaunch = 11011000 ∧
+    24 * qPasses * cQ = 4195200 ∧ tn (128256 * 4) d2h0 = 18792 ∧ 2 * lam3 = 24400 ∧
+    draft3Tok lam3 true .fixed none = 22129841 ∧ usR 22129841 = 22130 ∧
+    draft3 lam3 true .fixed none 3 = 66389523 ∧ ms2 66389523 = 6638 ∧ ms2 (draft3 lam3 false .fixed none 3) = 3335 ∧
+    ms2 (draft3 lam3 true .fixed (some 5000) 3) = 4134 ∧ ms2 (draft3 lam3 true .none none 3) = 5380 ∧
+    pct (draftLaunch * tLaunch) 22129841 = 498 ∧ pct 4195200 22129841 = 190 ∧
+    usR 5727376 = 5727 ∧ usR 1153073 = 1153 ∧ usR 4195200 = 4195 ∧ usR 18792 = 19 ∧ usR 24400 = 24 := by decide
+
+/-! ### R22 (`[R3-spec-dense-*]`): dense spec decode — a gain for every α ≥ 0.144 (chain as specified) / 0.064 (fixed-shift), both
+    directions; the cells and the best k -/
+theorem T3r_spec_dense : step3 dense 32768 1 4 br3 lam3 = 2783002808 ∧ step3 dense 32768 1 1 br3 lam3 = 2387232989 ∧
+    step3 dense 32768 1 4 br3Lazy lam3 = 2547505208 ∧ step3 dense 32768 1 1 br3Lazy lam3 = 2386333949 ∧
+    tau 500 3 = 1875 ∧ tau 700 3 = 2533 ∧ tau 900 3 = 3439 ∧ tau 700 7 = 3139 ∧ tau 900 7 = 5693 ∧
+    tpsCard (tau 500 3) 2783002808 = 168 ∧ tpsCard (tau 700 3) 2783002808 = 227 ∧ tpsCard (tau 900 3) 2783002808 = 308 ∧
+    gainM 500 2387232989 2783002808 = 1608 ∧ gainM 700 2387232989 2783002808 = 2172 ∧ gainM 900 2387232989 2783002808 = 2949 ∧
+    tpsCard (tau 500 3) 2547505208 = 184 ∧ tpsCard (tau 700 3) 2547505208 = 248 ∧ tpsCard (tau 900 3) 2547505208 = 337 ∧
+    gainM 500 2386333949 2547505208 = 1756 ∧ gainM 700 2386333949 2547505208 = 2372 ∧ gainM 900 2386333949 2547505208 = 3221 ∧
+    2783002808 * 10000 / 2387232989 = 11657 ∧ 2547505208 * 10000 / 2386333949 = 10675 ∧
+    stepSpec3 dense 32768 3 br3 lam3 = step3 dense 32768 1 4 br3 lam3 ∧
+    stepSpec3 dense 32768 7 br3 lam3 = 3291782626 ∧ tpsCard (tau 700 7) 3291782626 = 238 ∧ tpsCard (tau 900 7) 3291782626 = 432 ∧
+    stepSpec3 dense 32768 7 br3Lazy lam3 = 2824410466 ∧ tpsCard (tau 700 7) 2824410466 = 277 ∧ tpsCard (tau 900 7) 2824410466 = 503 ∧
+    pcsUp 238 227 = 48 ∧ passesOf (8 * 16) = 2 := by decide
+theorem T3r_spec_dense_breakeven : (∀ a, a < 1001 → (1000 * 2783002808 < tau a 3 * 2387232989 ↔ 144 ≤ a)) ∧
+    (∀ a, a < 1001 → (1000 * 2547505208 < tau a 3 * 2386333949 ↔ 64 ≤ a)) := by decide +kernel
+theorem T3r_spec_dense_best_k : (∀ k, k < 8 → 1 ≤ k → tpsCard (tau 700 k) (stepSpec3 dense 32768 k br3 lam3) ≤ 238) ∧
+    (∀ k, k < 8 → 1 ≤ k → tpsCard (tau 900 k) (stepSpec3 dense 32768 k br3 lam3) ≤ 432) ∧
+    (∀ k, k < 8 → 1 ≤ k → tpsCard (tau 500 k) (stepSpec3 dense 32768 k br3 lam3) ≤ 168) ∧
+    (∀ k, k < 8 → 1 ≤ k → tpsCard (tau 700 k) (stepSpec3 dense 32768 k br3Lazy lam3) ≤ 277) := by decide
+
+/-! ### R23 (`[R3-spec-moe-*]`): T_spec_moe_loss re-instantiated — the exact loss criterion τ(α,3)·T₁ < 1000·T₄ in BOTH directions
+    for every α, per routing family and expert kernel; the tokens/s consequence; the mechanism bound -/
+theorem T3r_spec_moe_steps : step3 moe 32768 1 1 br3 lam3 = 138693907 ∧ step3 moe 32768 1 4 br3 lam3 = 453082211 ∧
+    step3 moe 32768 1 4 (br3Fam .zipf10) lam3 = 380770559 ∧ step3 moe 32768 1 4 (br3Fam .zipf15) lam3 = 329119379 ∧
+    step3 moe 32768 1 1 (br3Reg .directSer) lam3 = 122831347 ∧ step3 moe 32768 1 4 (br3Reg .directSer) lam3 = 389631971 ∧
+    step3 moe 32768 1 4 (br3FamReg .zipf10 .directSer) lam3 = 331200059 ∧ step3 moe 32768 1 4 (br3FamReg .zipf15 .directSer) lam3 = 289462979 ∧
+    dOf .uniform 4 = 32 ∧ dOf .zipf10 4 = 25 ∧ dOf .zipf15 4 = 20 ∧
+    453082211 * 10000 / 138693907 = 32667 ∧ 380770559 * 10000 / 138693907 = 27454 ∧ 329119379 * 10000 / 138693907 = 23729 ∧
+    389631971 * 10000 / 122831347 = 31720 ∧ 331200059 * 10000 / 122831347 = 26963 ∧ 289462979 * 10000 / 122831347 = 23565 := by decide
+theorem T3r_spec_moe_loss_exact : ∀ a, a < 1001 →
+    ((tau a 3 * 138693907 < 1000 * 453082211 ↔ a ≤ 866) ∧ (tau a 3 * 138693907 < 1000 * 380770559 ↔ a ≤ 752) ∧
+     (tau a 3 * 138693907 < 1000 * 329119379 ↔ a ≤ 657) ∧ (tau a 3 * 122831347 < 1000 * 389631971 ↔ a ≤ 847) ∧
+     (tau a 3 * 122831347 < 1000 * 331200059 ↔ a ≤ 741) ∧ (tau a 3 * 122831347 < 1000 * 289462979 ↔ a ≤ 652)) := by decide +kernel
+/-- the tokens/s/card consequence at the uniform anchored cell: every α ≤ 0.866 is below t = 1's 1.802 (0.866 gives 1.800), every
+    α ≥ 0.867 above it (0.867 gives 1.803) -/
+theorem T3r_spec_moe_loss_tps : ∀ a, a < 1001 →
+    ((a ≤ 866 → tpsCard (tau a 3) 453082211 < 1802) ∧ (867 ≤ a → 1802 < tpsCard (tau a 3) 453082211)) := by decide +kernel
+theorem T3r_spec_moe_cells : tpsCard (tau 866 3) 453082211 = 1800 ∧ tpsCard (tau 867 3) 453082211 = 1803 ∧
+    tpsCard (tau 500 3) 453082211 = 1034 ∧ tpsCard (tau 700 3) 453082211 = 1397 ∧ tpsCard (tau 900 3) 453082211 = 1897 ∧
+    tpsCard 1000 138693907 = 1802 ∧ tpsCard 1000 122831347 = 2035 ∧
+    tpsCard (tau 700 3) 380770559 = 1663 ∧ tpsCard (tau 700 3) 329119379 = 1924 ∧
+    tpsCard (tau 700 3) 389631971 = 1625 ∧ tpsCard (tau 700 3) 331200059 = 1911 ∧ tpsCard (tau 700 3) 289462979 = 2187 ∧
+    tpsCard (tau 753 3) 380770559 = 1802 ∧ tpsCard (tau 658 3) 329119379 = 1803 ∧
+    stepSpec3 moe 32768 1 br3 lam3 = 243490007 ∧ tpsCard (tau 700 1) 243490007 = 1745 ∧ tpsCard (tau 500 1) 243490007 = 1540 ∧
+    tpsCard (tau 900 1) 243490007 = 1950 ∧
+    (∀ k, k < 8 → 1 ≤ k → tpsCard (tau 700 k) (stepSpec3 moe 32768 k br3 lam3) ≤ 1745) := by decide
+/-- the mechanism (before any draft cost): D(4) = 4·D(1) under uniform routing makes the t = 4 expert stream 4·E₁, E₁ = 82.64 ms
+    = 59.6 % of T₁; T₄ ≥ 4·E₁ + (T₁ − E₁) = 386.62 ms, so every τ < 2.787 is a loss (round 2: 2.852) -/
+theorem T3r_spec_moe_mechanism : dOf .uniform 4 = 4 * dOf .uniform 1 ∧
+    moe.nL * (gemm3 moe 1 .uniform .anchor false - tn moe.wStream rGemm - 2 * fMoe) = 82641888 ∧
+    W3 moe 1 4 br3 = W3 moe 1 1 br3 + 3 * 82641888 ∧ pct 82641888 138693907 = 596 ∧
+    3 * 82641888 + 138693907 = 386619571 ∧ 386619571 ≤ step3 moe 32768 1 4 br3 lam3 ∧
+    1000 + 3 * 82641888 * 1000 / 138693907 = 2787 ∧ ms2 82641888 = 8264 ∧ ms2 386619571 = 38661 := by decide
+
+/-! ### R24 (`[R3-rollout-*]`): 1 → 2 → 4 cards; the scaling identity holds exactly at the measured λ -/
+theorem T3r_rollout : prefix3 dense 2 4096 br3 lam3 = 572913661 ∧ prefix3 dense 2 32768 br3 lam3 = 593735581 ∧
+    prefix3 dense 2 131072 br3 lam3 = 665125021 ∧ prefix3 dense 4 4096 br3 lam3 = 1145841879 ∧
+    prefix3 dense 4 32768 br3 lam3 = 1187485719 ∧ prefix3 dense 4 131072 br3 lam3 = 1330264599 ∧
+    prefix3 dense 8 4096 br3 lam3 = 2303933109 ∧ prefix3 dense 8 32768 br3 lam3 = 2387220789 ∧ prefix3 dense 8 131072 br3 lam3 = 2672778549 ∧
+    prefix3 moe 2 4096 br3 lam3 = 29000064 ∧ prefix3 moe 2 32768 br3 lam3 = 33858512 ∧ prefix3 moe 2 131072 br3 lam3 = 50516048 ∧
+    prefix3 moe 4 4096 br3 lam3 = 58012917 ∧ prefix3 moe 4 32768 br3 lam3 = 67729813 ∧ prefix3 moe 4 131072 br3 lam3 = 101044885 ∧
+    prefix3 moe 8 4096 br3 lam3 = 119247915 ∧ prefix3 moe 8 32768 br3 lam3 = 138681707 ∧ prefix3 moe 8 131072 br3 lam3 = 205311851 := by
+  decide
+theorem T3r_rollout_identity :
+    4 * prefix3 dense 2 32768 br3 lam3 + (headNs dense + 2 * tLaunch + 4 * lam3 + 3 * tn (act dense 1) h2d1
+      + tn (logits dense 1) d2h0 - tn (act dense 1) d2h0) = step3 dense 32768 1 1 br3 lam3 ∧
+    4 * prefix3 moe 2 32768 br3 lam3 + (headNs moe + 2 * tLaunch + 4 * lam3 + 3 * tn (act moe 1) h2d1
+      + tn (logits moe 1) d2h0 - tn (act moe 1) d2h0) = step3 moe 32768 1 1 br3 lam3 ∧
+    headNs dense + 2 * tLaunch + 4 * lam3 + 3 * tn (act dense 1) h2d1 + tn (logits dense 1) d2h0 - tn (act dense 1) d2h0 = 12290665 ∧
+    headNs moe + 2 * tLaunch + 4 * lam3 + 3 * tn (act moe 1) h2d1 + tn (logits moe 1) d2h0 - tn (act moe 1) d2h0 = 3259859 ∧
+    step3 dense 32768 1 1 br3 lam3 = prefix3 dense 8 32768 br3 lam3 + lam3 := by decide
+
+/-! ### R25 (`[R3-ladder-*]`): the ladder's expected readings -/
+theorem T3r_ladder : lam3 + tn 4096 h2d0 = 12348 ∧ lam3 + tn 4096 h2d1 = 12494 ∧ lam3 + tn (64 * KiB) h2d0 = 14574 ∧
+    lam3 + tn (64 * KiB) h2d1 = 16914 ∧ lam3 + tn (64 * MiB) h2d0 = 2443680 ∧ lam3 + tn (64 * MiB) h2d1 = 4840175 ∧
+    usR (tn (64 * KiB) h2d1) = 5 ∧ usR (tn MiB h2d1) = 75 ∧ usR (tn (16 * MiB) h2d1) = 1207 ∧
+    step3 dense 32768 1 1 { br3 with cq := .prop } lam3 - step3 dense 32768 1 1 br3 lam3 = 47196000 ∧
+    step3 moe 32768 1 1 { br3 with cq := .prop } lam3 - step3 moe 32768 1 1 br3 lam3 = 2447200 ∧
+    ms2 47196000 = 4719 ∧ ms2 2447200 = 244 ∧ 2 * cQ = 87400 ∧ 7 * cQ = 305900 ∧
+    tpsCard 1000 (step3 dense 32768 1 1 { br3 with cq := .prop } lam3) = 102 ∧
+    tpsCard 1000 (step3 moe 32768 1 1 { br3 with cq := .prop } lam3) = 1771 := by decide
+
+/-! ### R26 (`[R3-risk-*]`): the risk register's numbers -/
+theorem T3r_fallbacks :
+    step3 dense 32768 1 1 { br3 with integ := true, cq := .none } lam3 = 3001920357 ∧ tpsCard 1000 3001920357 = 83 ∧ pcsDown 83 104 = 201 ∧
+    step3 moe 32768 1 1 { br3 with integ := true, cq := .none } lam3 = 136608661 ∧ tpsCard 1000 136608661 = 1830 ∧ pcsUp 1830 1802 = 15 ∧
+    2387232989 - 2202874362 + 2202874362 * rGemm / rGemmSer = 2953414520 ∧ W3 dense 1 1 br3 = 2202874362 ∧ tpsCard 1000 2953414520 = 84 ∧
+    step3 moe 131072 1 1 br3 lam3 = 205324051 ∧ tpsCard 1000 205324051 = 1217 ∧
+    step3 moe 131072 1 1 (br3G gShuf64) lam3 = 206492435 ∧ tpsCard 1000 206492435 = 1210 ∧
+    step3 moe 131072 1 1 (br3G gShuf16) lam3 = 214219539 ∧ tpsCard 1000 214219539 = 1167 ∧
+    step3 moe 131072 1 1 (br3Reg .directSer) lam3 = 189461491 ∧ tpsCard 1000 189461491 = 1319 ∧
+    step3 moe 131072 1 1 { br3 with G := gShuf64, regime := .directSer } lam3 = 190629875 ∧ tpsCard 1000 190629875 = 1311 ∧
+    step3 moe 131072 1 1 { br3 with G := gShuf16, regime := .directSer } lam3 = 198356979 ∧ tpsCard 1000 198356979 = 1260 ∧
+    step3 moe 1048576 1 1 br3 lam3 = 827205395 ∧ tpsCard 1000 827205395 = 302 ∧
+    tpsCard 1000 (step3 moe 1048576 1 1 (br3G gShuf64) lam3) = 298 ∧ tpsCard 1000 (step3 moe 1048576 1 1 (br3G gShuf16) lam3) = 278 ∧
+    step3 moe 1048576 1 1 (br3G g3x) lam3 = 2182760211 ∧ tpsCard 1000 2182760211 = 114 ∧ x10 302 114 = 26 ∧
+    tpsCard 1000 (step3 moe 1048576 1 1 br3I8 lam3) = 385 ∧ tpsCard 1000 (step3 moe 1048576 1 1 br3I8Lazy lam3) = 530 ∧
+    tpsCard 1000 (step3 dense 1048576 1 1 br3I8 lam3) = 54 ∧ tpsCard 1000 (step3 dense 1048576 1 1 br3I8Lazy lam3) = 65 ∧
+    ms2 (A3 dense 1048576 1 1 br3I8) = 228192 ∧ ms2 (A3 dense 1048576 1 1 br3) = 304820 := by decide
+
+/-! ### R17 (`[R3-inst-fit-*]`): the instance fit — the minimal int4 share x per die, an iff in x (weights(x) is non-increasing);
+    the runtime overhead `ort` as a hypothesis variable (H8 / H11) -/
+theorem T3r_inst_ort_add (s : Shape) (pos L B : Nat) (i8 : Bool) (ort x : Nat) :
+    instTotal s pos L B i8 ort x = instTotal s pos L B i8 0 x + ort := by unfold instTotal; omega
+/-- the per-die totals in closed form (x, L, ort free): MoE 7 layers per die, dense 30; embedding on position 0, lm_head on 3,
+    the dense draft on 1 -/
+theorem T3r_inst_form (L ort x : Nat) :
+    instTotal moe 0 L 1 false ort x = 7 * (12926844928 - 12884901888 * x / 2000) + 525336576 + 0 + 0 + 7 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal moe 1 L 1 false ort x = 7 * (12926844928 - 12884901888 * x / 2000) + 0 + 0 + 0 + 7 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal moe 2 L 1 false ort x = 7 * (12926844928 - 12884901888 * x / 2000) + 0 + 0 + 0 + 7 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal moe 3 L 1 false ort x = 7 * (12926844928 - 12884901888 * x / 2000) + 0 + 525336576 + 0 + 7 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal dense 0 L 1 false ort x = 30 * (3187671040 - 3187671040 * x / 2000) + 2101346304 + 0 + 0 + 30 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal dense 1 L 1 false ort x = 30 * (3187671040 - 3187671040 * x / 2000) + 0 + 0 + (1000000000 + 201326592) + 30 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal dense 2 L 1 false ort x = 30 * (3187671040 - 3187671040 * x / 2000) + 0 + 0 + 0 + 30 * 4096 * L * 1 + 67108864 + ort ∧
+    instTotal dense 3 L 1 false ort x = 30 * (3187671040 - 3187671040 * x / 2000) + 0 + 2101346304 + 0 + 30 * 4096 * L * 1 + 67108864 + ort :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+/-- the minimal x per die is an iff over every x ≤ 1000 at the assumed overhead (2 GiB + 64 MiB): MoE 32k 182 / 170 / 170 / 182 ‰ -/
+theorem T3r_inst_fit_moe_32k (x : Nat) (hx : x ≤ 1000) :
+    (instFits moe 0 32768 1 false oRt x ↔ 182 ≤ x) ∧ (instFits moe 1 32768 1 false oRt x ↔ 170 ≤ x) ∧
+    (instFits moe 2 32768 1 false oRt x ↔ 170 ≤ x) ∧ (instFits moe 3 32768 1 false oRt x ↔ 182 ≤ x) := by
+  have f := T3r_inst_form 32768 oRt x
+  have ho : oRt = 2147483648 ∧ dieMem = 86000000000 := by decide
+  unfold instFits; rw [f.1, f.2.1, f.2.2.1, f.2.2.2.1, ho.1, ho.2]
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T3r_inst_fit_dense_32k (x : Nat) (hx : x ≤ 1000) :
+    (instFits dense 0 32768 1 false oRt x ↔ 376 ≤ x) ∧ (instFits dense 1 32768 1 false oRt x ↔ 358 ≤ x) ∧
+    (instFits dense 2 32768 1 false oRt x ↔ 332 ≤ x) ∧ (instFits dense 3 32768 1 false oRt x ↔ 376 ≤ x) := by
+  have f := T3r_inst_form 32768 oRt x
+  have ho : oRt = 2147483648 ∧ dieMem = 86000000000 := by decide
+  unfold instFits; rw [f.2.2.2.2.1, f.2.2.2.2.2.1, f.2.2.2.2.2.2.1, f.2.2.2.2.2.2.2, ho.1, ho.2]
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+/-- the other cells of the §1.8 fit table, as minimality (fits at x, not at x − 1, die by die) -/
+abbrev minimalAt (s : Shape) (L B : Nat) (xs : Nat → Nat) : Prop :=
+  ∀ p, p < 4 → instFits s p L B false oRt (xs p) ∧ ¬ instFits s p L B false oRt (xs p - 1)
+theorem T3r_inst_fit : minimalAt moe 4096 1 xsMoe4k ∧ minimalAt moe 32768 1 xsMoe32k ∧ minimalAt moe 131072 1 xsMoe128k ∧
+    minimalAt moe 1048576 1 xsMoe1M ∧ minimalAt moe 32768 16 xsMoe32kB16 ∧ minimalAt dense 4096 1 xsDense4k ∧
+    minimalAt dense 32768 1 xsDense32k ∧ minimalAt dense 131072 1 xsDense128k := by decide
+/-- dense 1M cannot replicate at ANY x and ANY overhead: the KV alone is 128.8 GB (f16) per 4-die position; on KV-int8 64.4 GB of KV
+    plus the all-int4 weights is still 112.0 GB > 86 -/
+theorem T3r_inst_w_mono (s : Shape) (p x : Nat) (hx : x ≤ 1000) : instDieWeights s p 1000 ≤ instDieWeights s p x := by
+  unfold instDieWeights
+  have h1 : candBytes s * x / 2000 ≤ candBytes s * 1000 / 2000 := Nat.div_le_div_right (Nat.mul_le_mul_left _ hx)
+  have h2 : layers4 s * (s.wRes - candBytes s * 1000 / 2000) ≤ layers4 s * (s.wRes - candBytes s * x / 2000) :=
+    Nat.mul_le_mul_left _ (by omega)
+  omega
+theorem T3r_inst_dense_1M_infeasible (x ort : Nat) (hx : x ≤ 1000) (p : Nat) (hp : p < 4) :
+    ¬ instFits dense p 1048576 1 false ort x ∧ ¬ instFits dense p 1048576 1 true ort x := by
+  have hm := T3r_inst_w_mono dense p x hx
+  have hd : ∀ q, q < 4 → dieMem < instTotal dense q 1048576 1 true 0 1000 := by decide
+  have hq := hd p hp
+  have hf : instDieKv dense 1048576 1 true ≤ instDieKv dense 1048576 1 false := by decide
+  unfold instFits; unfold instTotal at hq ⊢
+  constructor <;> omega
+theorem T3r_inst_dense_1M_cells : instDieKv dense 1048576 1 false = 128849018880 ∧ instDieKv dense 1048576 1 true = 64424509440 ∧
+    gb1 128849018880 = 1288 ∧ gb1 64424509440 = 644 ∧ instDieWeights dense 2 1000 = 47815065600 ∧
+    gb1 (instTotal dense 2 1048576 1 true 0 1000) = 1123 := by decide
+
+/-! ### T3r_instance_margin (PROMPT-4P2 target): the 2–30 MB fit margin per die and the 2.3 % / GB overhead sensitivity, with the
+    runtime overhead `ort` as the hypothesis variable -/
+/-- the worst-die margins of every replicable cell at the assumed 2 GiB: 1.9 MB (MoE 128k) … 30.1 MB (dense 4k) -/
+theorem T3r_inst_margins :
+    dieMem - instTotal moe 3 4096 1 false oRt 163 = 5552425 ∧ dieMem - instTotal moe 1 32768 1 false oRt 170 = 24485516 ∧
+    dieMem - instTotal moe 1 131072 1 false oRt 232 = 1936941 ∧ dieMem - instTotal moe 3 1048576 1 false oRt 827 = 2733854 ∧
+    dieMem - instTotal dense 1 4096 1 false oRt 284 = 30111826 ∧ dieMem - instTotal dense 2 32768 1 false oRt 332 = 3346208 ∧
+    dieMem - instTotal dense 1 131072 1 false oRt 610 = 15012346 ∧
+    dieMem - instTotal moe 0 32768 1 false oRt 182 = 40314817 ∧ dieMem - instTotal dense 0 32768 1 false oRt 376 = 5862794 ∧
+    dieMem - instTotal dense 1 32768 1 false oRt 358 = 45211336 ∧
+    gb1 (ws + oRt) = 22 ∧ 1936941 / 1000000 = 1 ∧ 30111826 / 1000000 = 30 := by decide
+theorem T3r_instance_margin (ort : Nat) :
+    -- (1) at the shipped minimal x the instance fits iff the real overhead is ≤ 2 GiB + the worst-die margin
+    ((∀ p, p < 4 → instFits moe p 32768 1 false ort (xsMoe32k p)) ↔ ort ≤ 2147483648 + 24485516) ∧
+    ((∀ p, p < 4 → instFits dense p 32768 1 false ort (xsDense32k p)) ↔ ort ≤ 2147483648 + 3346208) ∧
+    -- (2) the sensitivity: every extra GB of overhead is absorbed by +23 ‰ of x (MoE) / +21 ‰ (dense), on every die, at every L, x
+    (∀ L x, x + 23 ≤ 1000 → ∀ p, p < 4 → instFits moe p L 1 false ort x → instFits moe p L 1 false (ort + GB) (x + 23)) ∧
+    (∀ L x, x + 21 ≤ 1000 → ∀ p, p < 4 → instFits dense p L 1 false ort x → instFits dense p L 1 false (ort + GB) (x + 21)) := by
+  have c : instTotal moe 0 32768 1 false 0 182 = 83812201535 ∧ instTotal moe 1 32768 1 false 0 170 = 83828030836 ∧
+      instTotal moe 2 32768 1 false 0 170 = 83828030836 ∧ instTotal moe 3 32768 1 false 0 182 = 83812201535 ∧
+      instTotal dense 0 32768 1 false 0 376 = 83846653558 ∧ instTotal dense 1 32768 1 false 0 358 = 83807305016 ∧
+      instTotal dense 2 32768 1 false 0 332 = 83849170144 ∧ instTotal dense 3 32768 1 false 0 376 = 83846653558 ∧
+      dieMem = 86000000000 ∧ GB = 1000000000 := by decide
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · constructor
+    · intro h
+      have h1 := h 1 (by decide)
+      unfold instFits at h1; rw [T3r_inst_ort_add] at h1
+      have e : xsMoe32k 1 = 170 := rfl
+      rw [e] at h1; omega
+    · intro h p hp
+      unfold instFits; rw [T3r_inst_ort_add]
+      have : p = 0 ∨ p = 1 ∨ p = 2 ∨ p = 3 := by omega
+      rcases this with rfl | rfl | rfl | rfl
+      · show instTotal moe 0 32768 1 false 0 182 + ort ≤ dieMem; omega
+      · show instTotal moe 1 32768 1 false 0 170 + ort ≤ dieMem; omega
+      · show instTotal moe 2 32768 1 false 0 170 + ort ≤ dieMem; omega
+      · show instTotal moe 3 32768 1 false 0 182 + ort ≤ dieMem; omega
+  · constructor
+    · intro h
+      have h1 := h 2 (by decide)
+      unfold instFits at h1; rw [T3r_inst_ort_add] at h1
+      have e : xsDense32k 2 = 332 := rfl
+      rw [e] at h1; omega
+    · intro h p hp
+      unfold instFits; rw [T3r_inst_ort_add]
+      have : p = 0 ∨ p = 1 ∨ p = 2 ∨ p = 3 := by omega
+      rcases this with rfl | rfl | rfl | rfl
+      · show instTotal dense 0 32768 1 false 0 376 + ort ≤ dieMem; omega
+      · show instTotal dense 1 32768 1 false 0 358 + ort ≤ dieMem; omega
+      · show instTotal dense 2 32768 1 false 0 332 + ort ≤ dieMem; omega
+      · show instTotal dense 3 32768 1 false 0 376 + ort ≤ dieMem; omega
+  · intro L x hx p hp
+    unfold instFits
+    have : p = 0 ∨ p = 1 ∨ p = 2 ∨ p = 3 := by omega
+    rcases this with rfl | rfl | rfl | rfl
+    · rw [(T3r_inst_form L ort x).1, (T3r_inst_form L (ort + GB) (x + 23)).1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+    · rw [(T3r_inst_form L ort x).2.1, (T3r_inst_form L (ort + GB) (x + 23)).2.1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+    · rw [(T3r_inst_form L ort x).2.2.1, (T3r_inst_form L (ort + GB) (x + 23)).2.2.1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+    · rw [(T3r_inst_form L ort x).2.2.2.1, (T3r_inst_form L (ort + GB) (x + 23)).2.2.2.1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+  · intro L x hx p hp
+    unfold instFits
+    have : p = 0 ∨ p = 1 ∨ p = 2 ∨ p = 3 := by omega
+    rcases this with rfl | rfl | rfl | rfl
+    · rw [(T3r_inst_form L ort x).2.2.2.2.1, (T3r_inst_form L (ort + GB) (x + 21)).2.2.2.2.1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+    · rw [(T3r_inst_form L ort x).2.2.2.2.2.1, (T3r_inst_form L (ort + GB) (x + 21)).2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+    · rw [(T3r_inst_form L ort x).2.2.2.2.2.2.1, (T3r_inst_form L (ort + GB) (x + 21)).2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+    · rw [(T3r_inst_form L ort x).2.2.2.2.2.2.2, (T3r_inst_form L (ort + GB) (x + 21)).2.2.2.2.2.2.2, c.2.2.2.2.2.2.2.2.1, c.2.2.2.2.2.2.2.2.2]; intro h; omega
+/-- the measured cells of the sensitivity: x at +1 GB / +3 GB of overhead (MoE 32k 204 / 192 / 192 / 204 and 248 / 236 / 236 / 248 —
+    the minimal step is 22 ‰ per GB here, ≤ the 23 ‰ ceiling dx = ⌈2 000 · GB / (7 · expert bytes)⌉; dense 21 / 20 / 21 / 21 ≤ 21) -/
+theorem T3r_inst_dx : ceilDiv (GB * 2000) (7 * (moe.wRes - moe.wStream)) = 23 ∧ ceilDiv (GB * 2000) (30 * dense.wStream) = 21 ∧
+    instFits moe 1 32768 1 false (oRt + GB) 192 ∧ ¬ instFits moe 1 32768 1 false (oRt + GB) 191 ∧
+    instFits moe 0 32768 1 false (oRt + GB) 204 ∧ ¬ instFits moe 0 32768 1 false (oRt + GB) 203 ∧
+    instFits moe 1 32768 1 false (oRt + 3 * GB) 236 ∧ ¬ instFits moe 1 32768 1 false (oRt + 3 * GB) 235 ∧
+    instFits moe 0 32768 1 false (oRt + 3 * GB) 248 ∧ ¬ instFits moe 0 32768 1 false (oRt + 3 * GB) 247 ∧
+    instFits dense 0 32768 1 false (oRt + GB) 397 ∧ ¬ instFits dense 0 32768 1 false (oRt + GB) 396 ∧
+    instFits dense 2 32768 1 false (oRt + GB) 353 ∧ ¬ instFits dense 2 32768 1 false (oRt + GB) 352 ∧
+    instFits dense 0 32768 1 false (oRt + 3 * GB) 439 ∧ ¬ instFits dense 0 32768 1 false (oRt + 3 * GB) 438 := by decide
+
+/-! ### R18 (`[R3-inst-*]`): the instance step and the fleet cell — fleet.py's cells at full concurrency (c = 2 000, two instances at
+    solo speed), plus the H10 card-scale reading c = 1 990 -/
+theorem T3r_inst_cells :
+    instStep3 moe 32768 1 1 xsMoe32k .directSer tW4 0 .uniform br3 lam3 = 134376737 ∧ tpsInst 1000 2000 134376737 = 3720 ∧
+    pcsUp 3720 1802 = 1064 ∧ 134376737 - 28 * 812036 - 198 * 91000 - 28 * 174800 - 118735 = 88608594 ∧ ms2 88608594 = 8860 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .anchor tW4 0 .uniform br3 lam3 = 147447501 ∧ tpsInst 1000 2000 147447501 = 3391 ∧ pcsUp 3391 1802 = 881 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directOvl tW4 0 .uniform br3 lam3 = 132557745 ∧ tpsInst 1000 2000 132557745 = 3771 ∧ pcsUp 3771 1802 = 1092 ∧
+    instStep3 moe 4096 1 1 xsMoe4k .directSer tW4 0 .uniform br3 lam3 = 113718771 ∧ tpsInst 1000 2000 113718771 = 4396 ∧
+    instStep3 moe 131072 1 1 xsMoe128k .directSer tW4 0 .uniform br3 lam3 = 205109539 ∧ tpsInst 1000 2000 205109539 = 2437 ∧
+    instStep3 moe 1048576 1 1 xsMoe1M .directSer tW4 0 .uniform br3 lam3 = 865602155 ∧ tpsInst 1000 2000 865602155 = 577 ∧
+    instStep3 moe 32768 16 1 xsMoe32kB16 .directSer tW4 0 .uniform br3 lam3 = 1982462339 ∧ tpsInst 16000 2000 1982462339 = 4035 ∧
+    pcsUp 4035 2325 = 735 ∧
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 rW4ovl .uniform br3 lam3 = 3223488193 ∧ tpsInst 1000 2000 3223488193 = 155 ∧
+    pcsUp 155 104 = 490 ∧
+    instStep3 dense 4096 1 1 xsDense4k .directSer 0 rW4ovl .uniform br3 lam3 = 2970259333 ∧ tpsInst 1000 2000 2970259333 = 168 ∧
+    instStep3 dense 131072 1 1 xsDense128k .directSer 0 rW4ovl .uniform br3 lam3 = 4095430063 ∧ tpsInst 1000 2000 4095430063 = 122 ∧
+    instStep3 dense 32768 1 4 xsDense32k .directSer 0 rW4ovl .uniform br3 lam3 = 3619219196 ∧ tpsInst (tau 700 3) 2000 3619219196 = 349 ∧
+    instStep3 dense 32768 1 4 xsDense32k .directSer 0 rW4ovl .uniform br3Lazy lam3 = 3383721596 ∧ tpsInst (tau 700 3) 2000 3383721596 = 374 ∧
+    pcsUp 349 227 = 537 ∧ pcsUp 374 248 = 508 ∧ pcsUp 168 108 = 555 ∧ pcsUp 122 93 = 311 ∧ pcsUp 4396 2096 = 1097 ∧
+    pcsUp 2437 1217 = 1002 ∧ pcsUp 577 302 = 910 := by decide
+/-- Zipf(1.0) popularity (EMPIRICAL — H9): the coldest 46 / 43 experts (x = 182 / 170 ‰) carry 3.2 % of the traffic; 4.006 -/
+theorem T3r_inst_zipf : ncOf 182 = 46 ∧ ncOf 170 = 43 ∧ pct (hCold 46) hTot = 32 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer tW4 0 .zipf10 br3 lam3 = 124789523 ∧ tpsInst 1000 2000 124789523 = 4006 ∧
+    pcsUp 4006 1802 = 1223 := by decide +kernel
+
+/-! ### R19 (`[R3-inst-breakeven-moe-32k]`, `[R3-inst-sens-*]`): two instances beat one iff the int4 core-slab time ≤ 1 406 404 ns —
+    an iff over every cold-tier time Tc AND, new in this round, over the H10 concurrency c (thousandths of one instance's throughput) -/
+theorem T3r_inst_moe32k_form (Tc : Nat) :
+    instStep3 moe 32768 1 1 xsMoe32k .directSer Tc 0 .uniform br3 lam3 =
+      7 * (256223 + expCold 8 182 99374 Tc + 812036 + 637000 + 174800 + 0)
+      + 7 * (256223 + expCold 8 170 99374 Tc + 812036 + 637000 + 174800 + 0)
+      + 7 * (256223 + expCold 8 170 99374 Tc + 812036 + 637000 + 174800 + 0)
+      + 7 * (256223 + expCold 8 182 99374 Tc + 812036 + 637000 + 174800 + 0)
+      + 3008800 + 182000 + 118735 + 0 := rfl
+/-- the generic H10 reading: two instances at concurrency c clear a one-instance cell of k thousandths iff k·4·T ≤ c·10⁹ -/
+theorem T3r_h10_iff (k c T : Nat) (hT : 0 < T) : k ≤ tpsInst 1000 c T ↔ k * (4 * T) ≤ 1000 * c * 1000000 := by
+  unfold tpsInst; exact Nat.le_div_iff_mul_le (by omega)
+theorem T3r_inst_breakeven (Tc : Nat) :
+    (1803 ≤ tpsInst 1000 2000 (instStep3 moe 32768 1 1 xsMoe32k .directSer Tc 0 .uniform br3 lam3) ↔ Tc ≤ 1406404) ∧
+    (1803 ≤ tpsInst 1000 1990 (instStep3 moe 32768 1 1 xsMoe32k .directSer Tc 0 .uniform br3 lam3) ↔ Tc ≤ 1394680) := by
+  rw [T3r_inst_moe32k_form]
+  unfold expCold
+  constructor
+  · rw [T3r_h10_iff _ _ _ (by omega)]; constructor <;> intro h <;> omega
+  · rw [T3r_h10_iff _ _ _ (by omega)]; constructor <;> intro h <;> omega
+/-- at the MEASURED unpack (5.3 GB/s/core, Tc = 197 844 ns) the gain holds iff the fleet-scale concurrency c ≥ 0.970× of one instance
+    (against the anchored 8-die chain, 1.802) and c ≥ 1.095× against the like-for-like direct-path chain (2.035): the card-scale H10
+    measurement (1.99×) clears both — T3r_inst_gain_measured is the c-premise, the two-card inheritance is the open hypothesis -/
+theorem T3r_inst_gain_measured (c : Nat) :
+    (1803 ≤ tpsInst 1000 c 134376737 ↔ 970 ≤ c) ∧ (2036 ≤ tpsInst 1000 c 134376737 ↔ 1095 ≤ c) ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer tW4 0 .uniform br3 lam3 = 134376737 ∧ tW4 = 197844 ∧
+    1406404 * 10 / tW4 = 71 ∧ 2 * MiB * 10 / (2 * 1406404) = 7 ∧ slabSer pieceSerC ≤ 1406404 ∧ slabSer pieceSerW ≤ 1406404 := by
+  refine ⟨?_, ?_, by decide⟩
+  · rw [T3r_h10_iff _ _ _ (by omega)]; constructor <;> intro h <;> omega
+  · rw [T3r_h10_iff _ _ _ (by omega)]; constructor <;> intro h <;> omega
+theorem T3r_inst_sens : instStep3 moe 32768 1 1 xsMoe32k .directSer (tn MiB 40) 0 .uniform br3 lam3 = 141981635 ∧ tpsInst 1000 2000 141981635 = 3521 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer (tn MiB 30) 0 .uniform br3 lam3 = 152316365 ∧ tpsInst 1000 2000 152316365 = 3282 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer (tn MiB 20) 0 .uniform br3 lam3 = 172985937 ∧ tpsInst 1000 2000 172985937 = 2890 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer (tn MiB 10) 0 .uniform br3 lam3 = 234994527 ∧ tpsInst 1000 2000 234994527 = 2127 ∧
+    instStep3 moe 32768 1 1 xsAll .directSer tW4 0 .uniform br3 lam3 = 188902355 ∧ tpsInst 1000 2000 188902355 = 2646 ∧
+    tpsInst 1000 2000 188902355 < tpsInst 1000 2000 134376737 := by decide
+
+/-! ### H10 as a hypothesis variable — which cells ACTIVATE at the measured card-scale concurrency (1.99×) -/
+/-- every variant-I cell at c = 1 990 (the card-scale measurement, under the two-card inheritance hypothesis) and the minimal c each
+    needs to beat its one-instance comparator: MoE 32k 3.702 (c ≥ 970), dense 0.154 (c ≥ 1 354); B = 16 4.015; dense spec 0.348 /
+    0.372; with the megakernel 4.149 / 0.156. All overlapped-tier cells activate; the serial-chain dense cells do NOT (T3r_serpiece) -/
+theorem T3r_inst_h10 :
+    tpsInst 1000 h10Card 134376737 = 3702 ∧ tpsInst 1000 h10Card 3223488193 = 154 ∧ tpsInst 16000 h10Card 1982462339 = 4015 ∧
+    tpsInst (tau 700 3) h10Card 3619219196 = 348 ∧ tpsInst (tau 700 3) h10Card 3383721596 = 372 ∧
+    tpsInst 1000 h10Card 113718771 = 4374 ∧ tpsInst 1000 h10Card 205109539 = 2425 ∧ tpsInst 1000 h10Card 865602155 = 574 ∧
+    tpsInst 1000 h10Card 124789523 = 3986 ∧ tpsInst 1000 h10Card 2970259333 = 167 ∧ tpsInst 1000 h10Card 4095430063 = 121 ∧
+    tpsInst 1000 h10Card 119896425 = 4149 ∧ tpsInst 1000 h10Card 3173134753 = 156 ∧
+    (∀ c, 105 ≤ tpsInst 1000 c 3223488193 ↔ 1354 ≤ c) ∧ (∀ c, 1218 ≤ tpsInst 1000 c 205109539 ↔ 1000 ≤ c) ∧
+    (∀ c, 303 ≤ tpsInst 1000 c 865602155 ↔ 1050 ≤ c) ∧ (∀ c, 109 ≤ tpsInst 1000 c 2970259333 ↔ 1296 ≤ c) ∧
+    (∀ c, 94 ≤ tpsInst 1000 c 4095430063 ↔ 1540 ≤ c) ∧ (∀ c, 2326 ≤ tpsInst 16000 c 1982462339 ↔ 1153 ≤ c) := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide,
+    by decide, by decide, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+  · intro c; unfold tpsInst; rw [Nat.le_div_iff_mul_le (by decide)]; constructor <;> intro h <;> omega
+
+/-! ### R20 (`[R3-inst-combo-*]`): instances + megakernel; Π = 8 of one chain against the two-instance cell -/
+theorem T3r_inst_vs_pipe :
+    instStep3 moe 32768 1 1 xsMoe32k .directSer tW4 0 .uniform (br3Mega 5000) lam3 = 119896425 ∧ tpsInst 1000 2000 119896425 = 4170 ∧
+    pcsUp 4170 1802 = 1314 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directOvl tW4 0 .uniform (br3Mega 5000) lam3 = 118077433 ∧ tpsInst 1000 2000 118077433 = 4234 ∧
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 rW4ovl .uniform (br3Mega 5000) lam3 = 3173134753 ∧ tpsInst 1000 2000 3173134753 = 157 ∧
+    pcsUp 157 104 = 509 ∧ tpsCard 1000 (maxBlock3 moe 32768 br3 lam3) = 12918 ∧ tpsCard 1000 (maxBlock3 dense 32768 br3 lam3) = 808 ∧
+    x10 12918 3720 = 34 ∧ x10 808 155 = 52 ∧ tpsInst 1000 2000 134376737 * 4 = 14880 ∧ tpsCard 1000 138693907 * 4 = 7208 ∧
+    x10 3720 1802 = 20 ∧ x100r 3720 1802 = 206 ∧ x100r 155 104 = 149 := by decide
+
+/-! ### R8 (structural): the round-2 limit of the round-3 model reproduces the round-2 step EXACTLY, for every L, B, t and λ —
+    round 3 changed λ, G, the attention term and c_q, nothing else: swap the attention term back and drop the quant pass -/
+theorem T3r_round2_limit (L B t lam : Nat) :
+    step3 dense L B t br3R2 lam - A3 dense L B t br3R2 + attnTot dense L B t br0 = stepNs dense L B t br0 lam 0 ∧
+    step3 moe L B t br3R2 lam - A3 moe L B t br3R2 + attnTot moe L B t br0 = stepNs moe L B t br0 lam 0 := by
+  have hd1a : W3 dense B t br3R2 = 120 * 18256993 + 120 * 18256993 * 0 / 1000 + 12035202 := rfl
+  have g1 : gemmNs dense (B * t) br0.fam br0.regime 0 = gemmDenseNs dense 0 := by
+    unfold gemmNs; rw [ite_eq_right (by decide)]
+  have g2 : gemmDenseNs dense 0 = 18256993 ∧ headNs dense = 12035202 ∧ dense.nL = 120 := by decide
+  have hd1b : wNs dense B t br0 0 = 120 * 18256993 + 12035202 := by unfold wNs; rw [g1, g2.1, g2.2.1, g2.2.2]
+  have hm1 : W3 moe B t br3R2 = 28 * (240223 + 16000 + 3 * dOf .uniform (B * t) * 122979) + 3008800 := rfl
+  have hm2 : wNs moe B t br0 0 = 28 * (240223 + (16000 + 3 * dOf .uniform (B * t) * 122979)) + 3008800 := rfl
+  have hL : Ln3 dense B t br3R2 = launchNs dense br0.launch ∧ Ln3 moe B t br3R2 = launchNs moe br0.launch := ⟨rfl, rfl⟩
+  have hQ : Q3 dense B t br3R2 = 0 ∧ Q3 moe B t br3R2 = 0 := ⟨rfl, rfl⟩
+  have hX : X3 dense B t lam = xNs dense B t lam ∧ X3 moe B t lam = xNs moe B t lam := ⟨rfl, rfl⟩
+  have hD : D3 t br3R2 lam = dNs t br0 lam := rfl
+  unfold step3 stepNs
+  rw [hd1a, hd1b, hm1, hm2, hL.1, hL.2, hQ.1, hQ.2, hX.1, hX.2, hD]
+  constructor <;> omega
+
+/-! ### R27 (`[R3-mem]`): no round-3 term enters the memory model — the round-2 theorems stand (the memory functions take no λ, G,
+    c_q, chain or regime argument); the instance variant's fit is the separate R17 statement -/
+theorem T3r_mem : (∀ ort, ¬ feasible dense 1048576 1 false ort) ∧ (∀ ort, feasible dense 1048576 1 true ort ↔ ort ≤ 3804224512) ∧
+    Lmax dense 1 false oRt = 551253 ∧ Lmax moe 1 false oRt = 1925823 ∧ Lmax dense 1 true oRt = 1102506 ∧
+    ¬ minDiesFits dense 4 ∧ minDiesFits dense 5 ∧ ¬ minDiesFits moe 4 ∧ minDiesFits moe 5 :=
+  ⟨T_mem_infeas_dense_1M, T_mem_feas_kv_int8, T_Lmax.1, T_Lmax.2.2.2.2.1, T_Lmax.2.2.2.1, T_min_dies_heuristic⟩
+
+/-! ## PROMPT-4P2 target — T3r_spec_dense_split: the 0.227 vs 0.248 pair as threshold theorems over the verify chain's cost.
+    The dense verify step (k = 3, 32k) is affine in the per-block chain cost v once v ≥ the 6 197 ns DDR block (both chains are):
+    T(v) = 2 356 342 808 + 15 600·v; the cell is ≥ 0.248 iff v ≤ 12 633 ns, ≥ 0.227 iff v ≤ 27 775, beats t = 1 (0.104) iff
+    v ≤ 235 551. The chain as specified (27 350) clears 0.227 by 425 ns; the fixed-shift chain (12 254; E35 LICENSED for
+    qk-normalised models) clears 0.248 by 379 ns. -/
+theorem T3r_spec_dense_split_form (v : Nat) (hv : 6197 ≤ v) : specDenseV v = 2356342808 + 15600 * v := by
+  have h : W3 dense 1 4 br3 + Ln3 dense 1 4 br3 + Q3 dense 1 4 br3 + X3 dense 1 4 lam3 + D3 4 br3 lam3 = 2356301528 ∧ dense.nL = 120 := by decide
+  unfold specDenseV
+  have hm : max (max (max 6197 v) 1920) 1236 = v := by omega
+  rw [hm, h.2]
+  omega
+theorem T3r_spec_dense_split (v : Nat) (hv : 6197 ≤ v) :
+    (248 ≤ tpsCard (tau 700 3) (specDenseV v) ↔ v ≤ 12633) ∧ (227 ≤ tpsCard (tau 700 3) (specDenseV v) ↔ v ≤ 27775) ∧
+    (105 ≤ tpsCard (tau 700 3) (specDenseV v) ↔ v ≤ 235551) := by
+  rw [T3r_spec_dense_split_form v hv]
+  have ht : tau 700 3 = 2533 := by decide
+  unfold tpsCard; rw [ht]
+  refine ⟨?_, ?_, ?_⟩ <;> (rw [Nat.le_div_iff_mul_le (by omega)]; constructor <;> intro h <;> omega)
+/-- the two measured chains are the two ends of the pair: specDenseV reproduces the §3.5.2 cells exactly -/
+theorem T3r_spec_dense_split_cells : specDenseV (vblk3 4 .rowmax .T) = step3 dense 32768 1 4 br3 lam3 ∧
+    specDenseV (vblk3 4 .lazy .T) = step3 dense 32768 1 4 br3Lazy lam3 ∧ vblk3 4 .rowmax .T = 27350 ∧ vblk3 4 .lazy .T = 12254 ∧
+    mmaBlock 4 = 1920 ∧ loaderBlock 4 = 1236 ∧ drainBlock 4 (rDrainM 4) = 344 ∧ ddrBlock g256 4 = 6197 ∧ nblocks 32768 4 = 128 ∧
+    tpsCard (tau 700 3) (specDenseV 27350) = 227 ∧ tpsCard (tau 700 3) (specDenseV 12254) = 248 ∧
+    27775 - 27350 = 425 ∧ 12633 - 12254 = 379 ∧ tpsCard (tau 700 3) (specDenseV 12634) = 247 ∧
+    tpsCard (tau 700 3) (specDenseV 27776) = 226 := by decide
+
+/-! ## PROMPT-4P2 target — T3r_moe128k_tie, legs-conditional (DESIGN-3 round 4's P-fragment bounce, erratum #20).
+    Per layer at 128k (t = 1, rows 4) the cell is attention-bound iff G ≤ the line for its bounce leg count:
+      anchored kernel:      legs 0 → G ≤ 168.3 (the round-3 tie: weights-bound by 0.5 % at 169.2, attention-bound by 0.8 % at 167.0)
+                            legs 1 → G ≤ 178.9     legs 2 → G ≤ 189.4     (both above the 174.6 ceiling: attention-bound at EVERY G)
+      direct-path kernel:   legs 0 / 1 / 2 → G ≤ 204.7 / 217.5 / 230.3 (attention-bound at every G and every page size)
+    THE LEG COUNT THE PLANNER MUST READ: legs = 2. Erratum #20 (measured) makes the vector-SRAM → S1 plain copy wrong, so P rides
+    US → DDR scratch → DDR → S1: two transfers on the K/V stream's roof (DESIGN-3 round 4's headline, UNMEASURED until E24′). legs 0
+    needs a proven direct route the erratum rules out as specified; and since legs 1 and legs 2 give the same verdict, the planner's
+    reading does not hang on E24′ coming back 1 or 2 — only a legs-0 route would restore the round-3 tie. -/
+theorem T3r_attn4_128k (G legs : Nat) :
+    attn4 131072 1 4 G .lazy .T legs false =
+      max (max (max (256 * ((262144 + legs * 16384) * 80 / G)) (256 * 4772)) (256 * 960)) (256 * 618) + 19328 := by
+  have h : passesOf 4 = 1 ∧ mtPass 4 = 1 ∧ mtOf 4 = 1 ∧ nblocks4 131072 1 1 = 256 ∧ vec4 1 .lazy .T = 4772 ∧ mmaBlock 1 = 960 ∧
+      loaderBlock 1 = 618 ∧ drain4 1 (rDrainM 1) = 428 ∧ tail4Ops 131072 1 1 = 16 * 8192 ∧ mask4 1 1 = 0 ∧ firstMaxOf 1 .lazy .T = 5200 ∧
+      unitF32 .T = 137 ∧ rVecCore * 100 = 43200 := by decide
+  have hd : ddr4Block G 1 legs false = (262144 + legs * 16384) * 80 / G := by
+    unfold ddr4Block tn
+    have e : (blockOf 1 * coreTok / (if false = true then 2 else 1) + legs * pBytes 1) * 8 * 10 = (262144 + legs * 16384) * 80 := by
+      have e1 : blockOf 1 * coreTok / (if false = true then 2 else 1) = 262144 := by decide
+      have e2 : pBytes 1 = 16384 := by decide
+      rw [e1, e2]; omega
+    rw [e]
+  unfold attn4
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2.1, hd, h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2.1, h.2.2.2.2.2.2.2.1, h.2.2.2.2.2.2.2.2.1,
+    h.2.2.2.2.2.2.2.2.2.1, h.2.2.2.2.2.2.2.2.2.2.1, h.2.2.2.2.2.2.2.2.2.2.2.1, h.2.2.2.2.2.2.2.2.2.2.2.2]
+  all_goals simp only [Nat.one_mul]
+/-- the six legs-conditional lines, each an iff over EVERY G > 0 -/
+theorem T3r_moe128k_lines (G : Nat) (h1 : 0 < G) :
+    (tw3 moe .anchor ≤ attn4 131072 1 4 G .lazy .T 0 false ↔ G ≤ 1683) ∧
+    (tw3 moe .anchor ≤ attn4 131072 1 4 G .lazy .T 1 false ↔ G ≤ 1789) ∧
+    (tw3 moe .anchor ≤ attn4 131072 1 4 G .lazy .T 2 false ↔ G ≤ 1894) ∧
+    (tw3 moe .directSer ≤ attn4 131072 1 4 G .lazy .T 0 false ↔ G ≤ 2047) ∧
+    (tw3 moe .directSer ≤ attn4 131072 1 4 G .lazy .T 1 false ↔ G ≤ 2175) ∧
+    (tw3 moe .directSer ≤ attn4 131072 1 4 G .lazy .T 2 false ↔ G ≤ 2303) := by
+  rw [T3r_attn4_128k G 0, T3r_attn4_128k G 1, T3r_attn4_128k G 2]
+  have hw : tw3 moe .anchor = 3207719 ∧ tw3 moe .directSer = 2641199 ∧ (262144 + 0 * 16384) * 80 = 20971520 ∧
+      (262144 + 1 * 16384) * 80 = 22282240 ∧ (262144 + 2 * 16384) * 80 = 23592960 := by decide
+  rw [hw.1, hw.2.1, hw.2.2.1, hw.2.2.2.1, hw.2.2.2.2]
+  have k0a : 12455 ≤ 20971520 / G ↔ G ≤ 1683 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  have k1a : 12455 ≤ 22282240 / G ↔ G ≤ 1789 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  have k2a : 12455 ≤ 23592960 / G ↔ G ≤ 1894 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  have k0d : 10242 ≤ 20971520 / G ↔ G ≤ 2047 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  have k1d : 10242 ≤ 22282240 / G ↔ G ≤ 2175 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  have k2d : 10242 ≤ 23592960 / G ↔ G ≤ 2303 := by rw [Nat.le_div_iff_mul_le h1]; omega
+  refine ⟨⟨fun h => k0a.mp (by omega), fun h => by have := k0a.mpr h; omega⟩, ⟨fun h => k1a.mp (by omega), fun h => by have := k1a.mpr h; omega⟩,
+    ⟨fun h => k2a.mp (by omega), fun h => by have := k2a.mpr h; omega⟩, ⟨fun h => k0d.mp (by omega), fun h => by have := k0d.mpr h; omega⟩,
+    ⟨fun h => k1d.mp (by omega), fun h => by have := k1d.mpr h; omega⟩, ⟨fun h => k2d.mp (by omega), fun h => by have := k2d.mpr h; omega⟩⟩
+theorem T3r_moe128k_tie (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    -- round-3 chain (rowmax-T, the round-3 primary) on the anchored kernel: the tie, an iff — weights-bound at 169.2 (256 KiB)
+    (tw3 moe .anchor ≤ attn3 131072 4 G .rowmax .T false ↔ G ≤ 1683) ∧
+    -- round 4 without the bounce (legs 0): the round-3 tie reproduced
+    (tw3 moe .anchor ≤ attn4 131072 1 4 G .lazy .T 0 false ↔ G ≤ 1683) ∧
+    -- round 4 with one or both bounce legs: ATTENTION-bound at every G ≤ 174.6 (every page size, every gather loop)
+    tw3 moe .anchor ≤ attn4 131072 1 4 G .lazy .T 1 false ∧ tw3 moe .anchor ≤ attn4 131072 1 4 G .lazy .T 2 false ∧
+    -- the direct-path expert kernel: attention-bound at every G ≤ 174.6 on every chain and every leg count
+    tw3 moe .directSer ≤ attn3 131072 4 G .rowmax .T false ∧ tw3 moe .directSer ≤ attn4 131072 1 4 G .lazy .T 0 false ∧
+    tw3 moe .directSer ≤ attn4 131072 1 4 G .lazy .T 1 false ∧ tw3 moe .directSer ≤ attn4 131072 1 4 G .lazy .T 2 false := by
+  have hg : gStream = 1746 := rfl
+  have l := T3r_moe128k_lines G h1
+  refine ⟨T3r_fleet_G_moe_128k_anchor G h1, l.1, l.2.1.mpr (by omega), l.2.2.1.mpr (by omega),
+    (T3r_fleet_G_moe_128k_directser G h1).mpr (by omega), l.2.2.2.1.mpr (by omega), l.2.2.2.2.1.mpr (by omega),
+    l.2.2.2.2.2.mpr (by omega)⟩
+/-- the cells: per-layer margins at each measured G and leg count (anchored), and the round-4 step: legs 0 1.217 (W-bound step),
+    legs 1 1.185, legs 2 1.155 (ATTN-bound steps); direct path 1.319 / 1.281 / 1.246 -/
+theorem T3r_moe128k_tie_cells :
+    tw3 moe .anchor - attn4 131072 1 4 g256 .lazy .T 0 false = 15527 ∧ pct 15527 (tw3 moe .anchor) = 5 ∧
+    attn4 131072 1 4 gShuf64 .lazy .T 0 false - tw3 moe .anchor = 26201 ∧ pct 26201 (tw3 moe .anchor) = 8 ∧
+    attn4 131072 1 4 gK1 .lazy .T 0 false - tw3 moe .anchor = 693337 ∧ pct 693337 (tw3 moe .anchor) = 216 ∧
+    attn4 131072 1 4 g256 .lazy .T 1 false - tw3 moe .anchor = 182873 ∧ pct 182873 (tw3 moe .anchor) = 57 ∧
+    attn4 131072 1 4 g256 .lazy .T 2 false - tw3 moe .anchor = 381017 ∧ pct 381017 (tw3 moe .anchor) = 119 ∧
+    attn4 131072 1 4 gStream .lazy .T 2 false - tw3 moe .anchor = 270681 ∧ pct 270681 (tw3 moe .anchor) = 84 ∧
+    attn4 131072 1 4 gStream .lazy .T 1 false - tw3 moe .anchor = 78425 ∧ pct 78425 (tw3 moe .anchor) = 24 ∧
+    attn4 131072 1 4 g256 .lazy .T 0 false - tw3 moe .directSer = 550993 ∧ pct 550993 (tw3 moe .directSer) = 209 ∧
+    step4F moe 131072 1 1 br3Lazy 0 lam3 = 205338275 ∧ tpsCard 1000 205338275 = 1217 ∧
+    moe.nL * attn4 131072 1 4 g256 .lazy .T 0 false = 89381376 ∧ 89381376 < W3 moe 1 1 br3Lazy ∧
+    step4F moe 131072 1 1 br3Lazy 1 lam3 = 210893475 ∧ tpsCard 1000 210893475 = 1185 ∧
+    step4F moe 131072 1 1 br3Lazy 2 lam3 = 216441507 ∧ tpsCard 1000 216441507 = 1155 ∧
+    moe.nL * attn4 131072 1 4 g256 .lazy .T 1 false = 94936576 ∧ moe.nL * attn4 131072 1 4 g256 .lazy .T 2 false = 100484608 ∧
+    W3 moe 1 1 br3Lazy = 92824932 ∧ W3 moe 1 1 br3Lazy < 94936576 ∧
+    step4F moe 131072 1 1 { br3Lazy with regime := .directSer } 0 lam3 = 189475715 ∧ tpsCard 1000 189475715 = 1319 ∧
+    step4F moe 131072 1 1 { br3Lazy with regime := .directSer } 2 lam3 = 216441507 - 15862560 ∧ tpsCard 1000 200578947 = 1246 ∧
+    262144 * 80 / 12455 = 1683 ∧ (262144 + 16384) * 80 / 12455 = 1789 ∧ (262144 + 2 * 16384) * 80 / 12455 = 1894 := by decide
+/-- PRECISION (prover-forced): "attention-bound" is a per-layer statement. On the round-3 chain at 64 KiB the layer is attention-bound
+    by 0.8 % but the STEP's largest term is still W (92.82 vs 90.53 ms): W carries the 3.00 ms lm_head, attention has no such term -/
+theorem T3r_moe128k_step_level : tw3 moe .anchor ≤ attn3 131072 4 gShuf64 .rowmax .T false ∧
+    bindsW3 moe 131072 1 1 (br3G gShuf64) lam3 = true ∧ A3 moe 131072 1 1 (br3G gShuf64) = 90535536 ∧ W3 moe 1 1 (br3G gShuf64) = 92824932 ∧
+    headNs moe = 3008800 ∧ bindsA3 moe 131072 1 1 (br3G gShuf16) lam3 = true := by decide
+/-- WHAT THE TIE DOES NOT DECIDE (prover-forced): at Π = 1 the step is a SUM (T = Σ W + Σ ATTN + …) — the binding side ranks nothing.
+    Per MoE token at 128k on the round-4 headline (legs 2, 169.2): the direct-path expert kernel saves 15.86 ms; removing the bounce
+    (legs 2 → 0) 11.10 ms; one leg 5.54 ms; the production loop at 169.2 instead of the session-1 138.3 is worth 22.33 ms; 169.2 → 174.6
+    3.08 ms. So at 128k the expert-GEMM follow-up (E29) outranks the bounce follow-up (E24′) although the cell is attention-bound; the
+    bounce removal overtakes E29 only from L = 187 392 (it is 88.82 ms at 1M); realising the measured G outranks both. -/
+theorem T3r_moe128k_followups :
+    moe.nL * (tw3 moe .anchor - tw3 moe .directSer) = 15862560 ∧
+    moe.nL * (attn4 131072 1 4 g256 .lazy .T 2 false - attn4 131072 1 4 g256 .lazy .T 0 false) = 11103232 ∧
+    moe.nL * (attn4 131072 1 4 g256 .lazy .T 2 false - attn4 131072 1 4 g256 .lazy .T 1 false) = 5548032 ∧
+    moe.nL * (attn4 131072 1 4 gK1 .lazy .T 2 false - attn4 131072 1 4 g256 .lazy .T 2 false) = 22335488 ∧
+    moe.nL * (attn4 131072 1 4 g256 .lazy .T 2 false - attn4 131072 1 4 gStream .lazy .T 2 false) = 3089408 ∧
+    11103232 < 15862560 ∧ 15862560 < 22335488 ∧
+    attn4 187392 1 4 g256 .lazy .T 2 false - attn4 187392 1 4 g256 .lazy .T 0 false = 566934 ∧
+    attn4 186880 1 4 g256 .lazy .T 2 false - attn4 186880 1 4 g256 .lazy .T 0 false < tw3 moe .anchor - tw3 moe .directSer ∧
+    tw3 moe .anchor - tw3 moe .directSer = 566520 ∧
+    moe.nL * (attn4 1048576 1 4 g256 .lazy .T 2 false - attn4 1048576 1 4 g256 .lazy .T 0 false) = 88825856 ∧
+    pct 15862560 216441507 = 73 ∧ pct 11103232 216441507 = 51 := by decide
+
+/-! ## CORRECTION — the serial-chain int4 piece is 807 ns, not 596 (the alternatives proof round's correction; fleet.py still carries
+    596 in `T_PIECE_W4_SER`). A 2 KiB int4 piece holds 4 096 values = 8 KiB of f16 and two (16,16,128) calls. Every serial-chain
+    ("ser") cell of variant I moves; the dense 32k cell FLIPS from a gain to a loss — dense replication needs the overlapped cold
+    tier (E30). The overlapped cells (the headline 3.720 / 0.155) do not use the piece and do not move. -/
+theorem T3r_serpiece : pieceSerW = 596 ∧ pieceSerC = 807 ∧ slabSer pieceSerW = 305152 ∧ slabSer pieceSerC = 413184 ∧
+    rW4ser pieceSerW = 552 ∧ rW4ser pieceSerC = 408 ∧ tn (8 * KiB) rUsS1 = 32 ∧ tn (8 * KiB) rLoader = 309 ∧
+    -- MoE 32k: as written 147.06 ms → 3.399 (+88.6 %); corrected 159.85 → 3.128 (+73.5 %)
+    instStep3 moe 32768 1 1 xsMoe32k .directSer (slabSer pieceSerW) 0 .uniform br3 lam3 = 147068283 ∧ tpsInst 1000 2000 147068283 = 3399 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer (slabSer pieceSerC) 0 .uniform br3 lam3 = 159845439 ∧ tpsInst 1000 2000 159845439 = 3128 ∧
+    pcsUp 3399 1802 = 886 ∧ pcsUp 3128 1802 = 735 ∧
+    -- dense 32k: as written 4 095.48 → 0.122 (+17.3 %); corrected 4 977.19 → 0.100 (−3.8 %): a LOSS
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 (rW4ser pieceSerW) .uniform br3 lam3 = 4095488833 ∧ tpsInst 1000 2000 4095488833 = 122 ∧
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 (rW4ser pieceSerC) .uniform br3 lam3 = 4977193783 ∧ tpsInst 1000 2000 4977193783 = 100 ∧
+    pcsUp 122 104 = 173 ∧ pcsDown 100 104 = 38 ∧
+    -- dense 4k / 128k: 0.136 → 0.114 (+5.5 %); 0.089 (−4.3 %) → 0.070 (−24.7 %)
+    instStep3 dense 4096 1 1 xsDense4k .directSer 0 (rW4ser pieceSerC) .uniform br3 lam3 = 4367629423 ∧ tpsInst 1000 2000 4367629423 = 114 ∧
+    instStep3 dense 131072 1 1 xsDense128k .directSer 0 (rW4ser pieceSerW) .uniform br3 lam3 = 5578798663 ∧ tpsInst 1000 2000 5578798663 = 89 ∧
+    instStep3 dense 131072 1 1 xsDense128k .directSer 0 (rW4ser pieceSerC) .uniform br3 lam3 = 7078675303 ∧ tpsInst 1000 2000 7078675303 = 70 ∧
+    pcsUp 114 108 = 55 ∧ pcsDown 89 93 = 43 ∧ pcsDown 70 93 = 247 ∧
+    -- MoE 4k / 128k / 1M serial-chain: 3.662 / 2.087 / 0.507 (as written 3.997 / 2.249 / 0.540)
+    tpsInst 1000 2000 (instStep3 moe 4096 1 1 xsMoe4k .directSer (slabSer pieceSerC) 0 .uniform br3 lam3) = 3662 ∧
+    tpsInst 1000 2000 (instStep3 moe 131072 1 1 xsMoe128k .directSer (slabSer pieceSerC) 0 .uniform br3 lam3) = 2087 ∧
+    tpsInst 1000 2000 (instStep3 moe 1048576 1 1 xsMoe1M .directSer (slabSer pieceSerC) 0 .uniform br3 lam3) = 507 ∧
+    -- the MoE breakeven still passes on the corrected chain, 3.4× inside the 1 406 404 ns line
+    slabSer pieceSerC ≤ 1406404 ∧ 1406404 * 10 / slabSer pieceSerC = 34 := by decide
+/-- H10 on the corrected serial chain: the dense 32k cell needs c ≥ 2.091× — more than two instances at full solo speed can give —
+    so it loses at EVERY concurrency c ≤ 2 000, including the card-scale 1.99×; the MoE 32k cell needs c ≥ 1.153× -/
+theorem T3r_serpiece_h10 (c : Nat) :
+    (105 ≤ tpsInst 1000 c 4977193783 ↔ 2091 ≤ c) ∧ (1803 ≤ tpsInst 1000 c 159845439 ↔ 1153 ≤ c) ∧
+    (c ≤ 2000 → tpsInst 1000 c 4977193783 < 105) := by
+  have k1 : 105 ≤ tpsInst 1000 c 4977193783 ↔ 2091 ≤ c := by
+    unfold tpsInst; rw [Nat.le_div_iff_mul_le (by decide)]; constructor <;> intro h <;> omega
+  have k2 : 1803 ≤ tpsInst 1000 c 159845439 ↔ 1153 ≤ c := by
+    unfold tpsInst; rw [Nat.le_div_iff_mul_le (by decide)]; constructor <;> intro h <;> omega
+  exact ⟨k1, k2, fun h => Nat.lt_of_not_le (fun h' => absurd (k1.mp h') (by omega))⟩
+
+/-! ## E35 is LICENSED (qk-norm + per-row guard, HW-MAP): both chains are carried. The fixed-shift (lazy) cells are the loadable
+    branch for qk-normalised models; the guard is in every lazy cell (one reduce-max per P reel); the no-guard fixed shift (overflow
+    on 42–48 % of the reported steps, DEAD) enters no cell. -/
+theorem T3r_e35_guard : chain100 512 1 .lazy .T mergeH = 512 * 16 * (5 * 137 + 1150) + 8 * call100 tRm16 + mergeH ∧
+    8 * call100 tRm16 * 10 / (rVecCore * 100) = 1455 ∧ vblk3 1 .lazy .T = 5530 ∧ vblk3 1 .rowmax .T = 9276 := by decide
+/-- the paired cells (chain as specified / fixed-shift): dense spec 0.227 / 0.248, dense 128k spec 0.156 / 0.203, dense 1M KV-int8
+    0.054 / 0.065, L*_KV on KV-int8 1 006 608 / 1 507 344, t* dense 2 / 3 and MoE 5 / 9, the instance dense spec 0.349 / 0.374 -/
+theorem T3r_e35_branches :
+    tpsCard (tau 700 3) (step3 dense 32768 1 4 br3 lam3) = 227 ∧ tpsCard (tau 700 3) (step3 dense 32768 1 4 br3Lazy lam3) = 248 ∧
+    tpsCard (tau 700 3) (step3 dense 131072 1 4 br3 lam3) = 156 ∧ tpsCard (tau 700 3) (step3 dense 131072 1 4 br3Lazy lam3) = 203 ∧
+    tpsCard 1000 (step3 dense 1048576 1 1 br3I8 lam3) = 54 ∧ tpsCard 1000 (step3 dense 1048576 1 1 br3I8Lazy lam3) = 65 ∧
+    vecGeKv 16 1 .rowmax .T false = false ∧ vecGeKv 16 2 .rowmax .T false = true ∧
+    vecGeKv 16 2 .lazy .T false = false ∧ vecGeKv 16 3 .lazy .T false = true ∧
+    vecGeKv 4 4 .rowmax .T false = false ∧ vecGeKv 4 5 .rowmax .T false = true ∧
+    vecGeKv 4 8 .lazy .T false = false ∧ vecGeKv 4 9 .lazy .T false = true := by decide
+/-- the guard's exception path at the measured trip rate (0.087–0.22 % of steps) costs ≈ 10.7 µs per trip (DESIGN-3 §3.4 estimate):
+    even ONE trip in EVERY layer of EVERY step (≥ 450× the measured rate) leaves the fixed-shift cells unchanged in thousandths -/
+theorem T3r_e35_trip_bound (e : Nat) (he : e ≤ 120 * 10700) :
+    tpsCard (tau 700 3) (step3 dense 32768 1 4 br3Lazy lam3 + e) = 248 ∧
+    tpsCard 1000 (step3 dense 1048576 1 1 br3I8Lazy lam3 + e) = 65 ∧
+    tpsCard 1000 (step3 dense 32768 1 1 br3Lazy lam3 + e) = 104 := by
+  have h : step3 dense 32768 1 4 br3Lazy lam3 = 2547505208 ∧ step3 dense 1048576 1 1 br3I8Lazy lam3 = 3814122749 ∧
+      step3 dense 32768 1 1 br3Lazy lam3 = 2386333949 ∧ tau 700 3 = 2533 := by decide
+  rw [h.1, h.2.1, h.2.2.1, h.2.2.2]
+  unfold tpsCard
+  refine ⟨?_, ?_, ?_⟩
+  · have a : 248 ≤ 2533 * 1000000000 / (4 * (2547505208 + e)) := by rw [Nat.le_div_iff_mul_le (by omega)]; omega
+    have b : 2533 * 1000000000 / (4 * (2547505208 + e)) < 249 := by rw [Nat.div_lt_iff_lt_mul (by omega)]; omega
+    omega
+  · have a : 65 ≤ 1000 * 1000000000 / (4 * (3814122749 + e)) := by rw [Nat.le_div_iff_mul_le (by omega)]; omega
+    have b : 1000 * 1000000000 / (4 * (3814122749 + e)) < 66 := by rw [Nat.div_lt_iff_lt_mul (by omega)]; omega
+    omega
+  · have a : 104 ≤ 1000 * 1000000000 / (4 * (2386333949 + e)) := by rw [Nat.le_div_iff_mul_le (by omega)]; omega
+    have b : 1000 * 1000000000 / (4 * (2386333949 + e)) < 105 := by rw [Nat.div_lt_iff_lt_mul (by omega)]; omega
+    omega
+
+/-! ## The load-bearing set under PROMPT-4P2's names (conjunctions of the theorems above) -/
+/-- T_spec_moe_loss survives (threshold 0.864 → 0.866 under uniform routing): a loss iff α ≤ 0.866 / 0.752 / 0.657 by routing family
+    (anchored) and ≤ 0.847 / 0.741 / 0.652 on the direct path, in both directions for every α -/
+theorem T3r_spec_moe_loss : (∀ a, a < 1001 →
+      ((tau a 3 * 138693907 < 1000 * 453082211 ↔ a ≤ 866) ∧ (tau a 3 * 138693907 < 1000 * 380770559 ↔ a ≤ 752) ∧
+       (tau a 3 * 138693907 < 1000 * 329119379 ↔ a ≤ 657) ∧ (tau a 3 * 122831347 < 1000 * 389631971 ↔ a ≤ 847) ∧
+       (tau a 3 * 122831347 < 1000 * 331200059 ↔ a ≤ 741) ∧ (tau a 3 * 122831347 < 1000 * 289462979 ↔ a ≤ 652))) ∧
+    step3 moe 32768 1 4 br3 lam3 = 453082211 ∧ step3 moe 32768 1 1 br3 lam3 = 138693907 :=
+  ⟨T3r_spec_moe_loss_exact, T3r_spec_moe_steps.2.1, T3r_spec_moe_steps.1⟩
+/-- T_min_dies survives unchanged (R27): 4 dies infeasible for every layer assignment under full int8 residency, 5 feasible; the
+    instance variant escapes it only under the different hypothesis that int4 bytes ride the measured unpack path (R17) -/
+theorem T3r_min_dies :
+    (∀ n0 n1 n2 n3, n0 + n1 + n2 + n3 = 120 →
+      ¬ (n0 * dense.wRes ≤ dieMem ∧ n1 * dense.wRes ≤ dieMem ∧ n2 * dense.wRes ≤ dieMem ∧ n3 * dense.wRes ≤ dieMem)) ∧
+    (∀ n0 n1 n2 n3, n0 + n1 + n2 + n3 = 28 →
+      ¬ (n0 * moe.wRes ≤ dieMem ∧ n1 * moe.wRes ≤ dieMem ∧ n2 * moe.wRes ≤ dieMem ∧ n3 * moe.wRes ≤ dieMem)) ∧
+    24 * dense.wRes + dense.wEmbed + 24 * 4096 * 4096 + ws + oRt ≤ dieMem ∧
+    6 * moe.wRes + moe.wEmbed + 6 * 4096 * 4096 + ws + oRt ≤ dieMem := T_min_dies
