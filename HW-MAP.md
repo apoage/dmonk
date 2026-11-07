@@ -111,7 +111,7 @@ inherit this — erratum #19).
 | "fractal-transform" copy (DDR→S1 with layout transform) | ~7 GB/s/core | **software** transform on this part — do not use on any hot path |
 | L0C → US window drain (copy-out 1 KB chunks, queue-fenced) | **152.8 / 222.3 / 260.3 / 285.5 GB/s/core at mt = 1..4** | measured — **9×–45× above the 3.41/6.83/12.28/16.37 hide thresholds: the drain is HIDDEN at every mt**, content-checked exact |
 | **US → US strided copy (post-PV row extraction, plain strided bytes)** | **works — measured REAL** (production expert-GEMM kernel epilogue, differencing-verified) | no layout transform (the ~7 GB/s transform-copy path is a different route); stride math must follow the fragment-order L0C → US drain below |
-| **Gather at the attention kernel's own choreography (fresh-path tile-mix loop)** | **~138 GB/s aggregate, page-size-insensitive** (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) | 18 % under the E21 169 basis — barrier density of the 2-kind diagnostic loop; the production loop halves barriers per byte; c_pg ≈ 0 at ≥ 64 KiB confirmed |
+| **Gather at the attention kernel's own choreography (fresh-path tile-mix loop)** | **~138 GB/s aggregate, page-size-insensitive** (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) | 18 % under the E21 169 basis — barrier density of the 2-kind diagnostic loop; the production loop halves barriers per byte; c_pg ≈ 0 at ≥ 64 KiB confirmed. **Session 2 re-run: the production kernel's own stream runs 176 GB/s (the 138 was the tile-mix diagnostic). Full-pipeline effective KV at L=4k, t=1: 390-422 GB/s aggregate (39.7-43 µs) — the t×L sweep pends the mask fix.** |
 | **i32 accumulator overflow semantics** | **SILENT SATURATION at 2³¹−1** (not wrap) | measured: 127² chains exact to 2,147,092,480 (99.98 % of 2³¹); −128² chains hitting 2³¹ exactly clamp at 2,147,483,647 — **the [−127,127] quantizer clamp is REQUIRED; U_max = 32 MoE-shape chains are exact (bound HOLDS)**; L0C has no zero-init (pre-accumulation reads are nondeterministic → drain-before-accumulate required) |
 | **Host bounce λ (die→host→die, 4 KiB sync legs)** | **12.2 / 12.1 µs per direction; bounce 23.8–24.6 µs; unchanged under die-0 saturating D2D load** | measured — 7.6× below the 91 µs launch-floor-class anchor, inside the 10/500 bracket; **bounce share of any step ≈ 0.1 % — negligible for the planner** |
 
@@ -123,8 +123,13 @@ inherit this — erratum #19).
    Every data path must be proven by differencing tests (same destination
    address, different source content, observable result must change).
 2. **Single copy > 64 KB faults** (core watchdog timeout). Slice all copies.
-3. **Count-mode vector ops process ≤ 1024 lanes per call** — larger calls
-   silently truncate.
+3. **CORRECTED (measured, attention session 2): count-mode vector ops do NOT
+   cap at 1024 lanes** — Sub processes 4096/4096 lanes, Duplicate 2048/2048,
+   and all vector-op dst/src slice offsets are honored at 256-lane
+   granularity (isolated probes, live silicon). The original
+   ≤1024-truncation observation does not generalize — treat lane capacity as
+   per-op and probe an op in isolation before relying on wide calls.
+   (Chunking to ≤1024 lanes per call remains free hygiene.)
 4. Some bitwise shifts on 16-bit integers are **silent no-ops**.
 5. **f16 accumulation saturates at 65504** — never carry growing factors
    through long f16 sums.
@@ -217,6 +222,20 @@ inherit this — erratum #19).
     patterns make distinct tokens share values, hiding transposition and
     mapping bugs (a call-tile transposition looked like a clean one-token
     shift). Use prime periods > L for any token-mapped verification data.
+22. **Unary `Muls` is a silent no-op** — build scalar multiplies as
+    Duplicate + binary Mul.
+23. **A blocked copy's `srcStride = 0` means CONTIGUOUS, not
+    source-repeat** — a blockCount×blockLen copy with srcStride 0 lands
+    only the first block's worth (stale bytes past it).
+24. **Element-form copies above 4 KiB per single block land partially**
+    (an 8-KiB element copy landed 4 KiB).
+25. **A 16-KiB DDR → S1-A-slot single block ZEROES A rows ≥ 2** — stage in
+    4-KiB legs.
+26. **Scalar set/get loops deeper than ~256 are unreliable** (re-confirmed).
+27. **Queue → vector-buffer staging of a full 32-KiB block hangs
+    intermittently** — read the drained queue tensor directly instead.
+28. **A surplus per-block event arm (an extra SetFlag after the handshake
+    already armed it) = intermittent deadlock** — arm once per handshake.
 
 ## Concurrency & runtime behavior (all measured, season h)
 
@@ -246,7 +265,13 @@ inherit this — erratum #19).
   model's normalization class first. **Measured (attention kernel session
   1): the guard + per-trip recompute is REQUIRED, not advisory — without
   the recompute exactly the predicted 9/8192 lanes per tripped block come
-  out wrong.**
+  out wrong.** **Session 2 (silicon): the full lazy chain — two-pass, trip
+  recompute, needle switch — is BITWISE-EXACT at 32k (262,144 lanes, maxRel
+  0.0, real-exp) with every guard test green (planted trip = exactly 1 with
+  P exact; needle = switch fires with P exact; padded tail = 0 trips); and
+  the kernel-true f32 online-chain drift at 1M tokens is 1.2e-6 rel
+  (512-token blocks) / 1.8e-6 (256) — ~500× inside the 1e-3 ship line
+  (fresh-f64-within-block: 1.5e-8 / 7.7e-8).**
 - **Same-dst MMA chains: SPACING is the binding variable, not depth** —
   interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
   bidirectionally at depth >= 256 (filler results leak into chain chunks).

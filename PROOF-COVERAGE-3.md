@@ -142,6 +142,18 @@ roof (`legs`), the production loop's rate, the matrix unit's internal summation 
 (A4), the guard's fence read (A5), the trip rate at β = 3 and μ = 0; OPEN — every vector-chain cell (E36); DERIVED — everything else,
 each with its theorem. The empirical residue is the round-4 ladder of DESIGN-3 §8: E36 first, then E24′, E35, E27′, E26′, E25, E28.
 
+**Steering note (2026-11-07, kernel session 2): the OPEN vector-chain cells
+may now be read as loadable.** The softmax-reel anomaly that forced the OPEN
+markers was root-caused as a host-side buffer overrun cluster (an under-sized
+strip accumulator trampling the reel — errata #22-#28 in HW-MAP document the
+silicon semantics found en route), not a vector-unit limitation: the full
+chain is now bitwise-exact on silicon at 32k (262,144 lanes, maxRel 0.0) with
+all guard tests green, and E26 is CLOSED — kernel-true f32 online-chain drift
+at 1M = 1.2e-6 (512-token blocks) / 1.8e-6 (256) ≈ 500× inside the ship line.
+Still genuinely open at silicon: the causal/pad mask path (unexercised — the
+green runs were non-causal) and the flaky full-pipeline hang at 32k; the
+`legs` and production-loop-rate UNMEASURED markers stand until the t×L sweep.
+
 
 ## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP commit e9349c8)
 
