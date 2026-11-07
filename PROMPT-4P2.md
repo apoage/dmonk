@@ -26,12 +26,32 @@ INPUT CHANGES to instantiate (the map moved since the prompt was written):
   numbers are the loadable branch; the 42-48% overflow no-guard case is
   dead — carry both as the prompt's ladder rows require.
 
+UPDATES SINCE THIS PROMPT WAS WRITTEN (2026-11-07, before this session):
+- DESIGN-3 round 4 landed: proof/attn.lean is at 265 theorems, and
+  proof/fleet.py gained [R4-*] sections plus the page-waste term (all
+  round-2/3 lines byte-identical). Your additions still extend fleet.lean
+  in place — and must leave the [R4-*] sections intact.
+- The T3r_moe128k_tie statement has MOVED: round 4 carries the P-fragment
+  DDR bounce as legs 0/1/2 per block. Legs-0 reproduces the round-3 tie
+  (weights-bound by 0.5% at 256 KiB); with both legs charged the MoE-128k
+  cell is attention-bound at every gather rate up to 174.6. Prove the tie
+  as a legs-conditional and state which leg count the planner must read.
+- Known stale figure to correct (diff-list it): fleet.py's serial-chain
+  int4 per-piece figure (596 ns) predates the alternatives proof round's
+  measured 807 ns.
+- If a round-3 "attention-bound iff G <= G*" cell cannot hold because the
+  vector chain alone exceeds the weight time, prove the corrected statement
+  (attention-bound at every G) and correct DESIGN-4's round-3 text —
+  corrections score positive.
+
 THEOREM TARGETS: the 27 named T3r_* statements (Appendix A'), plus:
   T3r_spec_dense_split : the 0.227 vs 0.248 (std vs fixed-shift verify
   chain) pair as threshold theorems over the chain cost
   T3r_moe128k_tie      : the tie — weights-bound by 0.5% at 256 KiB,
   attention-bound at 64 KiB AND at every page size on the direct-path
-  expert kernel (this decides whether (k) outranks (m) follow-ups)
+  expert kernel (this decides whether attention-kernel follow-ups —
+  DESIGN-3's route M — outrank expert-GEMM follow-ups — the direct-path
+  expert kernel)
   T3r_instance_margin  : the 2-30 MB/die fit margin with the 2.3%/GB
   overhead sensitivity, overhead as hypothesis variable
 Deliverables: extended proof/fleet.lean, regenerated PROOF-COVERAGE-4
