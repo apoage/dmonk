@@ -1,5 +1,32 @@
 # DESIGN-4 — fleet partition planner (4 cards × 2 dies, no P2P, layer-split-only runtime)
 
+> **ROUND-5 STATUS (2026-11-07 — the measured production attention kernel; attention session 3, HW-MAP 62e8137; `proof/fleet.py`
+> `[R5-*]`, `proof/fleet.lean` `T5r_*` (18 new theorems, 310 total, 0 axioms / sorry / native_decide), PROOF-COVERAGE-4.md round-5
+> section).** The attention term is now a MEASURED per-layer time (DESIGN-3 §6.0), carried as three readings — the G triplet at 32k:
+> **guarded 88.7 GB/s** (the kernel as shipped, MEASURED at every L: 213.5 / 1 513.6 / 5 852.9 / 46 313.6 µs), **unguarded 143.0**
+> (MEASURED at 32k, 938.8 µs; off 32k the guarded cell minus the per-block guard — DERIVED), **fused ≈ 140** (the target: the unguarded
+> kernel plus one batched 20 µs crossing per step — UNMEASURED, E39). The step is affine in the per-layer attention a (dense 2 289 788 669
+> + 120·a ns, MoE 115 956 899 + 28·a — T5r_step_form, ∀ a), so every cell below is a theorem about the measured number. **Headline,
+> L = 32k, t = 1 (§3.6, T5r_step_cells): dense 0.101 / 0.104 / 0.103 tokens/s/card (guarded / unguarded / fused; round 4: 0.104), MoE
+> 1.578 / 1.757 / 1.750 (round 4: 1.766 — the shipped guard costs the MoE cell 10.6 %)**; MoE 128k 0.893 / 1.160 / 1.157 (1.155), MoE 1M
+> 0.176 / 0.278 / 0.278 (0.272), dense 128k 0.083 / 0.092 / 0.091 (0.091). **T3r_moe128k_tie restated with the MEASURED legs = 2 and the
+> measured kernel (§4.4, T5r_moe128k_tie_measured): the MoE-128k cell is hard attention-bound on every reading** — per layer by 82.5 %
+> guarded, 10.8 % unguarded, 11.4 % fused (anchored; 121.6 / 34.5 / 35.3 % on the direct path) — and so is the STEP (163.88 / 99.50 /
+> 100.06 ms of attention against 92.82 ms of weights); at the measured bounce the legs-conditional lines are G ≤ 178.7 (anchored) / 220.2
+> (direct) with zero chain and zero fixed cost (round 4's legs-2 lines: 189.4 / 230.3), on the effective KV rate G_eff ≤ 167.3 / 203.2 —
+> every reading (91.7 / 151.1 / 150.2) is below them. **The lever ranking, corrected (§10″, T5r_levers): the P4P2 order at MoE 128k
+> (choreography 22.33 > E29 15.86 > bounce 11.10 ms per token) becomes guard fusion 63.81 > E29 15.86 > phase overlap ≤ 7.46 > bounce
+> removal 5.71 ms.** The 138.3 → 169.2 "choreography" lever is retired (the K+V stream phase runs 174–176 GB/s, MEASURED; the gap to the
+> round-4 cell is the guard scan, which covers 101.5 % of it — T5r_retired); the bounce is cheap (51 µs at 32k). Guard fusion is first for
+> dense at every L and for MoE at every L ≥ 33 297 (32 785 at a 10 µs crossing; T5r_levers_overtake); **at exactly MoE 32k it ties E29
+> within 2.1 % and comes second (15.53–15.81 vs 15.86 ms) unless the fused kernel's residual per step is ≤ 8 279 ns (T_fused ≤ 947.1 µs =
+> 141.7 GB/s — T5r_levers_moe32k_iff): "guard fusion (~570 µs) is the new #1" holds at 32k only at the zero-residual ceiling (574.8 µs →
+> 16.09 ms)**; at MoE 4k E29 stays first. Spec decode on the guarded verify kernel (DERIVED transfers): dense 0.211 (round 4: 0.252; beats
+> t = 1 iff α ≥ 0.179, round 3: 0.144), MoE 1.339 (1.389); **T_spec_moe_loss survives with its line moved: the MoE verify batch loses for
+> every α ≤ 0.807 guarded / 0.854 unguarded / 0.853 fused (round 3: 0.866 — T5r_spec_thresholds)**. MoE B = 16 1.966 / 2.251 / 2.240
+> (round 4: 2.267); two instances at H10's c = 1.990: MoE 3.230 / 3.607 / 3.592 (round 3: 3.702), dense 0.150 / 0.153 / 0.153; dense 1M
+> KV-int8 ≤ 0.034 under erratum #29's crossing bound (round 4: 0.053). T_min_dies is untouched (no attention term).
+
 > **ROUND-3 PROOF STATUS (PROMPT-4P2, 2026-11-07 — `proof/fleet.lean` round-3 section, PROOF-COVERAGE-4.md round-3 proof session,
 > `proof/fleet.py` `[R3P-*]`).** The 27 round-3 rows of Appendix A′ are proved in core Lean 4.35: 168 theorems `T3r_*` (292 in the
 > file), 0 axioms / sorry / native_decide, `lean proof/fleet.lean` and `lake build` clean; every round-3 cell was printed by
@@ -150,6 +177,24 @@ Draft model: 1 GB int8, 24 layers, 121 launches per draft token, 4k-token slidin
 ---
 
 ## 0. Summary — does any configuration close, and at what tokens/s
+
+### 0″ Round-5 summary (`[R5-headline-*]`, `[R5-step-*]`, `[R5-levers-*]`)
+
+**Nothing in the partition moves; the attention term is replaced by the measured kernel.** At t = 1 both shapes run the measured kernel's
+shape (mt = 1), so the per-layer attention is the t × L sweep (guarded, MEASURED) or one of its two readings (unguarded: MEASURED at 32k;
+fused: the E39 target). What the measurement changed: (1) **the shipped guard is the largest attention cost** — 574.8 µs of the 1 513.6 µs
+per layer at 32k (38 %), 16.09 ms per MoE token, 68.97 ms per dense token; (2) **the round-4 model was right on the unguarded cell** (3.0 %),
+so on the unguarded and fused readings every round-4 fleet cell holds within ±2.2 %; (3) **the MoE-128k cell is no longer close to a tie
+on any reading** (attention-bound by 10.8–82.5 %); (4) **the follow-up ranking moves**: guard fusion first from 32 785–33 297 tokens
+of context on (the crossing at 10–20 µs), E29 first below it, the bounce removal last everywhere except MoE 1M (second there: 45.69 ms,
+just above the overlap bound, with E29 last). The single measurement that decides the 32k rank is E39's residual X (≤ 8 279 ns per step
+for guard fusion to beat E29 there).
+
+| L = 32k, t = 1 | guarded (M) | unguarded | fused (target) | round 4 | round 3 |
+|---|---|---|---|---|---|
+| dense tokens/s/card | **0.101** | 0.104 | 0.103 | 0.104 | 0.104 |
+| MoE tokens/s/card | **1.578** | 1.757 | 1.750 | 1.766 | 1.802 |
+| MoE attention per token | 42.38 ms (26.8 %) | 26.28 ms (18.5 %) | 26.84 ms (18.8 %) | 25.52 ms | 22.73 ms |
 
 ### 0′ Round-3 summary (`[R3-headline]`, `[R3-decision]`, `[R3-moved-*]`)
 
@@ -654,6 +699,43 @@ launch floor are the two big MoE levers, both measurable, neither a runtime chan
 Zipf(1.0) D = 68 → 1 099.92, 3.636 (4.144); Zipf(1.5) D = 45 → 862.33, 4.638 (5.173); 1M infeasible (memory). The
 attention of 16 sequences is 363.79 ms at 32k (21 % of the step).
 
+### 3.6 Round 5 — the step on the measured attention kernel (`[R5-attn-*]`, `[R5-step-*]`, `[R5-headline-*]`, `[R5-B16-*]`, `[R5-inst-*]`)
+
+**The attention term is a measured per-layer time.** fleet.py `step5f` is the round-4 step with the attention replaced by a per-layer time
+a (ns); every other term (weights, lm_head, launches, quant passes, bounce, draft) is unchanged. The step is affine in a (T5r_step_form, ∀ a):
+**T_dense = 2 289 788 669 + 120·a, T_MoE = 115 956 899 + 28·a** (t = 1, B = 1). The three readings per layer (T5r_readings; DESIGN-3 §6.0):
+
+| L | guarded (M) | unguarded | fused (target, E39) | constant-rate bracket 143.0 / 140.0 | round 4 (lazy-T, legs 2, 169.2) |
+|---|---|---|---|---|---|
+| 4k | 213 500 ns | 141 650 (D) | 161 650 (D) | 117 323 / 119 837 | 130 872 |
+| 32k | 1 513 600 | **938 800 (M)** | **958 800** (D) | 938 585 / 958 698 | 911 680 |
+| 128k | 5 852 900 | 3 553 700 (D) | 3 573 700 (D) | 3 754 342 / 3 834 792 | 3 588 736 |
+| 1M | 46 313 600 | 27 920 000 (D) | 27 940 000 (D) | 30 034 736 / 30 678 337 | 28 574 592 |
+
+**The cells (T5r_step_cells; ms → tokens/s/card, change against round 4, binding term):**
+
+| shape, L | round 4 | guarded (M attention) | unguarded | fused | constant-rate bracket |
+|---|---|---|---|---|---|
+| dense 4k | 2 305.49 → 0.108 | 2 315.40 → **0.107** (−0.9 %; W) | 2 306.78 → 0.108 | 2 309.18 → 0.108 | 0.108 / 0.108 |
+| dense 32k | 2 399.19 → 0.104 | 2 471.42 → **0.101** (−2.8 %; W, attention 7.3 %) | 2 402.44 → 0.104 | 2 404.84 → 0.103 | (32k is measured) |
+| dense 128k | 2 720.43 → 0.091 | 2 992.13 → **0.083** (−8.7 %; W, attention 23.5 %) | 2 716.23 → 0.092 | 2 718.63 → 0.091 | 0.091 / 0.090 |
+| MoE 4k | 119.62 → 2.089 | 121.93 → **2.050** (−1.8 %; W) | 119.92 → 2.084 | 120.48 → 2.074 | 2.096 / 2.095 |
+| MoE 32k | 141.48 → 1.766 | 158.33 → **1.578** (−10.6 %; W, attention 26.8 %) | 142.24 → 1.757 | 142.80 → 1.750 | (32k is measured) |
+| MoE 128k | 216.44 → 1.155 | 279.83 → **0.893** (−22.6 %; **ATTN** 58.6 %) | 215.46 → 1.160 (ATTN) | 216.02 → 1.157 (ATTN) | 1.130 / 1.119 |
+| MoE 1M | 916.04 → 0.272 | 1 412.73 → **0.176** (−35.2 %; **ATTN** 91.8 %) | 897.71 → 0.278 | 898.27 → 0.278 | 0.261 / 0.256 |
+
+Dense 1M (KV-int8 only; no KV-int8 kernel is measured): the round-4 rowmax cell (4 698.92 ms → 0.053) plus erratum #29's per-block crossing
+(≥ 10 318 ns × 2 048 blocks × 120 layers = +2 535.75 ms) gives **≤ 0.034** (T5r_dense1M_bound — a bound; the lazy μ = 0 route is UNMEASURED).
+Reading it: the guarded column is what the shipped kernel delivers (the guard is 38 % of the attention at 32k); the unguarded and fused
+columns are within ±2.2 % of round 4 on every cell (the round-4 attention model was right on the unguarded cell); the bracket shows how
+much of that rests on the per-block scaling of the guard off 32k (up to 6.1 % / 7.9 % at MoE 1M, unguarded / fused).
+
+**MoE B = 16 (uniform) at 32k** (T5r_B16): 2 034.04 → **1.966** guarded / 1 776.53 → 2.251 unguarded / 1 785.49 → 2.240 fused (round 4:
+2.267) — 16 sequences carry 678.09 ms of guarded attention. **Two 4-die instances** (T5r_inst; overlapped cold tier, the round-3 minimal
+shares, H10's c = 1.990): MoE 32k 154.02 / 137.92 / 138.48 ms → **3.230** / 3.607 / 3.592 (round 3: 3.702), each beating its one-instance
+cell for every c ≥ 0.973 / 0.970 / 0.970; dense 32k 3 307.67 / 3 238.69 / 3 241.09 ms → 0.150 / 0.153 / 0.153, for every c ≥ 1.350 /
+1.361 / 1.349. The instance decision is unchanged on every reading.
+
 ---
 
 ## 4. Regime map and crossover theorems
@@ -780,6 +862,32 @@ fragment already exceeds the stream (25.5 lane-equivalents per score of elementw
 reduce-max calls, the 20-call shift reel and the merge, 48 % of the chain). The matrix-unit bound (T-MMA, 8 %·mt of the stream) is unchanged.
 
 **T8′ (bounce), T2 (ceiling), T4 (memory):** T8 is re-instantiated in §2.4; T2 and T4 are unchanged (no λ, G or c_q term).
+
+### 4.4 Round 5 — the MoE-128k tie on the measured kernel (`[R5-moe-128k-*]`; T5r_moe128k_tie_measured, T5r_moe128k_everyG, T5r_moe128k_cells)
+
+**T3r_moe128k_tie, restated with the MEASURED legs = 2 and the MEASURED kernel.** The round-3 proof session proved the tie legs-conditional
+(attention-bound iff G ≤ 168.3 / 178.9 / 189.4 at legs 0 / 1 / 2, anchored; 204.7 / 217.5 / 230.3 direct) and the planner read legs = 2.
+Session 3 measured both inputs. The verdict, per layer against the anchored weight layer (3 207 719 ns) and the direct-path one (2 641 199):
+
+| reading | attention per layer | anchored | direct path | step at Π = 1: ATTN vs W |
+|---|---|---|---|---|
+| guarded (M) | 5 852 900 ns | **ATTN-bound by 82.5 %** | ATTN by 121.6 % | 163.88 vs 92.82 ms — ATTN |
+| unguarded (D) | 3 553 700 | ATTN by 10.8 % | ATTN by 34.5 % | 99.50 vs 92.82 — ATTN |
+| fused (D, target) | 3 573 700 | ATTN by 11.4 % | ATTN by 35.3 % | 100.06 vs 92.82 — ATTN |
+
+**The lines, as iffs over every G > 0 (T5r_moe128k_tie_measured):** with the measured bounce (204 000 ns per layer at 128k: 51 µs at 32k
+scaled per block) and NO chain or fixed cost at all, the layer is attention-bound iff G ≤ **178.7** (anchored) / **220.2** (direct) — the
+round-4 legs-2 lines (189.4 / 230.3) move down because the measured bounce is 51.4 % of the modelled roof charge, but both stay above the
+174.6 ceiling: **attention-bound at every G ≤ 174.6 on both expert kernels, whatever the chain costs** (T5r_moe128k_everyG). On the
+effective KV rate (all costs folded in) the lines are G_eff ≤ **167.3 / 203.2** — every reading (91.7 / 151.1 / 150.2 GB/s at 128k) is
+below them. The planner's question "which side binds at MoE 128k" is closed: attention, by a margin no remaining unknown can close — guard
+fusion leaves 11.4 %, and even the overlapped floor (the K+V stream phase + the measured bounce = 3 287 200 ns, what a perfect E40 would
+reach) exceeds the layer by 2.5 % (T5r_fleet_moe_128k_cells).
+
+**T5′ / R12 / R13 on the measured kernel.** The L-crossovers of §4.3 (L* per G) were properties of the modelled block; on the measured
+kernel the MoE cells are attention-bound at 128k and 1M and weights-bound at 4k and 32k on every reading (§3.6), the dense cells
+weights-bound at 4k–128k; the dense 1M cell exists only on KV-int8 (bounded above by 0.034). The G* iff lines of R13 are superseded by the
+effective-rate lines above (G_eff ≤ 167.3 / 203.2 at MoE 128k).
 
 ---
 
@@ -912,6 +1020,25 @@ the 64-row verify batch changes the *attention kernel's* configuration (mt = 4, 
 a dense-fleet item. MoE: off by default (the thresholds are a shade higher than round 2's); on only if H9 shows Zipf(1.5)-
 class skew and α ≥ 0.658 (0.653 on the direct path). On two instances the dense spec cell is 0.349 / 0.374 (`[R3-inst-dense-32k-spec-*]`).
 
+### 6.5 Round 5 — spec decode on the measured verify kernel (`[R5-spec-*]`; T5r_spec, T5r_spec_steps, T5r_spec_thresholds)
+
+The verify kernel is measured on the headline shape only (g = 8: t = 4 is rows 32 at mt 2, t = 16 is rows 128 in two mt-4 passes), so the
+fleet shapes take it by fragment count — DERIVED transfers, not measurements: **dense t = 4 (rows 64, one mt-4 pass) = half of the measured
+t = 16 cell = 5 370 850 ns per layer at 32k; MoE t = 4 (rows 16, one mt-1 fragment) = the measured t = 1 cell** (1 513 600 guarded; the
+unguarded / fused readings carry over the same way). The guarded verify kernel is 4.1× the round-4 lazy-T verify model on dense (5.37 vs
+1.30 ms per layer): the multi-fragment kernel scales with fragments (DESIGN-3 §6.0).
+
+| k = 3, α = 0.7, 32k | guarded verify (M attention) | round 4 | t = 1 guarded | threshold (round 3) |
+|---|---|---|---|---|
+| dense | 3 000.80 ms → **0.211** | 0.252 | 0.101 | beats t = 1 iff **α ≥ 0.179** (0.144) |
+| MoE (uniform, anchored) | 472.72 ms → **1.339** | 1.389 | 1.578 | **loses iff α ≤ 0.807** guarded / 0.854 unguarded / 0.853 fused (0.866) |
+
+**T_spec_moe_loss survives; its line moves** (T5r_spec_thresholds, iffs over every α ∈ [0, 1] in thousandths, `decide +kernel`): the MoE
+verify batch still multiplies the active-expert bytes, so at α = 0.7 spec decode loses on every reading; the measured attention, the same
+per layer in the verify and the t = 1 step, shrinks the ratio T₄ / T₁ (472.72 / 158.33 ms guarded) and so the loss line (0.866 → 0.807).
+Dense spec still pays: 0.211 against 0.101 (2.09×); its breakeven rises 0.144 → 0.179. The unguarded verify kernel is UNMEASURED — the
+dense guarded-verify cell is the only dense spec number this round can quote.
+
 ---
 
 ## 7. Rollout plan: 1 card → 2 cards → 4 cards without re-partitioning
@@ -1001,6 +1128,18 @@ Order (round 3): **H10 first** (an afternoon, host-only, gates the largest runti
 kernel-side gates this plan now depends on are owned by the other designs: E29 (direct-path expert chain, DESIGN-2 / ALT-1),
 E31 / E32 (DDR-flag sync, watchdog — ALT-3), E35 (fixed-shift softmax — DESIGN-3 §3.4), E30 (cold-tier chain — ALT-2).
 
+**Round 5 — the ladder rows the measured attention kernel adds** (kernel-side; owned by DESIGN-3 §8, listed here because they rank the
+plan's follow-ups):
+
+| # | Settles | Setup | Observable failure | Decides |
+|---|---|---|---|---|
+| **E39** (DESIGN-3 §8) | the batched guard's residual X per step (crossings + vector side-product + re-runs) over the unguarded 938.8 µs | the 32k t = 1 cell of the batched-guard kernel | X > 20 µs = the side-product sits on the serial chain | **the MoE 32k rank: guard fusion beats E29 iff X ≤ 8 279 ns** (T5r_levers_moe32k_iff); the fused column of §3.6 |
+| **E40** (DESIGN-3 §8) | the serial phases overlapped across blocks | the 32k cell against the overlapped floor (821.8 µs) | no gain = a hidden per-phase crossing | ≤ 3.27 / 7.46 / 45.42 ms per MoE token at 32k / 128k / 1M |
+
+Order (round 5): H10 and H11 keep their place (host-only); on the kernel side **E39 first** — it is worth 554.8–564.8 µs per layer at 32k
+(15.53–15.81 ms per MoE token, 66.57–67.77 per dense token) and decides the 32k rank against E29 — then E29, then E40; the bounce (E24′)
+is closed and cheap.
+
 ---
 
 ## 9. Risk register
@@ -1046,6 +1185,16 @@ E31 / E32 (DDR-flag sync, watchdog — ALT-3), E35 (fixed-shift softmax — DESI
 | Launch floor | unchanged | 2.8 % dense / 13.0 % MoE / 50 % of a draft token / 46 % of the MoE tensor-split what-if | V2; H6 |
 | Thermal | unchanged | two instances = two cards at 141 W each at Π = 1; Π = 8 four cards at 141 < 150 | none |
 
+**Round 5 — the risk rows of the measured attention kernel:**
+
+| Risk | Trigger | Impact | Fallback |
+|---|---|---|---|
+| The shipped guard stays in production | E39 not done | the guarded column of §3.6: MoE 32k 1.578 (−10.6 %), 128k 0.893 (−22.6 %), 1M 0.176 (−35.2 %); dense 32k 0.101 | the batched guard (E39) |
+| The batched guard misses its target | E39 | X > 20 µs per step: each 10 µs is 0.28 ms per MoE token (0.2 % of the 32k step) — small on cells, decisive only for the 32k rank against E29 | E40 on the side-product |
+| The per-block guard does not scale per block off 32k | the readings' rule | the unguarded / fused columns off 32k move to the constant-rate bracket: MoE 128k 1.130 / 1.119, 1M 0.261 / 0.256 (−2.6 … −7.9 %) | measure the unguarded kernel at 128k / 1M |
+| Verify batches at the measured per-fragment cost | measured (t ≥ 4) | dense spec 0.211 (round 4: 0.252); MoE spec loses for α ≤ 0.807 | E39 and E40 at mt ≥ 2 |
+| Dense 1M on KV-int8 pays erratum #29 | no KV-int8 kernel | ≤ 0.034 tokens/s/card (rowmax crossing bound) | the lazy μ = 0 KV-int8 route (trip rate UNMEASURED) |
+
 ---
 
 ## 10. The single measurement that most changes the plan
@@ -1085,6 +1234,48 @@ single measurement that most changes what ships *next month*. At 32k the other u
 quant-pass reading 0.98× / 0.98× (the integrated-chain reading 0.80× on dense), page size 1.00× / 0.98×, the chain
 convention 1.00×, λ over 10–500 µs 1.00× / 0.95×, launch pipelining 1.03× / 1.15×, the MoE regime 1.13× (1.13–1.15× across the direct / overlapped / ping-pong readings — proof, T3r_branch_ratios); at 1M the page size
 moves MoE by 0.92× (16 KiB) and the chain variant moves dense KV-int8 by 1.20×.
+
+### 10″ Round 5 — the attention-side levers, re-ranked on the measured kernel (`[R5-levers-*]`, `[R5-retired]`; T5r_levers, T5r_levers_moe32k_iff, T5r_levers_overtake, T5r_nbF_lines, T5r_retired, T5r_levers_context)
+
+At Π = 1 the step is a sum (T = Σ W + Σ ATTN + …), so a follow-up's worth is the time it removes per token, whichever side binds. The P4P2
+round ordered the attention-side follow-ups at MoE 128k as **choreography 22.33 > expert-direct (E29) 15.86 > bounce 11.10 ms per token**,
+where "choreography" was the gap between the session-1 diagnostic loop (138.3 GB/s) and the E21 page rate (169.2). Session 3 measured that
+gap: the production kernel's K+V stream phase runs 174–176 GB/s, so the G gap is closed, and what separates the shipped kernel from the
+round-4 cell is the guard's per-block scan — at 128k the guarded cell exceeds the round-4 cell by 2 264 164 ns per layer (63.39 ms per MoE
+token), and the per-block guard (2 299 200 ns) covers 101.5 % of it (T5r_retired). The corrected levers per token (ms, ms2 convention;
+guard fusion = guarded → fused with one 20 µs crossing per step, 10 µs alongside; phase overlap = unguarded → the overlapped floor, an upper
+bound; bounce removal = the measured bounce scaled per block; E29 = 28 × 566 520 ns, weights side, L-independent):
+
+| cell | #1 | #2 | #3 | #4 | guard fusion at a 10 µs crossing / constant-rate reading |
+|---|---|---|---|---|---|
+| MoE 4k | **E29 15.86** | guard fusion 1.45 | overlap ≤ 1.08 | bounce 0.17 | 1.73 / 2.62 |
+| MoE 32k | **E29 15.86** | guard fusion 15.53 | overlap ≤ 3.27 | bounce 1.42 | 15.81 / 15.53 |
+| **MoE 128k** (the P4P2 cell) | **guard fusion 63.81** | E29 15.86 | overlap ≤ 7.46 | bounce 5.71 | 64.09 / 56.50 |
+| MoE 1M | **guard fusion 514.46** | bounce 45.69 | overlap ≤ 45.42 | E29 15.86 | 514.74 / 437.78 |
+| dense 4k | **guard fusion 6.22** | overlap ≤ 4.67 | bounce 0.76 | — | 7.42 / 11.23 |
+| dense 32k | **guard fusion 66.57** | overlap ≤ 14.04 | bounce 6.12 | — | 67.77 / 66.58 |
+| dense 128k | **guard fusion 273.50** | overlap ≤ 31.98 | bounce 24.48 | — | 274.70 / 242.17 |
+
+**The corrected ordering, as theorems:**
+- **At the P4P2 cell (MoE 128k): guard fusion 63.81 > E29 15.86 > phase overlap ≤ 7.46 > bounce removal 5.71 ms** (T5r_levers; on the
+  constant-rate reading guard fusion is 56.50, still first). The choreography lever (22.33 ms) is retired; the bounce lever moves 11.10 →
+  5.71 ms (the measured bounce is 51.4 % of the modelled charge); "169.2 → 174.6" (3.08 ms) is moot (the stream phase runs 174–176).
+- **Dense: guard fusion first at every L** (no E29 on dense; E31's launch saving, 50.35 ms per dense token at c_sync = 5 µs, is a
+  non-attention lever of comparable size, discussed with the megakernel in §5′, not ranked here).
+- **MoE, by L:** guard fusion outranks E29 for every L ≥ 33 297 at a 20 µs crossing and every L ≥ 32 785 at 10 µs (iffs over the block
+  count, T5r_levers_overtake + T5r_nbF_lines — on the per-block guard reading, which is exact at 32k and UNMEASURED off it).
+- **MoE 32k — where the steering note's "guard fusion (worth ~570 µs at 32k) is the new #1" needs a condition:** guard fusion saves
+  574 800 − X ns per layer, X = the fused kernel's residual per step (crossings + side-product + re-runs), and it outranks E29 **iff
+  X ≤ 8 279 ns** (∀ X; T5r_levers_moe32k_iff) — i.e. iff the fused kernel reaches ≤ 947 079 ns = 141.7 GB/s. At the measured crossing band
+  (X = 10–20 µs, the fused target 140.0–141.5 GB/s) E29 stays first by 48 160–328 160 ns per token (0.3–2.1 %): a tie inside the band.
+  "~570 µs" is the zero-residual ceiling (574.8 µs → 16.09 ms per MoE token), which would be first.
+- **MoE 4k: E29 first** on every reading (guard fusion 1.45–2.62 ms).
+- **Context (T5r_levers_context):** the E31 megakernel saves 14.48 ms per MoE token at c_sync = 5 µs — the same size class as E29 and the
+  32k guard fusion; it carries its own gate (pays iff c_sync ≤ 108.4 µs, §5′).
+
+What ships next, by this table: the batched guard (E39) is the largest attention-side lever on every MoE cell above 33.3k tokens (32.8k
+at a 10 µs crossing) and on every dense cell; E29 keeps first place on short-context MoE serving; E40 is worth at most an eighth of E39 at 128k; the bounce is the smallest
+attention lever except at MoE 1M, where the measured bounce removal (45.69 ms) edges out the overlap bound (45.42).
 
 ---
 
@@ -1187,3 +1378,15 @@ Formalizable as iffs / bounds over one explicit variable: R2 (λ), R12 (L), R13 
 R22–R23 (α); the rest are cell identities on the imported DESIGN-3 round-3 model (transcribe `attn3_seq`, `step3`,
 `inst_step3`, `die_block3` as functions of the same constants; their round-2 limits — λ = 91 000, G = 1746, c_q = 0, the
 round-2 attention — must reproduce `T_step_*` of `proof/fleet.lean`, which `[R3-moved-*]` pairs cell by cell).
+
+
+## Appendix A″ — round-5 claim ledger (`proof/fleet.py` `[R5-*]`, `proof/fleet.lean` `T5r_*`)
+
+Every round-5 number of this document is printed by `proof/fleet.py` (`[R5-*]`, after the unchanged first 628 output lines) and fixed by a
+theorem of `proof/fleet.lean`'s round-5 section (18 theorems; the cell theorems were generated from the script's own values). The ledger
+rows F5-1 … F5-14 with their statuses are in PROOF-COVERAGE-4.md's round-5 section: the readings (T5r_readings), the affine step
+(T5r_step_form, ∀ a), the cells (T5r_step_cells), the restated MoE-128k tie (T5r_moe128k_tie_measured / _everyG / _cells, ∀ G), the
+lever ranking (T5r_levers, T5r_levers_moe32k_iff ∀ X, T5r_levers_overtake ∀ nb, T5r_nbF_lines ∀ L, T5r_retired, T5r_levers_context), spec
+decode (T5r_spec, T5r_spec_steps, T5r_spec_thresholds ∀ α), B = 16 (T5r_B16), the instances (T5r_inst, ∀ c) and the dense 1M bound
+(T5r_dense1M_bound). Hypothesis variables new this round: the per-layer attention a (the step's only attention input), the fused kernel's
+residual X (E39), the block count nb (the per-block guard reading); the measured inputs are DESIGN-3 §6.0's (attention session 3).

@@ -10,6 +10,8 @@ Every constant is tagged with its origin: [M] HW-MAP measured, [D2] DESIGN-2 der
 host experiment (H-number, DESIGN-4.md section 8) that measures it. Run: python3 -I proof/fleet.py
 Round 3 (2026-11-05): the measured re-grounding (HW-MAP e9349c8) and the ALTERNATIVES variants are the [R3-*] section at the
 end (imports proof/attn.py for the DESIGN-3 round-3 attention chain); every round-2 label keeps printing its round-2 value.
+Round 5 (2026-11-07): the [R5-*] section at the end carries the MEASURED production attention kernel (attn.py [R5-*]) as the per-layer
+attention term (guarded / unguarded / fused readings), the MoE-128k tie restated, the corrected lever ranking; earlier output unchanged.
 """
 KiB, MiB, GiB, GB = 1024, 1 << 20, 1 << 30, 10 ** 9
 
@@ -1239,3 +1241,137 @@ def main3p():
 
 if __name__ == "__main__":
     main(); main3(); main4(); main3p()
+
+# ================================================================== ROUND 5 (2026-11-07): the measured production attention kernel ==========
+# Attention kernel session 3 (HW-MAP 62e8137) measured the production kernel end-to-end (proof/attn.py [R5-*] carries the inputs): the t x L
+# sweep with the guard (t = 1: 213.5 / 1513.6 / 5852.9 / 46313.6 us at 4k / 32k / 128k / 1M), the unguarded 32k cell (938.8 us = 143.0 GB/s,
+# the round-4 legs-2 cell 912 within 2.9 %), the guard's per-block scalar scan (+572 us, erratum #29), the realised bounce (legs 2, ~51 us).
+# The planner's attention term is now a MEASURED per-layer time, carried as three readings (the "G triplet" at 32k):
+#   guarded   = the t x L sweep (M at every L; 88.7 GB/s at 32k -- quoted 88.6);
+#   unguarded = 938.8 us at 32k (M); off 32k the guarded cell minus the per-block guard (D; the per-block guard off 32k is UNMEASURED);
+#   fused     = unguarded + one batched crossing per step (D; cx = 20 us = the top of the measured 10-20 us band -> 140.0 GB/s at 32k = the target);
+# plus the constant-rate reading (unguarded at 143.0, fused at 140.0 GB/s at every L) as the bracket. At t = 1 both fleet shapes run mt = 1
+# (dense rows 16, MoE rows 4) -- the measured kernel's shape (rows 8, mt 1) -- so the per-layer time transfers as is (kv_tok = 4 KiB on both).
+# Every [F*] / [R3-*] / [R4-*] / [R3P-*] label above keeps printing its value; the [R5-*] labels below are the round-5 cells.
+READ5 = ("guarded", "unguarded", "fused")
+def a5(L, reading, cx=20_000):
+    """per-layer attention, ns, t = 1 (mt = 1): the measured kernel's readings; 'rate143' / 'rate140' = the constant-rate bracket"""
+    if reading == "guarded": return A.T5[1][A.LS5.index(L)]
+    if reading == "unguarded": return A.ung5(L)
+    if reading == "fused": return A.fused5(L, cx)
+    return A.rate5(L, 1430 if reading == "rate143" else 1400)
+def step5f(s, L, a, B=1, t=1, **kw):
+    """the round-4 fleet step (step4f) with the per-layer attention replaced by a MEASURED / derived per-layer time a (ns)."""
+    br = dict(BR4); br.update(kw)
+    rows = B * t; assert rows <= ROWS_FLAT
+    lam = LAM3_BR[br["lam"]]
+    gemm = s["nL"] * gemm3_ns(s, rows, br["fam"], br["regime"], br["gemm"])
+    attn = s["nL"] * B * a
+    head = tn(s["w_head"], R_GEMM if br["gemm"] == "direct" else R_GEMM_INT)
+    launch = launch3_ns(s, rows, br["launch"], br["mega"])
+    quant = s["nL"] * quant_ns(s, rows, br["cq"])
+    xch, xbw, nlat = exchange(s, rows, lam)
+    draft = draft3_ns(lam, br["launch"], br["cq"], br["mega"]) if t > 1 else 0
+    T = gemm + attn + head + launch + quant + xch + draft
+    parts = {"W": gemm + head, "ATTN": attn, "LAUNCH": launch, "QUANT": quant, "XCH": xch, "DRAFT": draft}
+    return T, parts
+def bind5(parts): return max(parts, key=lambda k: parts[k])
+E29_MOE = MOE["nL"] * (gemm3_ns(MOE, 1, "uniform", "anchor") - gemm3_ns(MOE, 1, "uniform", "direct_ser"))     # 15 862 560 ns per MoE token
+def levers5(s, L, cx=20_000):
+    """per-token savings (ns) of the attention-side levers at Pi = 1 (the step is a sum): guard fusion (guarded -> fused, one batched crossing
+    of cx per step), phase overlap (unguarded -> stream + bounce: an upper bound), bounce removal (the measured bounce, scaled per block), and
+    for MoE the direct-path expert kernel E29 (weights side, L-independent)."""
+    n = s["nL"]
+    lv = {"guard fusion": n * (A.guard5(L) - cx), "phase overlap (bound)": n * A.overlap5(L), "bounce removal": n * A.bounce5(L)}
+    if s["moe"]: lv["E29 direct-path experts"] = E29_MOE
+    return lv
+
+def main5():
+    D, M = DENSE, MOE
+    print("\n# ---- ROUND 5 (2026-11-07; the measured production attention kernel, session 3): [R5-*] cells. [F*]/[R3-*]/[R4-*]/[R3P-*] above unchanged ----")
+    # ------------------------------------------------------------ the per-layer attention readings (shape-independent at t = 1)
+    for lab, L in L_SET.items():
+        r4 = attn4_seq(M, L, 1, 1692)[0]
+        print(f"[R5-attn-{lab}] t = 1 per layer (both shapes, mt = 1): guarded {a5(L, 'guarded')} (M) / unguarded {a5(L, 'unguarded')} ({'M' if L == 32768 else 'D'}) / fused {a5(L, 'fused')} (D; {a5(L, 'fused', 10_000)} at cx 10 us) ns; "
+              f"rate bracket {a5(L, 'rate143')} / {a5(L, 'rate140')}; round-4 lazy-T legs 2 at 169.2 {r4} ns (measured guarded = {t10(pct(a5(L, 'guarded'), r4))}% of it)")
+    # ------------------------------------------------------------ the primary t = 1 step cells at the three readings
+    for s in SHAPES:
+        for lab, L in L_SET.items():
+            if not feasible(s, L): continue
+            T4, p4, ab4 = step4f(s, L); one4 = tps_card(1000, T4)
+            cells = []
+            for rd in READ5:
+                T, p = step5f(s, L, a5(L, rd)); v = tps_card(1000, T)
+                cells.append(f"{rd} {ms2(T)} ms -> {t3(v)} ({spc(pcs(v, one4))}; {bind5(p)}; ATTN {ms2(p['ATTN'])} ms = {t10(pct(p['ATTN'], T))}%)")
+            br = "" if L == 32768 else "; rate bracket " + " / ".join(t3(tps_card(1000, step5f(s, L, a5(L, rd))[0])) for rd in ("rate143", "rate140"))
+            print(f"[R5-step-{s['name']}-{lab}] t = 1: round 4 (lazy-T, legs 2, 169.2) {ms2(T4)} ms -> {t3(one4)}; round 5: " + "; ".join(cells) + br)
+    for s in SHAPES:
+        hd = []
+        for rd in READ5: hd.append(f"{rd} {t3(tps_card(1000, step5f(s, 32768, a5(32768, rd))[0]))}")
+        print(f"[R5-headline-{s['name']}] L = 32k, t = 1 tok/s/card: " + ", ".join(hd) + f" (round 4: {t3(tps_card(1000, step4f(s, 32768)[0]))}, round 3: {t3(tps_card(1000, step3(s, 32768)[0]))})")
+    # ------------------------------------------------------------ the MoE-128k tie, restated on the measured kernel (T5r_moe128k_tie)
+    Twa, Twd = gemm3_ns(M, 1, "uniform", "anchor"), gemm3_ns(M, 1, "uniform", "direct_ser")
+    cells = "; ".join(f"{rd} {a5(131072, rd)} ns: ATTN by {t10(pct(a5(131072, rd) - Twa, Twa))}% (anchored) / {t10(pct(a5(131072, rd) - Twd, Twd))}% (direct)" for rd in READ5)
+    bl = A.bounce5(131072); k0 = ceil(Twa - bl, 256); k0d = ceil(Twd - bl, 256)
+    print(f"[R5-moe-128k-tie] MoE 128k per layer vs T_w {Twa} (anchored) / {Twd} (direct path): {cells}; effective-rate lines: attention-bound iff G_eff <= {131072 * 4096 * 10 // Twa} / {131072 * 4096 * 10 // Twd} tenths "
+          f"(every reading: {t10(A.rateT(131072 * 4096, a5(131072, 'guarded')))} / {t10(A.rateT(131072 * 4096, a5(131072, 'unguarded')))} / {t10(A.rateT(131072 * 4096, a5(131072, 'fused')))}); "
+          f"the legs-conditional restated with the MEASURED legs-2 bounce ({bl} ns at 128k): stream-only lines G <= {20971520 // k0} / {20971520 // k0d} (zero chain, zero fixed cost; round 4 legs 2: 189.4 / 230.3) -> attention-bound at every G <= 174.6 on both kernels")
+    T5g, p5g = step5f(M, 131072, a5(131072, "guarded")); T5f, p5f = step5f(M, 131072, a5(131072, "fused"))
+    print(f"[R5-moe-128k-step] the step's largest term: guarded ATTN {ms2(p5g['ATTN'])} vs W {ms2(p5g['W'])} ms ({bind5(p5g)}); fused ATTN {ms2(p5f['ATTN'])} vs W {ms2(p5f['W'])} ({bind5(p5f)}) -- step-level ATTN-bound on every reading")
+    # ------------------------------------------------------------ the corrected lever ranking (T5r_levers)
+    for s in SHAPES:
+        for lab, L in L_SET.items():
+            if not feasible(s, L): continue
+            lv = levers5(s, L); lv10 = levers5(s, L, 10_000)["guard fusion"]
+            rate = s["nL"] * (a5(L, "guarded") - a5(L, "rate140"))
+            order = sorted(lv.items(), key=lambda kv: -kv[1])
+            print(f"[R5-levers-{s['name']}-{lab}] per token (ms, Pi = 1): " + " > ".join(f"{k} {ms2(v)}" for k, v in order)
+                  + f" | guard fusion at cx 10 us {ms2(lv10)}, rate reading (fused at 140.0) {ms2(rate)}")
+    X = 574_800 - E29_MOE // 28
+    print(f"[R5-levers-moe-32k-iff] MoE 32k: guard fusion (574 800 - X per layer) outranks E29 ({ms2(E29_MOE)} ms) iff the fused kernel's residual crossing X <= {X - 1} ns per step "
+          f"(T_fused <= {938_800 + X - 1} ns = {t10(A.rateT(32768 * 4096, 938_800 + X - 1))} GB/s); at the measured band (X = 10-20 us) E29 stays #1 by "
+          f"{ms2(E29_MOE - 28 * (574_800 - 10_000))}-{ms2(E29_MOE - 28 * (574_800 - 20_000))} ms ({t10(pct(E29_MOE - 28 * (574_800 - 20_000), E29_MOE))}%); the zero-residual ceiling ({ms2(28 * 574_800)}) would be #1")
+    for cx in (10_000, 20_000):
+        nb = 1
+        while 28 * (nb * 574_800 // 64 - cx) <= E29_MOE: nb += 1
+        print(f"[R5-levers-overtake-cx{cx // 1000}] guard fusion overtakes E29 from nb >= {nb} blocks -> every L >= {512 * (nb - 1) + 17} (per-block guard reading; at nb = {nb - 1}: {ms2(28 * ((nb - 1) * 574_800 // 64 - cx))} ms vs {ms2(E29_MOE)})")
+    a2, a0 = attn4_seq(M, 131072, 1, 1692, legs=2)[0], attn4_seq(M, 131072, 1, 1692, legs=0)[0]; ak = attn4_seq(M, 131072, 1, 1383, legs=2)[0]
+    print(f"[R5-retired] the P4P2 ranking at MoE 128k (choreography 22.33 > E29 15.86 > bounce 11.10 ms) -> round 5: the '138.3 -> 169.2' choreography lever ({ms2(28 * (ak - a2))} ms) is RETIRED -- the production kernel's "
+          f"K+V stream phase runs 174-176 GB/s (M); its gap to the round-4 cell is the guard: guarded - model = {a5(131072, 'guarded') - a2} ns per layer ({ms2(28 * (a5(131072, 'guarded') - a2))} ms), the per-block guard "
+          f"{A.guard5(131072)} ns covers {t10(pct(A.guard5(131072), a5(131072, 'guarded') - a2))}% of it; '169.2 -> 174.6' ({ms2(28 * (a2 - attn4_seq(M, 131072, 1, 1746, legs=2)[0]))} ms) is moot; "
+          f"bounce removal {ms2(28 * (a2 - a0))} -> {ms2(28 * A.bounce5(131072))} ms (measured 51 us at 32k per block); E29 unchanged {ms2(E29_MOE)}")
+    Tm, Tm5 = step3(M, 32768)[0], step3(M, 32768, mega=5_000)[0]
+    print(f"[R5-levers-context] non-attention levers of the same size, not in the ranking above: E31 megakernel at c_sync 5 us saves {ms2(Tm - Tm5)} ms per MoE token (pays iff c_sync <= 108.4 us), {ms2(step3(D, 32768)[0] - step3(D, 32768, mega=5_000)[0])} per dense token")
+    # ------------------------------------------------------------ spec decode, B = 16, the instance cells, dense 1M KV-int8
+    for s in SHAPES:
+        a_t4 = A.T5[16][1] // 2 if not s["moe"] else A.T5[1][1]
+        T4s = step4f(s, 32768, 1, 4)[0]; T5s, p5s = step5f(s, 32768, a_t4, 1, 4)
+        print(f"[R5-spec-{s['name']}-32k] spec k=3, a=0.7, guarded verify kernel (D transfer: {'dense rows 64 = one of the two mt-4 passes of the measured t = 16 cell' if not s['moe'] else 'MoE rows 16 = one mt-1 fragment, the measured t = 1 cell'}) "
+              f"{a_t4} ns per layer: {ms2(T5s)} ms -> {t3(tps_card(tau_milli(700), T5s))} (round 4 {t3(tps_card(tau_milli(700), T4s))}; t = 1 guarded {t3(tps_card(1000, step5f(s, 32768, a5(32768, 'guarded'))[0]))}); the unguarded verify kernel is UNMEASURED")
+    T1d = step5f(D, 32768, a5(32768, "guarded"))[0]; T4d = step5f(D, 32768, A.T5[16][1] // 2, 1, 4)[0]
+    amin = min(a for a in range(1001) if 1000 * T4d < tau_milli(a) * T1d)
+    assert all((1000 * T4d < tau_milli(a) * T1d) == (a >= amin) for a in range(1001))
+    print(f"[R5-spec-dense-breakeven] dense spec k=3 on the guarded verify kernel (D transfer) beats t = 1 iff alpha >= {t3(amin)} (T4 {ms2(T4d)} vs T1 {ms2(T1d)} ms; round 3: 0.144, fixed-shift 0.064)")
+    for rd in READ5:
+        a1 = a5(32768, rd); T1m = step5f(M, 32768, a1)[0]; T4m = step5f(M, 32768, a1, 1, 4)[0]
+        amax = max(a for a in range(1001) if tau_milli(a) * T1m < 1000 * T4m)
+        assert all((tau_milli(a) * T1m < 1000 * T4m) == (a <= amax) for a in range(1001))
+        print(f"[R5-spec-moe-loss-{rd}] MoE spec k=3 (uniform, anchored; verify kernel = the t = 1 kernel, D transfer) LOSES to t = 1 iff alpha <= {t3(amax)}: "
+              f"T4 / T1 = {ms2(T4m)} / {ms2(T1m)} ms; alpha {t3(amax)} -> {t3(tps_card(tau_milli(amax), T4m))}, {t3(amax + 1)} -> {t3(tps_card(tau_milli(amax + 1), T4m))} vs t = 1 {t3(tps_card(1000, T1m))} (round 3: 0.866)")
+    for rd in READ5:
+        T, p = step5f(M, 32768, a5(32768, rd), 16, 1)
+        print(f"[R5-B16-moe-32k-{rd}] MoE B = 16 (uniform): {ms2(T)} ms -> {t3(tps_card(16000, T))} ({bind5(p)}; ATTN {ms2(p['ATTN'])} ms); round 4 {t3(tps_card(16000, step4f(M, 32768, 16, 1)[0]))}")
+    for s in SHAPES:
+        xs = [min_x(s, p, 32768) for p in range(4)]; Ti = inst_step3c(s, 32768, xs=xs)[0]; a3 = attn3_seq(s, 32768, 1, 1692)[0]
+        one = {rd: tps_card(1000, step5f(s, 32768, a5(32768, rd))[0]) for rd in READ5}
+        cells = []
+        for rd in READ5:
+            T = Ti - s["nL"] * a3 + s["nL"] * a5(32768, rd)
+            cells.append(f"{rd} {ms2(T)} ms -> {t3(tps_inst_c(1000, H10_CARD, T))} at c = 1.990 vs one 8-die instance {t3(one[rd])} (needs c >= {t3(c_min(T, one[rd] + 1))})")
+        print(f"[R5-inst-{s['name']}-32k] two 4-die instances (overlapped cold tier, x {xs}; round 3 {t3(tps_inst_c(1000, H10_CARD, Ti))}): " + "; ".join(cells))
+    Ti8 = step4f(D, 1048576, i8=True, var="rowmax")[0]; add = D["nL"] * 2048 * A.X5_ROWMAX
+    print(f"[R5-dense-1M-kvi8] dense 1M KV-int8 (rowmax chain, the only dense 1M layout; no KV-int8 kernel measured): round 4 {ms2(Ti8)} ms -> {t3(tps_card(1000, Ti8))}; with erratum #29's per-block crossing "
+          f">= {A.X5_ROWMAX} ns x 2 048 blocks x 120 layers = +{ms2(add)} ms: <= {t3(tps_card(1000, Ti8 + add))} tok/s/card (bound; the lazy mu = 0 variant UNMEASURED)")
+
+if __name__ == "__main__":
+    main5()

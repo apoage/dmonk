@@ -2380,3 +2380,356 @@ theorem T4r_fleet_moe_128k_cells : 3588736 - tLayerMoe = 381017 ∧ pct 381017 t
     tLayerMoe - 3192192 = 15527 ∧ pct 15527 tLayerMoe = 5 ∧ 3233920 - tLayerMoe = 26201 ∧ pct 26201 tLayerMoe = 8 ∧
     3901056 - tLayerMoe = 693337 ∧ pct 693337 tLayerMoe = 216 ∧ tLayerMoe - 3094144 = 113575 ∧ pct 113575 tLayerMoe = 35 ∧
     g256 ≤ 1746 ∧ 1746 < 1894 ∧ 23592960 / 12455 = 1894 ∧ 20971520 / 12455 = 1683 ∧ 1683 < g256 ∧ gShuf64 ≤ 1683 ∧ gK1_256 ≤ 1683 := by decide
+
+/-! # ROUND 5 (2026-11-07) — the measured production kernel (attention session 3, HW-MAP 62e8137)
+
+  Silicon inputs (all MEASURED; nothing else new enters): the t × L sweep of the production kernel (causal flags incl. the guard,
+  best-of-3, in-kernel µs) — t = 1: 213.5 / 1 513.6 / 5 852.9 / 46 313.6 at 4k / 32k / 128k / 1M, t = 4: 382.1 / 2 695.6 / 10 514.3 /
+  83 123.1, t = 16: 1 481.4 / 10 741.7 / 42 013.4 / 332 476.2; the UNGUARDED 32k t = 1 cell 938.8 µs = 143.0 GB/s (the round-4 legs-2
+  cell within 2.9 % — the INPUT validation row); the guard's per-block scalar scan (+572 µs as shipped; tree + queue +1 250, tree + full
+  barrier +1 400); erratum #29 (a per-block scalar crossing drains the vector pipe ~10–20 µs; a scalar-destination reduce-max ≈ 1.1 µs per
+  call); the realised bounce (legs = 2, ≈ 51 µs at 32k); the per-engine phases at 32k (stream 770.8, scores 523.9, softmax+guard 644.3,
+  PV-merge-bounce 344.9 µs); correctness (causal-exact 12/12, real-exp bad-0 through 1M); the online-chain drift at 1M (session 2:
+  1.2 / 1.8 ppm). The `T5r_*` theorems fix every derived round-5 cell (attn.py `[R5-*]`): the per-block guard (the table difference at 32k
+  over its 64 blocks), the batched-crossing chain model that replaces §3.2 / §3.4's "per-block scalar reads ≈ free", the unguarded / fused
+  readings per L (guarded per-L MEASURED minus the per-block guard — the per-block guard off 32k is UNMEASURED), the phase-overlap bound,
+  the rowmax crossing bound, the chord crossover, the MoE-128k lines at the measured bounce. Every theorem above is kept. -/
+namespace Measured5
+/-- the t × L sweep, ns in-kernel (best-of-3, causal flags incl. the guard), attention session 3 -/
+def t1L4k : Nat := 213500
+def t1L32k : Nat := 1513600
+def t1L128k : Nat := 5852900
+def t1L1M : Nat := 46313600
+def t4L4k : Nat := 382100
+def t4L32k : Nat := 2695600
+def t4L128k : Nat := 10514300
+def t4L1M : Nat := 83123100
+def t16L4k : Nat := 1481400
+def t16L32k : Nat := 10741700
+def t16L128k : Nat := 42013400
+def t16L1M : Nat := 332476200
+/-- the unguarded 32k t = 1 cell and HW-MAP's quoted 32k effective rate (tenths) -/
+def tUng32k : Nat := 938800
+def effQ32k : Nat := 886
+/-- the guard as shipped (quoted), tree + queue, tree + full barrier, at 32k (ns) -/
+def guardQ : Nat := 572000
+def guardTQ : Nat := 1250000
+def guardTB : Nat := 1400000
+/-- erratum #29: a scalar-destination reduce-max call; one crossing's vector-pipe drain, low / high end (ns) -/
+def cSdst : Nat := 1100
+def cxLo : Nat := 10000
+def cxHi : Nat := 20000
+/-- the realised P bounce at 32k (legs = 2) -/
+def bounce32k : Nat := 51000
+def legsMeas : Nat := 2
+/-- per-engine phases at 32k t = 1 (ns): scores, softmax + guard, PV-merge-bounce; the K+V stream phase -/
+def engScores : Nat := 523900
+def engSoftGuard : Nat := 644300
+def engPV : Nat := 344900
+def stream32k : Nat := 770800
+/-- online-chain drift at 1M, tenths of ppm (session 2: 1.2e-6 / 1.8e-6 at 512 / 256-token blocks) -/
+def drift512 : Nat := 12
+def drift256 : Nat := 18
+/-- the 5.0 % model-match line (tenths of a percent) -/
+def matchLine : Nat := 50
+end Measured5
+
+namespace Design5
+open Measured Measured3 Measured4 Measured5 Design Design3 Design4
+/-- 512-token blocks of the t = 1 kernel (append-then-attend: 16 ⌊(L − 1)/16⌋ tokens on the matrix path) -/
+def nb5 (L : Nat) : Nat := nblocks4 L 1 1
+/-- the as-shipped guard scan: the t = 1 table difference at 32k (64 blocks), scaled per block -/
+def guardTab : Nat := t1L32k - tUng32k
+def guard5 (L : Nat) : Nat := nb5 L * guardTab / 64
+def bounce5 (L : Nat) : Nat := nb5 L * bounce32k / 64
+def stream5 (L : Nat) : Nat := nb5 L * stream32k / 64
+/-- reading (ii): the guarded per-L cell minus the per-block guard (exact at 32k) -/
+def ung5 (Tg L : Nat) : Nat := Tg - guard5 L
+/-- the batched-crossing term of the corrected chain model (erratum #29): one crossing of cx ns per K blocks -/
+def xing (nb K cx : Nat) : Nat := ceilDiv nb K * cx
+def fused5 (Tg L K cx : Nat) : Nat := ung5 Tg L + xing (nb5 L) K cx
+/-- what full phase overlap could recover at most: the unguarded cell minus (the K+V stream phase + the bounce) -/
+def overlap5 (Tg L : Nat) : Nat := ung5 Tg L - stream5 L - bounce5 L
+/-- the rowmax chain's per-block crossing (the 16 row maxima reach Duplicate every block), lower bound -/
+def xRowmax : Nat := min (16 * cSdst) (cxLo + 16 * sigma3 / 10)
+/-- the chord between the 4k cell (8 blocks) and the 32k cell (64 blocks) -/
+def chord (T4 T32 nb : Nat) : Nat := T4 + (nb - 8) * (T32 - T4) / 56
+/-- a / b in tenths, round-half-up -/
+def x10r (a b : Nat) : Nat := (20 * a + b) / (2 * b)
+end Design5
+
+open Measured5 Design5
+
+/-! ## T5r_meas — the t × L sweep as MEASURED rows (`[R5-meas-*]`): effective rates (32k recomputes to 88.7; the quoted 88.6 is the floored
+    tenth), blocks, ns per block, the GEMV fractions, measured ÷ round-4 model -/
+theorem T5r_meas_t1 : effRate 4096 8 128 1 t1L4k = 786 ∧
+    effRate 32768 8 128 1 t1L32k = 887 ∧
+    effRate 131072 8 128 1 t1L128k = 917 ∧
+    effRate 1048576 8 128 1 t1L1M = 927 ∧
+    kvBytes 32768 8 128 * 10 / t1L32k = effQ32k ∧
+    nb5 4096 = 8 ∧
+    nb5 32768 = 64 ∧
+    nb5 131072 = 256 ∧
+    nb5 1048576 = 2048 ∧
+    t1L4k / 8 = 26687 ∧
+    t1L32k / 64 = 23650 ∧
+    t1L128k / 256 = 22862 ∧
+    t1L1M / 2048 = 22614 ∧
+    pct t1L4k tGemvUnit = 536 ∧
+    pct t1L32k tGemvUnit = 3803 ∧
+    pct t1L128k tGemvUnit = 14706 ∧
+    pct t1L1M tGemvUnit = 116366 ∧
+    x10r t1L4k 130872 = 16 ∧
+    x10r t1L32k 911680 = 17 ∧
+    x10r t1L128k 3588736 = 16 ∧
+    x10r t1L1M 28574592 = 16 := by decide
+/-- t = 4 (rows 32, mt 2, one pass): HW-MAP's "t ≥ 4 = 99.6–103.4" is the per-fragment-pass rate (rows/16 × KV / T) at L ≥ 32k; measured
+    2.4–2.6× the round-4 cells -/
+theorem T5r_meas_t4 : effRate 4096 8 128 1 t4L4k = 439 ∧
+    effRate 4096 8 128 2 t4L4k = 878 ∧
+    step4H 4096 4 g256 .lazy .T 2 = 162368 ∧
+    x10r t4L4k 162368 = 24 ∧
+    effRate 32768 8 128 1 t4L32k = 498 ∧
+    effRate 32768 8 128 2 t4L32k = 996 ∧
+    step4H 32768 4 g256 .lazy .T 2 = 1029976 ∧
+    x10r t4L32k 1029976 = 26 ∧
+    effRate 131072 8 128 1 t4L128k = 511 ∧
+    effRate 131072 8 128 2 t4L128k = 1021 ∧
+    step4H 131072 4 g256 .lazy .T 2 = 4004632 ∧
+    x10r t4L128k 4004632 = 26 ∧
+    effRate 1048576 8 128 1 t4L1M = 517 ∧
+    effRate 1048576 8 128 2 t4L1M = 1033 ∧
+    step4H 1048576 4 g256 .lazy .T 2 = 31768088 ∧
+    x10r t4L1M 31768088 = 26 := by decide
+/-- t = 16 (rows 128, two passes of mt 4 on 256-token blocks): 8 fragments; measured 3.9–4.2× the round-4 cells -/
+theorem T5r_meas_t16 : effRate 4096 8 128 1 t16L4k = 113 ∧
+    effRate 4096 8 128 8 t16L4k = 906 ∧
+    step4H 4096 16 g256 .lazy .T 2 = 382974 ∧
+    x10r t16L4k 382974 = 39 ∧
+    effRate 32768 8 128 1 t16L32k = 125 ∧
+    effRate 32768 8 128 8 t16L32k = 1000 ∧
+    step4H 32768 16 g256 .lazy .T 2 = 2564510 ∧
+    x10r t16L32k 2564510 = 42 ∧
+    effRate 131072 8 128 1 t16L128k = 128 ∧
+    effRate 131072 8 128 8 t16L128k = 1022 ∧
+    step4H 131072 16 g256 .lazy .T 2 = 10044062 ∧
+    x10r t16L128k 10044062 = 42 ∧
+    effRate 1048576 8 128 1 t16L1M = 129 ∧
+    effRate 1048576 8 128 8 t16L1M = 1033 ∧
+    step4H 1048576 16 g256 .lazy .T 2 = 79853214 ∧
+    x10r t16L1M 79853214 = 42 := by decide
+/-! ## T5r_validate — the INPUT validation row (`[R5-validate]`): the unguarded 32k cell against the round-4 legs-2 cell; and its term-level
+    reading (`[R5-validate-terms]`): the cell-level match nets a −97.7 µs exposed-chain under-charge against +22.4 µs (K/V basis) and +48.1 µs
+    (bounce) over-charges -/
+theorem T5r_validate : step4H 32768 1 g256 .lazy .T 2 = 911680 ∧ tUng32k - 911680 = 27120 ∧ pct 27120 911680 = 30 ∧ usR 911680 = 912 ∧
+    pct (tUng32k - 912000) 912000 = 29 ∧ 1000 * (tUng32k - 911680) ≤ matchLine * 911680 ∧ effRate 32768 8 128 1 tUng32k = 1430 := by decide
+theorem T5r_validate_terms : 64 * ddr4Block g256 1 0 = 793216 ∧ 64 * ddr4Block g256 1 2 = 892352 ∧ 892352 - 793216 = 99136 ∧
+    fixed4 32768 1 .lazy .T (merge4 512 .lazy .T) 1 1 = 19328 ∧ 793216 + 99136 + 19328 = 911680 ∧ stream32k + bounce32k + 117000 = tUng32k ∧
+    793216 - stream32k = 22416 ∧ 99136 - bounce32k = 48136 ∧ 117000 - 19328 = 97672 ∧
+    22416 + 48136 + 27120 = 97672 ∧ effRate 32768 8 128 1 stream32k = 1741 ∧ pct bounce32k 99136 = 514 := by decide
+/-! ## T5r_engines — the per-engine phases (`[R5-engines*]`): they SUM to the total (guarded and unguarded) — the chain serialises; the
+    K+V stream is 50.9 % busy guarded, 82.1 % unguarded; the softmax without the guard is 1 085 ns per block (the round-4 throughput
+    convention charged 3 317 ns: 3.0×; premise: the guard's cost lies in the softmax+guard phase) -/
+theorem T5r_engines : engScores + engSoftGuard + engPV = 1513100 ∧ t1L32k - 1513100 = 500 ∧ pct 500 t1L32k = 0 ∧
+    pct stream32k 1513100 = 509 ∧ engSoftGuard - guardTab = 69500 ∧ engScores + 69500 + engPV = 938300 ∧
+    tUng32k - 938300 = 500 ∧ pct stream32k tUng32k = 821 ∧
+    engScores / 64 = 8185 ∧ engSoftGuard / 64 = 10067 ∧ engPV / 64 = 5389 ∧ 69500 / 64 = 1085 ∧
+    vec4H 512 1 .lazy .T = 4772 ∧ 8 * call100 tRm16 * 10 / (rVecCore * 100) = 1455 ∧ (4772 - 1455) * 10 / 1085 = 30 := by decide
+/-! ## T5r_guard — the guard scan (`[R5-guard*]`, `[R5-A5-refuted]`): 574 800 ns at 32k (the table difference; the quoted +572 000 is 0.5 %
+    apart), 8 981 ns per block, of which the 8 scalar-destination reduce calls are 98.0 %; tree + queue = one crossing per block inside the
+    10–20 µs band, tree + full barrier above it; round 4's A5 (fence < 1 µs, guard hidden in 9 171 ns of DDR slack) is refuted 8.9× -/
+theorem T5r_guard : guardTab = 574800 ∧ guardTab / 64 = 8981 ∧ guardQ / 64 = 8937 ∧ guardTab - guardQ = 2800 ∧
+    pct 2800 guardQ = 5 ∧ 8 * cSdst = 8800 ∧ pct 8800 8981 = 980 ∧
+    pct guardTab tUng32k = 612 ∧ pct guardTab t1L32k = 380 ∧ guardTQ / 64 = 19531 ∧ cxLo ≤ 19531 ∧
+    19531 ≤ cxHi ∧ guardTB / 64 = 21875 ∧ cxHi < 21875 ∧ guardTQ - guardTab = 675200 ∧
+    guardTB - guardTab = 825200 := by decide
+theorem T5r_A5_refuted : ddr4Block g256 1 2 - vec4H 512 1 .lazy .T = 9171 ∧ 1455 + 1000 ≤ 9171 ∧
+    8981 * 10 / 1000 = 89 ∧ 1000 < 8981 := by decide
+/-! ## T5r_crossing — the batched-crossing chain model (erratum #29; `[R5-crossing-*]`): the guard decision as a vector side-product with
+    one scalar crossing per K blocks. Once per step (K ≥ nb) the residual is ONE crossing; every block (K = 1) is nb crossings. -/
+theorem T5r_xing_once (nb K cx : Nat) (h1 : 0 < nb) (h2 : nb ≤ K) : xing nb K cx = cx := by
+  unfold xing ceilDiv
+  have h : (nb + K - 1) / K = 1 := Nat.div_eq_of_lt_le (by omega) (by omega)
+  rw [h, Nat.one_mul]
+theorem T5r_xing_every (nb cx : Nat) : xing nb 1 cx = nb * cx := by
+  unfold xing ceilDiv; simp
+/-- at 32k, for every K ≥ 64 and every crossing cost cx ≤ the guard: the fused cell is the unguarded cell + cx and guard fusion is worth
+    574 800 − cx ns per layer (the "fused target ≈ 140 GB/s" is cx = 20 µs; the prompt's "~570 µs" is the zero-residual ceiling) -/
+theorem T5r_fusion_32k (K cx : Nat) (hK : 64 ≤ K) (hc : cx ≤ guardTab) :
+    fused5 t1L32k 32768 K cx = tUng32k + cx ∧ t1L32k - fused5 t1L32k 32768 K cx = guardTab - cx := by
+  have hn : nb5 32768 = 64 := by decide
+  have hg : guard5 32768 = guardTab := by decide
+  have hx : xing 64 K cx = cx := T5r_xing_once 64 K cx (by decide) hK
+  have e1 : t1L32k = 1513600 := rfl
+  have e2 : tUng32k = 938800 := rfl
+  have e3 : guardTab = 574800 := by decide
+  unfold fused5 ung5; rw [hn, hg, hx]; rw [e3] at hc ⊢; rw [e1, e2]; constructor <;> omega
+theorem T5r_crossing_cells : xing 64 1 cxLo = 640000 ∧
+    effRate 32768 8 128 1 (tUng32k + 640000) = 850 ∧
+    xing 64 1 cxHi = 1280000 ∧
+    effRate 32768 8 128 1 (tUng32k + 1280000) = 605 ∧
+    xing 64 8 cxLo = 80000 ∧
+    effRate 32768 8 128 1 (tUng32k + 80000) = 1317 ∧
+    xing 64 8 cxHi = 160000 ∧
+    effRate 32768 8 128 1 (tUng32k + 160000) = 1221 ∧
+    xing 64 64 cxLo = 10000 ∧
+    effRate 32768 8 128 1 (tUng32k + 10000) = 1415 ∧
+    xing 64 64 cxHi = 20000 ∧
+    effRate 32768 8 128 1 (tUng32k + 20000) = 1400 ∧
+    t1L32k < tUng32k + xing 64 1 cxLo ∧ guardTab - xing 64 8 cxLo = 494800 ∧ guardTab - xing 64 8 cxHi = 414800 ∧
+    guardTab - cxLo = 564800 ∧ guardTab - cxHi = 554800 := by decide
+/-! ## T5r_rowmax — the §3.2 chain under erratum #29 (`[R5-rowmax-*]`): it needs the 16 row maxima as Duplicate operands every block, so it
+    pays ≥ one crossing per block (≥ 10 318 ns: UNMEASURED structure, lower bound) — slower than the shipped guarded lazy chain at 32k and 1M;
+    the round-4 switch policy is void; KV-int8 on the rowmax chain loses to the fused f16 lazy chain -/
+theorem T5r_rowmax_bound : xRowmax = 10318 ∧ tUng32k + 64 * xRowmax = 1599152 ∧ t1L32k < 1599152 ∧
+    effRate 32768 8 128 1 1599152 = 839 ∧ ung5 t1L1M 1048576 + 2048 * xRowmax = 49051264 ∧
+    t1L1M < 49051264 ∧ step4I8H 32768 1 g256 .rowmax .T 2 = 650790 ∧ 650790 + 64 * xRowmax = 1311142 ∧
+    fused5 t1L32k 32768 64 cxHi < 1311142 ∧ step4I8H 1048576 1 g256 .rowmax .T 2 = 20076134 ∧ 20076134 + 2048 * xRowmax = 41207398 := by decide
+/-- on every remaining stretch of r blocks the rowmax chain's crossings cost at least the shipped guard's: never switch -/
+theorem T5r_switch_void (r : Nat) : r * (guardTab / 64 + 1) ≤ r * xRowmax := by
+  have h1 : guardTab / 64 + 1 = 8982 := by decide
+  have h2 : xRowmax = 10318 := by decide
+  rw [h1, h2]; exact Nat.mul_le_mul_left r (by decide)
+/-! ## T5r_readings — the unguarded / fused readings per L (`[R5-ung-*]`): guarded (M) minus the per-block guard; the fused cell adds one
+    crossing per step; the constant-rate bracket; the round-4 cells track the unguarded readings within +8.2 % (4k) … −2.3 % (1M) -/
+theorem T5r_readings : guard5 4096 = 71850 ∧
+    ung5 t1L4k 4096 = 141650 ∧
+    effRate 4096 8 128 1 141650 = 1184 ∧
+    fused5 t1L4k 4096 8 cxHi = 161650 ∧
+    effRate 4096 8 128 1 161650 = 1038 ∧
+    fused5 t1L4k 4096 8 cxLo = 151650 ∧
+    kvBytes 4096 8 128 * 10 / 1430 = 117323 ∧
+    kvBytes 4096 8 128 * 10 / 1400 = 119837 ∧
+    step4H 4096 1 g256 .lazy .T 2 = 130872 ∧
+    pct 141650 130872 = 1082 ∧
+    guard5 32768 = 574800 ∧
+    ung5 t1L32k 32768 = 938800 ∧
+    effRate 32768 8 128 1 938800 = 1430 ∧
+    fused5 t1L32k 32768 64 cxHi = 958800 ∧
+    effRate 32768 8 128 1 958800 = 1400 ∧
+    fused5 t1L32k 32768 64 cxLo = 948800 ∧
+    kvBytes 32768 8 128 * 10 / 1430 = 938585 ∧
+    kvBytes 32768 8 128 * 10 / 1400 = 958698 ∧
+    step4H 32768 1 g256 .lazy .T 2 = 911680 ∧
+    pct 938800 911680 = 1030 ∧
+    guard5 131072 = 2299200 ∧
+    ung5 t1L128k 131072 = 3553700 ∧
+    effRate 131072 8 128 1 3553700 = 1511 ∧
+    fused5 t1L128k 131072 256 cxHi = 3573700 ∧
+    effRate 131072 8 128 1 3573700 = 1502 ∧
+    fused5 t1L128k 131072 256 cxLo = 3563700 ∧
+    kvBytes 131072 8 128 * 10 / 1430 = 3754342 ∧
+    kvBytes 131072 8 128 * 10 / 1400 = 3834792 ∧
+    step4H 131072 1 g256 .lazy .T 2 = 3588736 ∧
+    pct 3553700 3588736 = 990 ∧
+    guard5 1048576 = 18393600 ∧
+    ung5 t1L1M 1048576 = 27920000 ∧
+    effRate 1048576 8 128 1 27920000 = 1538 ∧
+    fused5 t1L1M 1048576 2048 cxHi = 27940000 ∧
+    effRate 1048576 8 128 1 27940000 = 1537 ∧
+    fused5 t1L1M 1048576 2048 cxLo = 27930000 ∧
+    kvBytes 1048576 8 128 * 10 / 1430 = 30034736 ∧
+    kvBytes 1048576 8 128 * 10 / 1400 = 30678337 ∧
+    step4H 1048576 1 g256 .lazy .T 2 = 28574592 ∧
+    pct 27920000 28574592 = 977 := by decide
+/-- the phase-overlap bound (`[R5-overlap-*]`): the overlapped floor (stream + bounce) runs 163.3 GB/s at every L; the measured bounce removal
+    is 51.4 % of round 4's legs-2 → 0 charge -/
+theorem T5r_overlap : stream5 4096 = 96350 ∧
+    bounce5 4096 = 6375 ∧
+    effRate 4096 8 128 1 (96350 + 6375) = 1633 ∧
+    overlap5 t1L4k 4096 = 38925 ∧
+    pct 38925 141650 = 275 ∧
+    8 * (ddr4Block g256 1 2 - ddr4Block g256 1 0) = 12392 ∧
+    stream5 32768 = 770800 ∧
+    bounce5 32768 = 51000 ∧
+    effRate 32768 8 128 1 (770800 + 51000) = 1633 ∧
+    overlap5 t1L32k 32768 = 117000 ∧
+    pct 117000 938800 = 125 ∧
+    64 * (ddr4Block g256 1 2 - ddr4Block g256 1 0) = 99136 ∧
+    stream5 131072 = 3083200 ∧
+    bounce5 131072 = 204000 ∧
+    effRate 131072 8 128 1 (3083200 + 204000) = 1633 ∧
+    overlap5 t1L128k 131072 = 266500 ∧
+    pct 266500 3553700 = 75 ∧
+    256 * (ddr4Block g256 1 2 - ddr4Block g256 1 0) = 396544 ∧
+    stream5 1048576 = 24665600 ∧
+    bounce5 1048576 = 1632000 ∧
+    effRate 1048576 8 128 1 (24665600 + 1632000) = 1633 ∧
+    overlap5 t1L1M 1048576 = 1622400 ∧
+    pct 1622400 27920000 = 58 ∧
+    2048 * (ddr4Block g256 1 2 - ddr4Block g256 1 0) = 3172352 := by decide
+/-- the t ≥ 4 rows per fragment per 512 tokens (`[R5-t4]`, `[R5-t16]`): ≈ 20.3–24.0 µs whatever the fragment count — the guarded
+    multi-fragment kernel scales with fragments (no stream amortisation); the unguarded t ≥ 4 kernel is UNMEASURED -/
+theorem T5r_per_fragment : t4L4k * 512 / (2 * lMatrix4 4096 4) = 23974 ∧
+    t4L32k * 512 / (2 * lMatrix4 32768 4) = 21069 ∧
+    t4L128k * 512 / (2 * lMatrix4 131072 4) = 20538 ∧
+    t4L1M * 512 / (2 * lMatrix4 1048576 4) = 20294 ∧
+    t16L4k * 512 / (8 * lMatrix4 4096 16) = 23237 ∧
+    t16L32k * 512 / (8 * lMatrix4 32768 16) = 20990 ∧
+    t16L128k * 512 / (8 * lMatrix4 131072 16) = 20516 ∧
+    t16L1M * 512 / (8 * lMatrix4 1048576 16) = 20293 ∧
+    t1L4k * 512 / lMatrix4 4096 1 = 26792 ∧
+    t1L32k * 512 / lMatrix4 32768 1 = 23661 ∧
+    t1L128k * 512 / lMatrix4 131072 1 = 22865 ∧
+    t1L1M * 512 / lMatrix4 1048576 1 = 22614 := by decide
+/-! ## T5r_drift — E26′ CLOSED (`[R5-drift]`): the measured online-chain drift at 1M sits 205× / 272× inside the deterministic bound and
+    833× / 555× inside the 1 000 ppm ship line -/
+theorem T5r_drift : relPpm (chainO 1048576 512) + relPpm (chainS 1048576 512) = 246 ∧ relPpm (chainO 1048576 256) + relPpm (chainS 1048576 256) = 490 ∧
+    246 * 10 / drift512 = 205 ∧ 490 * 10 / drift256 = 272 ∧ 10000 / drift512 = 833 ∧ 10000 / drift256 = 555 ∧
+    drift512 * 205 ≤ 246 * 10 ∧ drift256 * 272 ≤ 490 * 10 := by decide
+/-! ## T5r_crossover — attention = one 398 µs GEMV unit on the measured kernel (`[R5-gemv]`, `[R5-crossover]`): the chord between the 4k and
+    32k cells (D; UNMEASURED in between) reaches it at 16 blocks guarded (every L ≥ 7 697) and 27 blocks unguarded (every L ≥ 13 329);
+    round 4: 14 336 / 13 841 -/
+theorem T5r_chord_guarded (nb : Nat) (h : 8 ≤ nb) : tGemvUnit ≤ chord t1L4k t1L32k nb ↔ 16 ≤ nb := by
+  unfold chord tGemvUnit t1L4k t1L32k; constructor <;> intro h' <;> omega
+theorem T5r_chord_unguarded (nb : Nat) (h : 8 ≤ nb) : tGemvUnit ≤ chord (ung5 t1L4k 4096) tUng32k nb ↔ 27 ≤ nb := by
+  have e : ung5 t1L4k 4096 = 141650 := by decide
+  rw [e]; unfold chord tGemvUnit tUng32k; constructor <;> intro h' <;> omega
+theorem T5r_nb_lines (L : Nat) : (16 ≤ nb5 L ↔ 7697 ≤ L) ∧ (27 ≤ nb5 L ↔ 13329 ≤ L) := by
+  have hb : blockOf 1 = 512 := by decide
+  unfold nb5 nblocks4 ceilDiv lMatrix4; rw [hb]
+  constructor <;> constructor <;> intro h <;> omega
+theorem T5r_crossover_cells : chord t1L4k t1L32k 15 < tGemvUnit ∧ tGemvUnit ≤ chord t1L4k t1L32k 16 ∧ chord 141650 tUng32k 26 < tGemvUnit ∧
+    tGemvUnit ≤ chord 141650 tUng32k 27 ∧ nb5 7697 = 16 ∧ nb5 7696 = 15 ∧ nb5 13329 = 27 ∧ nb5 13328 = 26 ∧ pct tUng32k tGemvUnit = 2359 := by decide
+/-! ## T5r_fleet_moe_128k — the planner constraint on the measured kernel (`[R5-fleet-moe-128k]`): with the MEASURED legs-2 bounce the
+    stream-only line is G ≤ 178.7 (round 4's legs-2 line: 189.4) — attention-bound at every G ≤ 174.6 even with zero chain and zero fixed
+    cost; on the effective rate the line is G_eff ≤ 167.3 and every reading (91.7 / 151.1 / 150.2) is below it -/
+theorem T5r_fleet_moe_128k_bounce (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ 256 * (20971520 / G) + bounce5 131072 := by
+  have hb : bounce5 131072 = 204000 := by decide
+  rw [hb]; unfold tLayerMoe
+  have : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  omega
+theorem T5r_fleet_moe_128k_line (G : Nat) (h1 : 0 < G) : tLayerMoe ≤ 256 * (20971520 / G) + bounce5 131072 ↔ G ≤ 1787 := by
+  have hb : bounce5 131072 = 204000 := by decide
+  rw [hb]; unfold tLayerMoe
+  have key : 11734 ≤ 20971520 / G ↔ G ≤ 1787 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T5r_fleet_moe_128k_eff (G : Nat) (h1 : 0 < G) : tLayerMoe ≤ kvBytes 131072 8 128 * 10 / G ↔ G ≤ 1673 := by
+  have e : kvBytes 131072 8 128 * 10 = 5368709120 := by decide
+  rw [e, Nat.le_div_iff_mul_le h1]; unfold tLayerMoe; constructor <;> intro h <;> omega
+theorem T5r_fleet_moe_128k_cells : t1L128k - tLayerMoe = 2645181 ∧ pct 2645181 tLayerMoe = 825 ∧
+    ung5 t1L128k 131072 = 3553700 ∧ 3553700 - tLayerMoe = 345981 ∧ pct 345981 tLayerMoe = 108 ∧
+    fused5 t1L128k 131072 256 cxHi = 3573700 ∧ 3573700 - tLayerMoe = 365981 ∧ pct 365981 tLayerMoe = 114 ∧
+    effRate 131072 8 128 1 t1L128k = 917 ∧ effRate 131072 8 128 1 3553700 = 1511 ∧
+    effRate 131072 8 128 1 3573700 = 1502 ∧ 1511 ≤ 1673 ∧ gStream < 1787 ∧ 1787 < 1894 ∧
+    256 * 11733 + 204000 < tLayerMoe ∧ tLayerMoe ≤ 256 * 11734 + 204000 ∧
+    stream5 131072 + bounce5 131072 = 3287200 ∧ 3287200 - tLayerMoe = 79481 ∧
+    pct 79481 tLayerMoe = 25 := by decide
+/-! ## T5r_moved — round 4 → round 5 (`[R5-moved]`): the round-4 cells beside the measured (guarded) and derived (unguarded) ones -/
+theorem T5r_moved : usR (step4H 4096 1 g256 .lazy .T 2) = 131 ∧
+    usR (step4H 32768 1 g256 .lazy .T 2) = 912 ∧
+    usR (step4H 131072 1 g256 .lazy .T 2) = 3589 ∧
+    usR (step4H 1048576 1 g256 .lazy .T 2) = 28575 ∧
+    usR (ung5 t1L4k 4096) = 142 ∧
+    usR (ung5 t1L32k 32768) = 939 ∧
+    usR (ung5 t1L128k 131072) = 3554 ∧
+    usR (ung5 t1L1M 1048576) = 27920 ∧
+    usR (step4H 32768 4 g256 .lazy .T 2) = 1030 ∧
+    usR (step4H 32768 16 g256 .lazy .T 2) = 2565 ∧
+    usR (step4H 32768 1 g256 .rowmax .T 2) = 917 := by decide

@@ -12,6 +12,9 @@ round-2 label keeps printing its round-2 value so that `diff` lists exactly what
 Round 4 (2026-11-07): the pre-implementation review + kernel session 1 (HW-MAP 423d433, errata #18-#21) are the [R4-*] section at the
 end (fresh C chunk sets, the P bounce as `legs`, the round-4 chains and merge, append-then-attend tails, the online-chain rounding
 bound, the planted sink, the C_o nesting, 256 KiB pages, the page-waste term); the [A*] and [R3-*] lines keep printing unchanged.
+Round 5 (2026-11-07): the measured production kernel (attention session 3, HW-MAP 62e8137) is the [R5-*] section at the end (the t x L
+sweep as MEASURED rows, the validation row, the guard scan and erratum #29's batched-crossing chain model, the unguarded / fused readings
+per L, the phase-overlap and rowmax-crossing bounds, E26' closed); every earlier line keeps printing unchanged.
 Round-2 changes: [A4b-drain-threshold] compares the mt=4 drain bytes with the mt=4 block time (164, not 82);
 [A4b-G-threshold] prints the c_V=33 vector time; [A7-us-*] sums the section-4 table rows (the old [A7-sram]
 omitted q row-major and the page-table window); [A7-l0a] is 16 KiB*mt (+-Q resident); new labels
@@ -751,3 +754,146 @@ def main4():
 
 if __name__ == "__main__":
     main4()
+
+# ============================================================ ROUND 5 (2026-11-07): the measured production kernel (attention session 3) ====
+# Silicon inputs (HW-MAP 62e8137; all MEASURED; no other silicon claim enters this section):
+#   * the t x L sweep (causal flags incl. the guard, best-of-3, in-kernel us): t = 1: 213.5 / 1513.6 / 5852.9 / 46313.6 at 4k / 32k / 128k / 1M;
+#     t = 4: 382.1 / 2695.6 / 10514.3 / 83123.1; t = 16: 1481.4 / 10741.7 / 42013.4 / 332476.2; quoted effective KV: t = 1 78.6 / 88.6 /
+#     91.7 / 92.7 GB/s, t >= 4 99.6-103.4;
+#   * UNGUARDED at 32k, t = 1: 938.8 us = 143.0 GB/s (the round-4 legs-2 cell, 912 us, within 2.9 %: the INPUT validation row);
+#   * the guard's per-block scalar scan as shipped (8 reduce-max calls with a scalar destination + one queue fence per block): +572 us; tree +
+#     queue +1250 us, tree + full barrier +1400 us (both worse); erratum #29: a per-block scalar crossing drains the vector pipe ~10-20 us,
+#     a scalar-destination reduce-max costs ~1.1 us per call;
+#   * realised bounce legs = 2, ~51 us at 32k; per-engine at 32k t = 1: stream 770.8 / scores 523.9 / softmax+guard 644.3 / PV-merge-bounce
+#     344.9 us (the K+V stream phase 174-176 GB/s; DDR ~47 % idle: the chain binds);
+#   * correctness: causal-exact 12/12 at 32k (relerr 9.8e-11), real-exp bad-0 through 1M; online-chain drift at 1M 1.2e-6 / 1.8e-6
+#     (session 2, 512 / 256-token blocks); trips ~free, the trip machinery REQUIRED.
+# Readings this section derives (D) from those inputs: the guard per block (the t = 1 table difference at 32k over its 64 blocks), the
+# batched-crossing chain model (erratum #29), the unguarded / fused per-L cells (guarded per-L MEASURED minus the per-block guard; the
+# per-block guard off 32k is UNMEASURED), the phase-overlap bound, the rowmax-chain crossing bound. Every [A*] / [R3-*] / [R4-*] label
+# above keeps printing its value; the [R5-*] labels below are the round-5 cells.
+LS5 = (4096, 32768, 131072, 1 << 20)
+LK5 = ("4k", "32k", "128k", "1M")
+T5 = {1: (213_500, 1_513_600, 5_852_900, 46_313_600), 4: (382_100, 2_695_600, 10_514_300, 83_123_100),
+      16: (1_481_400, 10_741_700, 42_013_400, 332_476_200)}        # ns in-kernel, best-of-3, causal flags incl. the guard (M)
+EFF5_Q1 = (786, 886, 917, 927)                                     # HW-MAP's quoted t = 1 effective KV, tenths GB/s (M, as quoted)
+EFF5_QHI = (996, 1034)                                            # its quoted t >= 4 range (tenths)
+T5_UNG, G5_UNG_Q = 938_800, 1430                                  # unguarded, 32k, t = 1 (M)
+GUARD5_Q, GUARD5_TQ, GUARD5_TB = 572_000, 1_250_000, 1_400_000    # guard as shipped / tree + queue / tree + full barrier, 32k (M)
+C5_SDST, C5_X = 1_100, (10_000, 20_000)                           # erratum #29: scalar-destination reduce-max; one crossing drain (M, approx.)
+BOUNCE5, LEGS5 = 51_000, 2                                        # the realised P bounce at 32k, t = 1 (M)
+ENG5, STREAM5 = (523_900, 644_300, 344_900), 770_800              # per-engine phases at 32k t = 1: scores / softmax+guard / PV-merge-bounce; stream (M)
+STREAM5_Q, IDLE5_Q = (1740, 1760), 47                             # quoted K+V stream-phase rate (tenths) and DDR idle share (%) (M, as quoted)
+DRIFT5_PPM10 = (12, 18)                                           # online-chain drift at 1M, tenths of ppm, 512 / 256-token blocks (M, session 2)
+MATCH5 = 50                                                       # the 5.0 % model-match line (tenths of a percent), PROMPT-3R5
+NB32 = 64                                                         # 512-token blocks at 32k, t = 1 (nblocks4)
+def x10r(a, b): return (20 * a + b) // (2 * b)                    # a / b in tenths, round-half-up
+def nb5(L, t=1): return nblocks4(L, t, mt_pass(rows_of(t)))       # blocks per pass (512-token at mt <= 2, 256 at mt 3-4)
+def frags5(t): return ceil(rows_of(t), 16)                         # 16-row fragments summed over the passes (t = 1: one, half full)
+def guard5(L): return nb5(L) * (T5[1][1] - T5_UNG) // NB32         # the as-shipped guard scan, scaled per block (D; 574 800 ns at 32k)
+def bounce5(L): return nb5(L) * BOUNCE5 // NB32                    # the measured bounce, scaled per block (D)
+def stream5(L): return nb5(L) * STREAM5 // NB32                    # the measured K+V stream phase, scaled per block (D)
+def ung5(L): return T5[1][LS5.index(L)] - guard5(L)                # reading (ii): guarded per-L (M) minus the per-block guard; exact at 32k
+def rate5(L, G): return L * KV_TOK * 10 // G                       # reading (i): a constant effective rate G at every L
+def xing5(nb, K, cx): return ceil(nb, K) * cx                      # batched crossings: one crossing per K blocks, each draining cx ns
+def fused5(L, cx=C5_X[1], K=None): return ung5(L) + xing5(nb5(L), nb5(L) if K is None else K, cx)
+def overlap5(L): return ung5(L) - stream5(L) - bounce5(L)          # what full phase overlap could recover at most (D, upper bound)
+X5_ROWMAX = min(16 * C5_SDST, C5_X[0] + 16 * SIGMA_S3 // 10)      # rowmax chain: 16 row maxima reach Duplicate every block (>= one crossing)
+
+def main5():
+    print("\n# ---- ROUND 5 (2026-11-07; the measured production kernel, attention session 3, HW-MAP 62e8137): [R5-*] cells; [A*]/[R3-*]/[R4-*] above unchanged ----")
+    g256 = G_SHUF[256 * KiB]; tab = T5[1][1] - T5_UNG
+    m4 = {t: [step4(L, t, g256, "lazy", "T")[0] for L in LS5] for t in (1, 4, 16)}
+    # ---- the t x L sweep as MEASURED rows, with the derived per-block and per-fragment readings
+    for t in (1, 4, 16):
+        for i, L in enumerate(LS5):
+            T = T5[t][i]; nb = nb5(L, t); p = passes_of(rows_of(t)); f = frags5(t)
+            q = f" (quoted {t10(EFF5_Q1[i])})" if t == 1 else ""
+            print(f"[R5-meas-t{t}-{LK5[i]}] MEASURED {T} ns ({t10(T // 100)} us; wall {usR(T + T_LAUNCH)} us): rows {rows_of(t)}, {p} pass(es) x {nb} blocks of {BL_of(mt_pass(rows_of(t)))}, {f} fragment(s); "
+                  f"eff KV {t10(rateT(L * KV_TOK, T))} GB/s{q}; per fragment-pass {t10(rateT(f * L * KV_TOK, T))}; per block-pass {T // (p * nb)} ns; x GEMV {t10(pct(T, T_GEMV))}% ; "
+                  f"round-4 model (lazy-T, legs 2, 169.2) {m4[t][i]} ns -> measured / model = {t10(x10r(T, m4[t][i]))}x")
+    print(f"[R5-meas-eff-check] t = 1 recomputed eff (rateT, round-half-up): {', '.join(t10(rateT(L * KV_TOK, T5[1][i])) for i, L in enumerate(LS5))} vs quoted 78.6 / 88.6 / 91.7 / 92.7 -- "
+          f"32k recomputes to {t10(rateT(32768 * KV_TOK, T5[1][1]))} (134 217 728 B / 1 513 600 ns = 88.67; the quote is the floored tenth); t >= 4 quotes are per fragment-pass "
+          f"((rows/16) x KV / T): {', '.join(t10(rateT(frags5(t) * L * KV_TOK, T5[t][i])) for t in (4, 16) for i, L in enumerate(LS5))} -- the quoted 99.6-103.4 covers L >= 32k (4k: 87.8 / 90.6)")
+    # ---- the validation row (INPUT) and its term-level reading
+    d = T5_UNG - m4[1][1]
+    print(f"[R5-validate] INPUT: unguarded 32k t = 1 {T5_UNG} ns ({t10(rateT(32768 * KV_TOK, T5_UNG))} GB/s) vs the round-4 legs-2 cell {m4[1][1]} ns: +{d} ns = {t10(pct(d, m4[1][1]))}% of the exact cell "
+          f"({t10(pct(T5_UNG - 912_000, 912_000))}% of the displayed 912 us); within the {t10(MATCH5)}% match line: {1000 * d <= MATCH5 * m4[1][1]} (needs <= {MATCH5 * m4[1][1] // 1000} ns)")
+    kv169 = NB32 * ddr4_block_ns(g256, 1, 0); b169 = NB32 * ddr4_block_ns(g256, 1, 2) - kv169; fx = step4(32768, 1, g256, "lazy", "T")[1]["fixed"]
+    rest = T5_UNG - STREAM5 - BOUNCE5
+    print(f"[R5-validate-terms] the cell-level match nets offsetting terms: model = K/V at 169.2 {kv169} + bounce (legs 2 on the roof) {b169} + fixed {fx} = {kv169 + b169 + fx}; "
+          f"measured = K+V stream phase {STREAM5} ({t10(rateT(32768 * KV_TOK, STREAM5))} GB/s) + bounce ~{BOUNCE5} + the rest {rest}; model - measured: K/V basis +{kv169 - STREAM5}, bounce +{b169 - BOUNCE5}, "
+          f"fixed vs exposed chain -{rest - fx} -> net -{T5_UNG - kv169 - b169 - fx}; the measured bounce is {t10(pct(BOUNCE5, b169))}% of the modelled roof charge")
+    # ---- per-engine: the chain is serial, guarded and unguarded
+    s3 = sum(ENG5); sg = ENG5[1] - tab
+    print(f"[R5-engines] guarded phases scores {ENG5[0]} + softmax+guard {ENG5[1]} + PV-merge-bounce {ENG5[2]} = {s3} ns vs the total {T5[1][1]} (|diff| {abs(T5[1][1] - s3)} ns = {t10(pct(abs(T5[1][1] - s3), T5[1][1]))}%): "
+          f"the phases SERIALISE; stream {STREAM5} = {t10(pct(STREAM5, s3))}% busy ({t10(1000 - pct(STREAM5, s3))}% idle by this split; quoted ~{IDLE5_Q}%); per block {ENG5[0] // NB32} / {ENG5[1] // NB32} / {ENG5[2] // NB32} ns")
+    print(f"[R5-engines-unguarded] softmax without the guard {ENG5[1]} - {tab} = {sg} ns ({sg // NB32} ns per block vs the round-4 lazy-T chain without its guard calls {vec4_ns(512, 1, 'lazy', 'T') - 8 * call100(T_RM16) * 10 // (R_VEC * 100)} ns: "
+          f"{t10((vec4_ns(512, 1, 'lazy', 'T') - 8 * call100(T_RM16) * 10 // (R_VEC * 100)) * 10 // (sg // NB32))}x); serial sum without the guard {ENG5[0] + sg + ENG5[2]} vs the measured unguarded {T5_UNG} "
+          f"(|diff| {abs(ENG5[0] + sg + ENG5[2] - T5_UNG)}): the unguarded kernel is phase-serial too -- stream busy {t10(pct(STREAM5, T5_UNG))}%, not the binding engine")
+    # ---- the guard (erratum #29) and the round-4 assumption it refutes
+    gq = GUARD5_Q // NB32; gt = tab // NB32
+    print(f"[R5-guard] as shipped: table difference {T5[1][1]} - {T5_UNG} = {tab} ns (quoted +{GUARD5_Q}: {tab - GUARD5_Q} ns = {t10(pct(tab - GUARD5_Q, GUARD5_Q))}% apart, two measured readings); "
+          f"per block {gt} ns ({gq} quoted); 8 scalar-destination reduce calls x {C5_SDST} = {8 * C5_SDST} ns = {t10(pct(8 * C5_SDST, gt))}% of it -- the scalar-destination reduce IS the crossing; "
+          f"{t10(pct(tab, T5_UNG))}% of the unguarded kernel, {t10(pct(tab, T5[1][1]))}% of the guarded")
+    print(f"[R5-guard-alt] tree + queue {GUARD5_TQ} = {GUARD5_TQ // NB32} ns per block (one crossing per block, in the {C5_X[0]}-{C5_X[1]} ns band: {C5_X[0] <= GUARD5_TQ // NB32 <= C5_X[1]}); "
+          f"tree + full barrier {GUARD5_TB} = {GUARD5_TB // NB32} ns per block ({GUARD5_TB // NB32 - C5_X[1]} ns above the band); both worse than shipped by {GUARD5_TQ - tab} / {GUARD5_TB - tab} ns")
+    g4 = 8 * call100(T_RM16) * 10 // (R_VEC * 100); sl = ddr4_block_ns(g256, 1, 2) - vec4_ns(512, 1, "lazy", "T")
+    print(f"[R5-A5-refuted] round 4 modelled the guard as 8 vector-destination reduce calls ({g4} ns) + one queue fence (A5: < 1 000 ns) inside a DDR-bound block with {sl} ns of slack -> 0 ns on the cell; "
+          f"measured: {gt} ns per block, serialised ({t10(gt * 10 // 1000)}x the A5 ceiling); the 'per-block scalar reads ~ free' premise of sections 3.2 / 3.4 is refuted (erratum #29)")
+    # ---- the batched-crossing model (the corrected chain cost)
+    for K in (1, 8, NB32):
+        cells = []
+        for cx in C5_X:
+            T = T5_UNG + xing5(NB32, K, cx)
+            cells.append(f"cx {cx // 1000} us: {xing5(NB32, K, cx)} ns -> {T} ns = {t10(rateT(32768 * KV_TOK, T))} GB/s, guard fusion worth {tab - xing5(NB32, K, cx)} ns")
+        print(f"[R5-crossing-K{K}] one crossing per {K} block(s) at 32k ({ceil(NB32, K)} crossings): " + "; ".join(cells))
+    print(f"[R5-crossing-target] the 'fused target ~140 GB/s' = the unguarded kernel + ONE crossing per step at the band's top: {T5_UNG} + {C5_X[1]} = {T5_UNG + C5_X[1]} ns = {t10(rateT(32768 * KV_TOK, T5_UNG + C5_X[1]))} GB/s "
+          f"({t10(rateT(32768 * KV_TOK, T5_UNG + C5_X[0]))} at the bottom); worth {tab - C5_X[1]} - {tab - C5_X[0]} ns per layer; zero-residual ceiling {tab} ns (~570 us = the prompt's figure)")
+    # ---- the rowmax chain under erratum #29 (the fallback and KV-int8)
+    i8m = step4(32768, 1, g256, "rowmax", "T", i8=True)[0]; i8m1 = step4(1 << 20, 1, g256, "rowmax", "T", i8=True)[0]
+    print(f"[R5-rowmax-bound] the section-3.2 chain builds its shift reel by Duplicate from the 16 row maxima every block: >= one crossing per block = min(16 x {C5_SDST}, {C5_X[0]} + 16 x sigma_s) = {X5_ROWMAX} ns "
+          f"(UNMEASURED structure, lower bound); rowmax >= unguarded + nb x {X5_ROWMAX}: 32k >= {T5_UNG + NB32 * X5_ROWMAX} ns ({t10(rateT(32768 * KV_TOK, T5_UNG + NB32 * X5_ROWMAX))} GB/s) > the guarded lazy {T5[1][1]}; "
+          f"1M >= {ung5(1 << 20) + 2048 * X5_ROWMAX} > {T5[1][3]} -- the round-4 switch policy (finish on rowmax after 3 trips, '917 us') is VOID: never switch")
+    print(f"[R5-rowmax-i8] KV-int8 on the rowmax chain (round 4: {i8m} ns at 32k, {i8m1} at 1M, vector-bound) + the per-block crossing: >= {i8m + NB32 * X5_ROWMAX} / {i8m1 + 2048 * X5_ROWMAX} ns "
+          f"(> the fused f16 lazy {fused5(32768)} at 32k); KV-int8 lives only on the lazy mu = 0 variant (trip rate UNMEASURED, E35 model half)")
+    # ---- the unguarded / fused readings per L, the overlap bound, the measured bounce
+    for i, L in enumerate(LS5):
+        u, fz = ung5(L), fused5(L); r1, r2 = rate5(L, G5_UNG_Q), rate5(L, 1400)
+        print(f"[R5-ung-{LK5[i]}] guarded {T5[1][i]} (M) - guard {guard5(L)} ({nb5(L)} blocks) = unguarded {u} ns ({t10(rateT(L * KV_TOK, u))} GB/s){' (M)' if L == 32768 else ' (D)'}; "
+              f"fused (one 20 us crossing) {fz} ({t10(rateT(L * KV_TOK, fz))}), at 10 us {fused5(L, C5_X[0])}; rate reading (i): unguarded at 143.0 {r1}, fused at 140.0 {r2}; "
+              f"round-4 model {m4[1][i]}: unguarded/model {t10(pct(u, m4[1][i]))}%")
+        print(f"[R5-overlap-{LK5[i]}] stream {stream5(L)} + bounce {bounce5(L)} = {stream5(L) + bounce5(L)} ns ({t10(rateT(L * KV_TOK, stream5(L) + bounce5(L)))} GB/s, the overlapped floor); "
+              f"phase-overlap gap <= {overlap5(L)} ns ({t10(pct(overlap5(L), u))}% of the unguarded cell); measured bounce removal {bounce5(L)} ns (round 4 legs 2 -> 0 at 169.2: {nb5(L) * (ddr4_block_ns(g256, 1, 2) - ddr4_block_ns(g256, 1, 0))})")
+    # ---- the drift (E26' closed) and E35's device half
+    b512, b256 = rel_ppm(chain_O(1 << 20, 512)) + rel_ppm(chain_S(1 << 20, 512)), rel_ppm(chain_O(1 << 20, 256)) + rel_ppm(chain_S(1 << 20, 256))
+    print(f"[R5-drift] E26' CLOSED (session 2): online-chain drift at 1M {t10(DRIFT5_PPM10[0])} / {t10(DRIFT5_PPM10[1])} ppm (512 / 256-token blocks) vs the deterministic bound {b512} / {b256} ppm "
+          f"({b512 * 10 // DRIFT5_PPM10[0]}x / {b256 * 10 // DRIFT5_PPM10[1]}x inside) and the 1000 ppm ship line ({10000 // DRIFT5_PPM10[0]}x / {10000 // DRIFT5_PPM10[1]}x inside)")
+    print(f"[R5-e35] E35 device half RESOLVED: the trip machinery is REQUIRED and trips are ~free (session 3); the SCAN is the cost ({tab} ns at 32k = {gt} ns per block); "
+          f"still open (model half): the trip rate per (model, L) at mu = 8, beta = 3 and at mu = 0; with a batched guard a trip found at the batch crossing re-streams its block (~{ddr4_block_ns(g256, 1, 2) + vec4_ns(512, 1, 'rowmax', 'T')} ns, UNMEASURED)")
+    # ---- t >= 4: the measured rows against the round-4 regime cells
+    for t in (4, 16):
+        f = frags5(t); per = [T5[t][i] * 512 // (f * L_matrix4(L, t)) for i, L in enumerate(LS5)]
+        print(f"[R5-t{t}] measured / round-4 model: {', '.join(t10(x10r(T5[t][i], m4[t][i])) + 'x' for i in range(4))}; per fragment per 512 tokens {', '.join(str(x) for x in per)} ns "
+              f"(t = 1: {', '.join(str(T5[1][i] * 512 // L_matrix4(L, 1)) for i, L in enumerate(LS5))}) -- the guarded multi-fragment kernel scales with the fragment count (no stream amortisation); "
+              f"the unguarded t >= 4 kernel is UNMEASURED")
+    # ---- the attention fraction of the GEMV step and the crossover (chord between measured points)
+    def chord_first(T4k, T32k):
+        nb = 8
+        while T4k + (nb - 8) * (T32k - T4k) // 56 < T_GEMV: nb += 1
+        return nb, 512 * (nb - 1) + 17
+    nbg, Lg = chord_first(T5[1][0], T5[1][1]); nbu, Lu = chord_first(ung5(4096), T5_UNG)
+    print(f"[R5-gemv] x GEMV (398 us unit), MEASURED guarded: {', '.join(t10(pct(T5[1][i], T_GEMV)) + '%' for i in range(4))}; unguarded 32k {t10(pct(T5_UNG, T_GEMV))}% (round 4 legs 2: {', '.join(t10(pct(m4[1][i], T_GEMV)) + '%' for i in range(4))})")
+    print(f"[R5-crossover] chord between the 4k and 32k cells (D; UNMEASURED in between): guarded reaches one GEMV unit at nb >= {nbg} -> L >= {Lg}; unguarded (4k derived) at nb >= {nbu} -> L >= {Lu}; round 4: 14 336 / 13 841 (legs 2, 169.2)")
+    # ---- the planner reading: MoE 128k with the measured bounce and the measured kernel
+    bl = 256 * BOUNCE5 // NB32; k0 = ceil(T_LAYER_MOE - bl, 256); kf = ceil(T_LAYER_MOE - bl - 19_328, 256)
+    print(f"[R5-fleet-moe-128k] measured kernel per layer: guarded {T5[1][2]} / unguarded {ung5(131072)} / fused {fused5(131072)} ns vs the {T_LAYER_MOE} ns MoE layer: ATTN-bound by "
+          f"{t10(pct(T5[1][2] - T_LAYER_MOE, T_LAYER_MOE))} / {t10(pct(ung5(131072) - T_LAYER_MOE, T_LAYER_MOE))} / {t10(pct(fused5(131072) - T_LAYER_MOE, T_LAYER_MOE))}%; effective-rate line: attention-bound iff G_eff <= "
+          f"{131072 * KV_TOK * 10 // T_LAYER_MOE} tenths; with the MEASURED legs-2 bounce ({bl} ns at 128k) the stream-only line is G <= {20971520 // k0} (zero fixed cost; {20971520 // kf} with the 19 328 ns lazy fixed) "
+          f"vs the round-4 legs-2 line 189.4 -> attention-bound at every G <= 174.6 even with zero chain cost")
+    # ---- the moved cells (round 4 -> round 5)
+    print(f"[R5-moved] round 4 (lazy-T, legs 2, 169.2) -> round 5 MEASURED (guarded) / D (unguarded): t = 1 {', '.join(f'{LK5[i]} {usR(m4[1][i])} -> {t10(T5[1][i] // 100)} / {usR(ung5(L))} us' for i, L in enumerate(LS5))}; "
+          f"t = 4 32k {usR(m4[4][1])} -> {t10(T5[4][1] // 100)}; t = 16 32k {usR(m4[16][1])} -> {t10(T5[16][1] // 100)}; drift bound 246 ppm -> measured 1.2 ppm; the switch-to-rowmax worst case 917 us -> void")
+
+if __name__ == "__main__":
+    main5()
