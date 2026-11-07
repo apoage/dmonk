@@ -1,4 +1,4 @@
-# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05)
+# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07)
 
 How to read a row: **Claim** quotes or paraphrases the DESIGN-3.md statement (section numbers refer to the
 corrected document); **Proof** names the theorem(s) in `proof/attn.lean` that fix the number; **attn.py** names
@@ -21,6 +21,127 @@ flat m = 1..16) as the pure-read roof class — the KV stream is read-only (the 
 ≤ 8 KiB K/V append and the output), so the 173.8 read+write figure does not apply; the raw direct-load 181.3 is
 recorded as the ceiling the kernel's choreography sits under (`Measured.rGemm`, `rDirect`, `rDdrRW`;
 T1_stream_roof gives the 3.8 % what-if).
+
+## Round 4 (2026-11-07) — the pre-implementation review absorbed, re-grounded on kernel session 1 (HW-MAP commit 423d433, errata #18–#21)
+
+Round 4 changes the design in three places that session 1 forced (fresh C chunks instead of accumulating regions, the P bounce, the
+lazy guard's mandatory recompute), closes the review's eleven items, and marks every number by status. Labels `[R4-*]` are printed by
+`python3 -I proof/attn.py` after the `[R3-*]` block (every round-2 and round-3 line prints unchanged: `diff` of the two outputs is
+exactly the `[R4-*]` block) and by `python3 -I proof/fleet.py` after `[R3-*]` (likewise unchanged above); theorems `T4r_*` are the last
+section of `proof/attn.lean`. Status words: PROVED, INPUT (a HW-MAP measurement used as given; "session 1" marks the kernel-session
+rows), **UNMEASURED** (a quantity the model carries with an explicit variable and a ladder row), **OPEN** (a cell blocked on the
+softmax-reel anomaly — modelled as specified, not modelled around), ASSUMPTION (A4, A5), DEFINITION, EMPIRICAL — Ex.
+
+### Build status, round 4
+
+| Item | Result |
+|---|---|
+| Toolchain | Lean 4.35.0 (elan), Lake 5.0.0 — unchanged |
+| `lean proof/attn.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 7 s |
+| `cd proof && lake build` | **succeeds** (target `Attn`) |
+| Theorems in attn.lean | **265** = 199 (rounds 2–3, kept) + 66 (round 4: 54 `T4r_*` theorems + 12 helpers `chain4_rowmax`, `chain4_lazy`, `vec4_lazyT_512`, `vec4_lazyC_512`, `vec4_rowmaxT_512`, `vec4_rowmaxC_512`, `vec4_rowmaxT_256_4`, `vec4_rowmaxT_128_8`, `vec4_lazyT_256_4`, `vec4_lazyT_128_8`, `bm4_vec`, `bm4_ddr`) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0; `#print axioms` over the 66 round-4 declarations: 35 depend on no axiom, 19 on `propext` + `Quot.sound`, 2 on `propext`, 10 on `propext` / `Quot.sound` / `Classical.choice` (the `omega` / `simp` standard set) |
+| Measured namespace `Measured4` | the session-1 gather rates (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) and five DESIGN-4 memory margins (D4 inputs from fleet.py: the dense 1M KV-int8 margin, four instance-fit margins) |
+| Model `Design4` | fresh chunk sets (`coSets`, `l0c4`, `l0a4`, `drain4`), the P bounce (`pBytes`, `bounceBytes`, `ddr4Block` with `legs`), the round-4 chains (`chain4Rowmax` without the Z difference, `chain4Lazy`, the itemised `merge4`, `firstMax4`), append-then-attend (`tail4Tok`, `lMatrix4`, `nblocks4`, `mask4`), `step4` / `step4H` / `step4S4` / `step4I8`, the d = 64 call counts, the online-chain lengths (`chainO`, `chainS`, `relPpm`, `errSum`), the sink (`sinkLostPpm`), the page waste, the C_o nesting (`coAddr*`), the 256 KiB page maps with inverses, the US rows (`us4`) |
+| `python3 -I proof/attn.py` | 467 lines unchanged + 402 lines (400 `[R4-*]` labels); `python3 -I proof/fleet.py` 537 lines unchanged + 46 lines (45 `[R4-*]` labels) |
+
+### The moved cells (round 3 → round 4; `[R4-moved-*]`, T4r_moved)
+
+Headline = the lazy chain at the throughput convention on the design page (256 KiB, 169.2) with both bounce legs; "legs 0" = a proven
+direct US → S1 route (the round-3 DDR model); "138.3" = the session-1 kernel loop (diagnostic).
+
+| Cell | Round 3 | Round 4, legs 2 | legs 0 | at 138.3, legs 2 | Theorem |
+|---|---|---|---|---|---|
+| t = 1, 32k (lazy-T / rowmax-T) | 805 / 812 µs | **912 (+13.3 %)** / 917 | 813 / 817 | 1 111 / 1 116 | T4r_t1_32k |
+| t = 1, 1M | 25 394 / 25 402 | **28 575 (+12.5 %)** / 28 579 | 25 402 / 25 407 | 34 956 / 34 961 | T4r_t1_1M |
+| t = 1, 4k / 128k (lazy-T) | 110 / 3 184 | 131 / 3 589 | 118 / 3 192 | 156 / 4 386 | T4r_t1_4k, T4r_t1_128k |
+| worst t = 1 corner | lazy-C +0.2 % | rowmax-C 925 (+1.5 % over lazy-T), DDR-bound | rowmax-C vector-bound at 174.6 (12 265 > 12 011) | | T4r_t1_binding |
+| vector chain per 512-token block | 5 530 / 6 782 / 9 276 / 11 836 ns | 4 772 / 5 867 / 9 791 / 12 265 (OPEN) | | | T4r_chain |
+| merge per block-fragment | pack 25 750 (596 ns) | 15 431 lazy (357) / 70 462 rowmax (1 631), itemised fresh-set | | | T4r_merge |
+| fixed cost (lazy-T) | 11 328 | **19 328** (first-block max 5 200 + a 16-token tail 4 156) | 19 328 | | T4r_fixed |
+| block DDR time at 174.6 | 12 011 | **13 512** (+12.5 %); 15 013 at mt = 2 (+25 %), 9 008 at mt = 4 (+50 %) | 12 011 | 17 059 | T4r_bounce |
+| drain bytes / time per block (mt = 1) | 40 960 B / 268 ns | 65 536 B / 428 ns; hidden iff R_drain ≥ 5.5 GB/s/core (27.7×) | | | T4r_drain |
+| L0C / L0A / US at mt = 1 … 4 | 112–256 / 16·mt / 208 KiB + 64 B | **128 / 256 / 192 / 256**; **12·mt**; **122 / 184 / 190 / 196 KiB + 64 B** | | | T4r_l0c, T4r_l0a, T4r_us |
+| t = 4 / 8 / 16 at 32k (lazy-T) | 826 / 1 593 / 3 162 | **1 030** (KV) / 1 301 / 2 565 (vector) | 832 / 1 301 / 2 565 | | T4r_regime |
+| rows* (lazy-T / rowmax-T) | 48 / 32 | **64 / 32** | 48 / 32 | | T4r_rows_star |
+| S4 vs two passes, 32k | 3 777 vs 3 162 | 2 680 vs 2 565 (lazy), 13 096 vs 7 756 (rowmax) | | | T4r_t16, T4r_s4_* |
+| KV-int8, 32k | 413 (lazy, DDR) / 612 (rowmax) | lazy UNREACHABLE; rowmax 651 (vector) | | | T4r_i8 |
+| L_eq (512-multiples, lazy) | 16 896 at 174.6 | **14 848** at 174.6, 14 336 at 169.2, 11 776 at 138.3 | 16 384 / 15 872 / 12 800 | | T4r_crossover |
+| MoE-128k (DESIGN-4) | tie: weights-bound by 0.5 % at 169.2 | **attention-bound at every G ≤ 174.6** (11.9 % at 169.2, 36.7 % at 138.3) | tie (iff G ≤ 168.3) | | T4r_fleet_moe_128k_* |
+| drift bound at 1M | 2·10⁻³ deterministic (region difference), 61 ppm random walk | **246 ppm deterministic** (online chain, two-level) | | | T4r_drift_online |
+| d = 64 MMA calls per block | 80 (2 × k = 32) | **48** (one k = 64 call) | | | T4r_kshape |
+| page waste in the planner | none | 4 MiB per layer-sequence at 256 KiB; +1–3 ‰ of int4 share; dense 1M KV-int8 margin 1.66 → 1.59 GB | | | T4r_waste |
+
+### Corrections forced by the review and by session 1 (round 3 → round 4)
+
+| # | Where | Round 3 said | Now | Caught by |
+|---|---|---|---|---|
+| 1 | §1.2, §7, §9 d = 64 rows, T2_d64 | "k = 64 is the illegal shape": d = 64 uses 2 × (16,16,32) accumulating calls, 80 per block, 20 %·mt | an i8 fact carried onto f16; the f16 sweep is EXACT at every k: **one k = 64 call, 48 calls per block (12.0 %)** — and it must be one call (erratum #19 forbids the accumulating pair on f16); the i8 variant keeps 2 × k = 32 | review item 1 + session 1 (T4r_kshape) |
+| 2 | §3.1, §3.2 step 1, §4 NegSnap rows, T_drift_* | the region-difference epilogue with ±Q alternation; NegSnap 96 KiB in US / 144–192 KiB in S1; drift ≤ 10⁻⁴ under the random walk | **f16 accumulation into one C chunk corrupts across any barrier or re-lift (erratum #19): every chunk is fresh, C_o = one fresh set per 128-token group summed on the vector unit**; Z, ±Q, NegSnap retired; the drift theorems' mechanism cannot be built; their deterministic bounds (1 953 / 3 906 ppm) exceeded the ship line | session 1 (T4r_l0c, T4r_drift_online) |
+| 3 | §2.2 copy row, §5 A5/A6 | P fragments US → S1 by plain copy (66 ns per block) | **erratum #20: the US → S1 A-slot copy delivers data ≠ source; P rides a DDR bounce** — `legs` ∈ {0, 1, 2} transfers of 16 KiB·mt per block on the DDR roof, headline 2: the t = 1 block +12.5 %·mt, 32k 805 → 912 µs | session 1 (T4r_bounce, T4r_t1_*) |
+| 4 | §3.4 | the guard's recompute path described; "gated on E35" | **REQUIRED: 9 / 8 192 lanes per tripped block wrong without it** (measured); §3.4 closed (a)–(f) | session 1 + review item 3 |
+| 5 | T3r_fixed, §2.2 fixed, §6.1′ lazy cells | lazy fixed cost 11 328 ns (2 vector blocks + drain) | **19 328**: + the first-block per-row max (5 200 ns) + the 16-token tail of append-then-attend (4 156); the round-3 lazy cells were 0.6 % optimistic at 32k, 4 % at 4k | review item 4 (T4r_fixed, T4r_firstmax) |
+| 6 | §0 route 1b, §3.3, §7, T3r_i8 | KV-int8 × lazy 413 µs DDR-bound | **unreachable as specified**: P at the fixed scale 127 assumes p ≤ 1, the lazy P reaches e⁸ (127 × 2 981 saturates i8); reachable only at μ = 0 (trip rate UNMEASURED); rowmax 651 µs vector-bound | review item 4 (T4r_i8) |
+| 7 | §6.3, T3r_crossover_lazyT | L_eq = 16 896 on the lazy chain at 174.6 | 16 384 from the fixed cost alone (T3r_crossover_iff: k ≥ 32 iff fixed ∈ [13 648, 25 658], 19 328 is inside), **14 848 with the bounce**; 14 336 / 11 776 at 169.2 / 138.3 | T4r_crossover |
+| 8 | §1.4, §10, T3r_fleet_moe_128k_cells | MoE-128k: a ±1 % tie, weights-bound at 256 KiB | with both bounce legs **attention-bound at every G ≤ 174.6** (the line is 189.4 > 174.6); the tie only at legs 0 | T4r_fleet_moe_128k_legs2 |
+| 9 | §4 L0A row, T_buffers_l0a, review item 9 | L0A = 16 KiB·mt, exactly full at mt = 4 (unprobed) | no −Q: **12 KiB·mt, 48 KiB at mt = 4**; the 64-row pass cap now comes from L0C (mt = 5 at 256-token blocks = 320 KiB) | T4r_l0a, T4r_l0c |
+| 10 | §4 US rows, T_buffers_us | 208 KiB + 64 B at mt = 1, over the evidence by 64 B; snapshots in S1 above | **122 / 184 / 190 / 196 KiB + 64 B** at mt = 1..4 (no NegSnap; 32-token tails and the mask reel added) — every mt fits | T4r_us |
+| 11 | §2.2 drain row, T3r_drain_cells | 40 960·mt B per block, hidden iff ≥ 3.41 GB/s/core | **65 536·mt B** (every fresh C_o set drains): hidden iff ≥ 5.5 / 11.0 / 16.4 / 21.9; 428 / 589 / 377 / 459 ns, 13–28× under the line | T4r_drain |
+| 12 | §3.1 merge, T3r_merge_item | 25 750 (pack) / 64 851 itemised with the snapshot difference | the fresh-set merge, itemised: 15 431 lazy / 70 462 rowmax (T), 30 300 / 88 372 (C); the pack figure no longer describes any chain; rowmax-C exceeds the legs-0 line (77 418) — the review's "flips vector-bound at the itemised merge" | T4r_merge, T4r_merge_threshold |
+| 13 | §1.1, §10.1, T0_matrix_tail, the tail term of every t = 1 cell | tail = L mod 16 ≤ 15 (0 at 512-multiples); 16-token tails | append-then-attend: **tail = (L − t) mod 16 + t ≤ 15 + t** (31 at t = 16); 32-token tails; the per-row causal mask; every 512-multiple carries a 16-token tail at t = 1 (+4.2 µs) | review item 6 (T4r_tail_bound, T4r_tail) |
+| 14 | §3.3 | "P ≤ 1 in f16 (no saturation)" was the only f16 remark | the f16 cast flushes p < 2⁻²⁴: a planted sink loses 3.1 % of its row mass at 1M; β = 3 shift offset removes it | review item 7 (T4r_sink) |
+| 15 | §2.4 S4, T3r_s4_dominated_lazyT | S4 loses for every merge on both chains | on the lazy chain only for merge ≥ 640 lane-eq (below it the DDR-bound two-pass cell would lose by ≤ 30 µs); every itemisation is far above (7 014 / 9 820) | T4r_s4_dominated_lazyT, T4r_s4_cells |
+| 16 | §1.2 / §1.3 bijections, §10 window | 64 KiB facts stated as the page | a 256 KiB page = four 64 KiB sub-pages; the window covers 524 288 tokens | review item 11 (T4r_page256_*) |
+| 17 | fleet.py memory model | no page-waste term | 16 × (P − 256 B) per (layer, sequence): instance-fit x +1–3 ‰, dense 1M KV-int8 margin 1.66 → 1.59 GB | review item 11 (T4r_waste, `[R4-waste-*]`) |
+
+Not corrections (survivals): T_gqa_matrix (unchanged); the page bijections (lifted to 256 KiB); T_online_exact (the merge is exact with
+fresh partials too — the identity needs only multiplicativity); S4 dominated on the rowmax chain for every merge; the E21 structure
+question — CONFIRMED as the i8 existence proof (HW-MAP), f16 does not inherit it (no accumulate chain is used on f16).
+
+### The round-4 ledger (every `[R4-*]` label and every round-4 claim of DESIGN-3.md)
+
+| # | Claim (round-4 text) | Proof | labels | Status |
+|---|---|---|---|---|
+| R4-1 | f16 (16,16,k) EXACT at k ∈ {16, 32, 64, 128}; d = 64: 48 / 80 / 144 calls per 512-token block (12.0 / 20.0 / 36.0 %), 96 / 160 / 288 per 256-token block at mt = 4 (48.0 / 79.9 / 143.9 %, the last MMA-bound); the i8 variant keeps 2 × k = 32 | T4r_kshape | [R4-kshape-*] | INPUT (session 1) + PROVED; issue cost at k ≠ 128: ASSUMPTION A4 |
+| R4-2 | every C chunk fresh; L0C 128 / 256 / 192 / 256 KiB (exactly full at mt = 2, 4); mt = 5 at 256-token blocks 320 KiB; 1 024-token block 256 KiB; mt = 1 double-buffered sets 160 KiB; the E21 structure (i8 existence proof) CONFIRMED | T4r_l0c | [R4-l0c-*] | INPUT (session 1, erratum #19) + PROVED |
+| R4-3 | L0A = 12 KiB·mt (no −Q), 48 KiB at mt = 4, mt = 5 fits L0A (60 KiB); the pass cap is L0C's | T4r_l0a (∀ mt) | [R4-l0c-*] | PROVED ∀ mt |
+| R4-4 | US 122 / 184 / 190 / 196 KiB + 64 B at mt = 1..4, all ≤ 208 KiB; S1 = P ring 8 KiB·mt; DDR scratch 2 × 16 KiB·mt | T4r_us | [R4-us-*] | PROVED |
+| R4-5 | drain 64 / 128 / 96 / 128 KiB per block; hidden iff R_drain ≥ 55 / 110 / 164 / 219 tenths (iff); 428 / 589 / 377 / 459 ns; margins 27.7 / 20.2 / 15.8 / 13.0× | T4r_drain (∀ R_drain, iff), T4r_drain_cells | [R4-drain-*] | PROVED ∀ R_drain |
+| R4-6 | the bounce: P 16 / 32 / 32 KiB per block at mt = 1 / 2 / 4; block 12 011 / 12 761 / 13 512 (mt = 1), 15 013 (mt = 2), 9 008 (mt = 4) at 174.6 with 0 / 1 / 2 legs (+12.5 / 25.0 / 50.0 %); 13 943 / 14 127 / 17 059 / 15 340 at 169.2 / 167.0 / 138.3 / 153.8 (legs 2); i8 7 746 | T4r_bounce | [R4-bounce-*] | PROVED arithmetic; the legs count: **UNMEASURED** (E24′) |
+| R4-7 | P lift density 1/16 (mt = 1), 1/4 (mt = 4) of the direct-load bytes = 2× / 8× the expert kernel's 1/32 | T4r_lift | [R4-lift-density] | PROVED; the fault class: EMPIRICAL — E24′ |
+| R4-8 | fresh-set merge 15 431 / 9 820 / 7 014 / 26 654 lane-eq (lazy-T at 512 / 256 / 128 / 1024), 70 462 / 64 851 / 62 045 / 81 685 (rowmax-T), 30 300 / 88 372 chained at 512; 357 / 227 / 1 631 / 617 ns | T4r_merge | [R4-merge-*] | PROVED (itemisation: D) |
+| R4-9 | the 16 chain cells 4 772 / 2 434 / 1 266 / 9 447 (lazy-T), 5 867 / 3 029 / 1 610 / 11 544 (lazy-C), 9 791 / 7 482 / 6 328 / 14 409 (rowmax-T), 12 265 / 8 784 / 7 044 / 19 226 (rowmax-C); mt = 4 at 256: 9 739 / 12 117 / 29 931 / 35 139; shares 35.3 / 39.7 … 102.1 %; per token 14.1 vs 19.1 ns at the 1 024-token block | T4r_chain, T4r_chain_shares | [R4-chain-*] | **OPEN** (softmax-reel anomaly, E36) — arithmetic PROVED |
+| R4-10 | first-block max 5 200 (T) / 6 508 (C) ns at 512, 4 501 / 5 138 at 256; fixed 19 328 / 26 831 / 24 166 / 33 119 at t = 1; 71 326 / 93 704 at mt = 4; the 16-token tail 4 156 / 8 161; the mask 16 ns | T4r_firstmax, T4r_fixed | [R4-firstmax-*] [R4-fixed-*] | PROVED |
+| R4-11 | the t = 1 cells: 4k 131 / 138 / 136 / 145 (169.2, legs 2) …; 32k 912 / 919 / 917 / 925, 813 … (legs 0), 1 111 (138.3), 884 (174.6), 923 (167.0), 862 (legs 1); 128k 3 589 …; 1M 28 575 …; wall, eff, × GEMV | T4r_t1_4k, T4r_t1_32k, T4r_t1_128k, T4r_t1_1M | [R4-t1-*] | PROVED (legs: UNMEASURED; G: INPUT; chain: OPEN) |
+| R4-12 | binding: KV on every chain at every measured G with the bounce (slack 1 678 ns for rowmax-C at 169.2, 9 171 for lazy-T); rowmax-C vector-bound at 174.6 without the bounce (12 265 > 12 011) | T4r_t1_binding | [R4-t1-binding-*] | PROVED |
+| R4-13 | the moves: lazy-T +13.3 % at 32k / +12.5 % at 1M (legs 2), +1.0 / +0.0 % (legs 0); t = 2 = t = 1 + 16 ns | T4r_moved | [R4-moved-*] | PROVED |
+| R4-14 | linear forms vec4(512, 1, ·) = (19 074 176 / 22 318 208 / 35 253 504 / 44 150 016 + m)·10/43 200; (256, 4) and (128, 8) forms | vec4_lazyT_512, vec4_lazyC_512, vec4_rowmaxT_512, vec4_rowmaxC_512, vec4_rowmaxT_256_4, vec4_rowmaxT_128_8, vec4_lazyT_256_4, vec4_lazyT_128_8 (∀ m) | [R4-chain-*] | PROVED ∀ merge |
+| R4-15 | t = 1 DDR-bound at 174.6 iff merge ≤ 393 019 (lazy-T) / 142 261 (rowmax-C) / 231 226 (rowmax-T) with the bounce, ≤ 328 176 / 77 418 without; the fresh-set rowmax-C merge (88 372) exceeds the legs-0 line | T4r_merge_threshold (∀ merge, iff), T4r_merge_cells | [R4-merge-threshold-*] | PROVED ∀ merge |
+| R4-16 | rows* = 64 (lazy-T, legs 2) / 48 (legs 0); 32 rowmax-T; rowmax-C at mt = 1 without the bounce | T4r_rows_star | [R4-rows*-*] | PROVED |
+| R4-17 | regime at 32k: 912 / 919 / 917 / 925 (t = 1, 2), 1 030 / 1 045 KV and 1 301 / 1 636 vector (t = 4), 1 301 / 1 629 / 3 908 / 4 601 (t = 8), 2 565 / 3 213 / 7 756 / 9 132 (t = 16); legs 0 at t = 4: 832 / 847; vector-bound cells bounce-independent; shares 61.6 / 104.8 / 322.0 % | T4r_regime | [R4-regime-*] | PROVED (chain: OPEN) |
+| R4-18 | t = 16: two passes 2 565 / 7 756 µs vs S4 2 680 / 13 096 at 32k (+4.5 / +68.8 %), 79.9 / 245.3 ms vs 83.1 / 414.9 at 1M | T4r_t16 | [R4-t16-*] | PROVED |
+| R4-19 | S4 loses to two passes for every merge on rowmax-T and for every merge ≥ 640 lane-eq on lazy-T (boundary 63 915 / 63 916 in ×100; the two-pass block is DDR-bound below 1 916 lane-eq) | T4r_s4_dominated_rowmaxT (∀ m), T4r_s4_dominated_lazyT (∀ m ≥ 63 916), T4r_s4_cells; helpers bm4_vec, bm4_ddr | [R4-s4-threshold-*] | PROVED ∀ merge (with the stated bound) |
+| R4-20 | KV-int8: rowmax 651 µs / 20.1 ms vector-bound (9 791 > 7 746); lazy 515 / 15.9 ms UNREACHABLE (127 × 2 981 saturates i8) | T4r_i8 | [R4-i8-t1-*] | PROVED; μ = 0 trip rate: UNMEASURED (E35) |
+| R4-21 | lazy economics: saves 5 019 ns per block; a trip 10 699; pays iff < 1 trip per 2.1 blocks; needle +685 µs at 32k / +21.9 ms at 1M; switch after 3 trips: +32 µs worst | T4r_lazy_trip | [R4-lazy-trip] | PROVED (trip rate: EMPIRICAL — E35; the guard's recompute: INPUT, session 1) |
+| R4-22 | tail = (L − t) mod 16 + t ≤ 15 + t for every L ≥ t; lMatrix4 + tail = L; 31 at t = 16; 32-token tails 8 KiB; vector tail 4 156 / 9 872 / 23 900 / 64 428 ns at t = 1 / 4 / 8 / 16; mask 129 ns at t = 16 | T4r_tail_bound (∀ L t), T4r_tail | [R4-tail-*] | PROVED ∀ L, t |
+| R4-23 | the planted sink: 122 / 976 / 3 906 / 31 249 ppm lost at 4k / 32k / 128k / 1M; e¹⁶ < 2²⁴ < e¹⁷ (host arithmetic); β ≤ 3 | T4r_sink | [R4-sink-*] | PROVED (the −16.6 nat line: INPUT, host arithmetic) |
+| R4-24 | online-chain rounding: chains O 2 052 / S 2 062 at 1M (512), 4 098 / 4 106 (256), 1 032 / 1 046 (1 024), 68 / 78 at 32k; 246 / 490 / 125 / 10 ppm deterministic first-order, all < 1 000; single-level 489 ppm (O) / 977 (S); the region-difference bounds 1 953 / 3 906 ppm exceeded the line; n rounded adds err ≤ n × the per-add bound | T4r_drift_online, T4r_sum_error (∀ e, b, n) | [R4-drift-*] | PROVED (the per-add 2⁻²⁴ bound: INPUT, IEEE round-to-nearest; the matrix unit's internal order: UNMEASURED — E26′) |
+| R4-25 | C_o nesting: 8 runs of 64 B at stride 1 024 from f·8192 + r·64; f16 32 B at stride 512 from f·4096 + r·32; m = 64 stride 4 096; injective on (f < 4, g < 8, r < 16, j < 16), < 32 KiB, 4-aligned | T4r_stride, T4r_stride_runs (∀), T4r_stride_injective (∀), T4r_stride_range (∀) | [R4-stride] | PROVED ∀; the f32 nesting itself: INPUT (session 1, E23(v)); m = 64: UNMEASURED |
+| R4-26 | 256 KiB page = four 64 KiB sub-pages: range, injectivity, explicit inverses for K and V; window 524 288 tokens; cells 74 122 / 262 142 | T4r_page256_range, T4r_page256_k_injective, T4r_page256_v_injective, T4r_page256_k_inverse, T4r_page256_v_inverse (∀ l, j), T4r_page256_cells | [R4-page256] | PROVED ∀ |
+| R4-27 | page waste 1 / 4 / 16 MiB per layer-sequence; 60 / 480 / 959 MiB per dense die at B = 1 / 8 / 16; 16 MiB per MoE die; 120 MiB per instance die > every margin (3.3 / 15.0 / 24.5 / 2.7 MB), 30 MiB at 64 KiB too; +3 ‰ of x; the dense 1M KV-int8 margin 1 593 887 744 B | T4r_waste | [R4-waste-*]; fleet.py [R4-waste-*] [R4-mem-*] [R4-inst-fit-*] [R4-ort-threshold-256k] | PROVED (margins: D4 inputs) |
+| R4-28 | closed forms of the t = 1 lazy-T step for every L and every 0 < G ≤ 174.6 with and without the bounce | T4r_form_lazyT2, T4r_form_lazyT0 (∀ L, G) | — | PROVED ∀ L, G |
+| R4-29 | L_eq: k ≥ 29 (14 848) / 32 (16 384) at 174.6 with / without the bounce, 28 / 31 at 169.2, 23 / 25 at 138.3 (iffs over k); over every L: 14 353, 15 889, 13 841 (monotone), and at 138.3 without the bounce L ≥ 12 817 ∨ (12 305 ≤ L ∧ a ≥ 15-token tail) | T4r_crossover (∀ k, iff), T4r_crossover_cells, T4r_crossover_anyL (∀ L, iff), T4r_crossover_anyL_cells | [R4-crossover-*] | PROVED ∀ k, L |
+| R4-30 | MoE-128k: attention-bound at every G ≤ 174.6 with the bounce (line 189.4); iff G ≤ 168.3 without; cells +11.9 / +13.3 / +36.7 / +8.4 % (legs 2), +5.7 % (legs 1 at 169.2), −0.5 / +0.8 / +21.6 / −3.5 % (legs 0); fleet.py: 1.155 vs 1.217 tok/s/card at 169.2 | T4r_fleet_moe_128k_legs2 (∀ G), T4r_fleet_moe_128k_legs0 (∀ G, iff), T4r_fleet_moe_128k_cells | [R4-fleet-moe-128k-*]; fleet.py [R4-moe-128k-*] [R4-G-param] [R4-step-*] [R4-attn-*] [R4-spec-*] [R4-dense-1M-kvi8] | PROVED ∀ G (layer time: D4; G, legs: INPUT / UNMEASURED) |
+
+**Coverage, round 4: 30 rows, 30 with a theorem (100 %); 29 PROVED (12 universally quantified over merge, R_drain, mt, L, G, k, t, the
+page coordinates, the error sequence), 1 row (R4-9) PROVED as arithmetic but OPEN as a design number; 0 orphans — every `T4r_*` theorem and
+helper is cited in R4-1–R4-30 or in the corrections table, every `[R4-*]` label family of attn.py and fleet.py is cited.** The status
+summary the round asked for: MEASURED (session 1) — the k-shapes, the f16 geometry and C nesting (E23 i / ii / v), erratum #19's fresh
+chunks, erratum #20's bounce as a route, the guard's recompute, the diagnostic loop's 138.3; UNMEASURED — the bounce's cost on the DDR
+roof (`legs`), the production loop's rate, the matrix unit's internal summation order, the m = 64 nesting, the issue cost at k ≠ 128
+(A4), the guard's fence read (A5), the trip rate at β = 3 and μ = 0; OPEN — every vector-chain cell (E36); DERIVED — everything else,
+each with its theorem. The empirical residue is the round-4 ladder of DESIGN-3 §8: E36 first, then E24′, E35, E27′, E26′, E25, E28.
+
 
 ## Round 3 (2026-11-05) — re-grounding on the season (v1) measurements (HW-MAP commit e9349c8)
 

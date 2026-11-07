@@ -1,5 +1,41 @@
 # DESIGN-3 — decode attention over the KV cache (gather → softmax → reduce), one die, 8 cores
 
+> **ROUND-4 STATUS (2026-11-07 — the pre-implementation review absorbed, re-grounded on kernel session 1; HW-MAP commit 423d433,
+> errata #18–#21; `proof/attn.py` `[R4-*]`, `proof/attn.lean` `T4r_*` (66 new theorems, 265 total, 0 axioms / sorry / native_decide),
+> `proof/fleet.py` `[R4-*]`, PROOF-COVERAGE-3.md round-4 section).** The review's verdict is carried as the frame: implementable as
+> written for d = 128 at t ≤ 2 on the lazy chain, and the five things that could make the first silicon numbers wrong or unexplainable
+> are now in the model with their status. **What session 1 settled (M):** the f16 (16,16,k) sweep is EXACT at every k ∈ {16, 32, 64, 128}
+> (the i8 k = 64 anomaly is i8-only — §1.2: d = 128 keeps one k = 128 call per 16 tokens, d = 64 may use one k = 64 call: 48 instead
+> of 80 calls per block, T4r_kshape); the f16 B fragment, the f16 A fragment and the f32 C-chunk nesting are measured (E23(i), (ii),
+> (v): the zero-copy P premise holds, 2.1M score elements exact at 32k); **f16 accumulation into one C chunk corrupts across any full
+> barrier or A re-lift (erratum #19) — this design now writes every C chunk FRESH: one matrix call per chunk per visit, C_o as one
+> fresh chunk set per 128-token group summed on the vector unit** (§3.1, §4: L0C 128 / 256 / 192 / 256 KiB at mt = 1..4, T4r_l0c).
+> The region difference, the ±Q alternation, the NegSnap buffers and the drift theorems' mechanism are RETIRED (its deterministic bounds,
+> 2·10⁻³ / 4·10⁻³ at 512 / 256-token blocks, exceeded the 10⁻³ ship line — 1M shipped only under the random-walk hypothesis); the
+> numerics that remain are the online chain's f32 sums, and with the two-level (block-local, then running) accumulation of §3.1 their
+> deterministic first-order bound is **246 ppm at 1M** (chains of 2 052 / 2 062 adds; 490 ppm at 256-token blocks) — under the line
+> without any hypothesis (T4r_drift_online, T4r_sum_error; the matrix unit's internal summation order stays UNMEASURED, E26′). **The P
+> fragments ride a DDR bounce (erratum #20: US → DDR scratch → DDR → S1 → loader)** — carried as `legs` ∈ {0, 1, 2} transfers of the
+> 16 KiB·mt of P per block on the K/V stream's roof, UNMEASURED, headline = 2 (the conservative reading): the t = 1 block grows
+> 12.5 %·mt (T4r_bounce). **The lazy guard's per-trip recompute is REQUIRED (M: 9/8192 lanes wrong per tripped block without it)** and
+> §3.4 is closed (a–f). **The headline moves (T4r_t1_*, `[R4-t1-*]`; lazy-T chain, 256 KiB pages 169.2, wall = + 91 µs): 32k
+> 805 → 912 µs (+13.3 %; 813 without the bounce), 1M 25.4 → 28.6 ms (+12.5 %; 25.4 without)**; on the session-1 kernel loop's
+> measured 138.3 GB/s (diagnostic-loop barrier density; the production loop is UNMEASURED) 1 111 µs / 35.0 ms. Every t = 1 cell is
+> DDR-bound on every chain at every measured G with the bounce; without it the rowmax chain at chained latencies is vector-bound at
+> 174.6 (12 265 > 12 011 ns: the review's flag, T4r_t1_binding). t ≥ 4 on the lazy chain: 1 030 µs at t = 4 (DDR-bound), 1 301 at
+> t = 8, 2 565 at t = 16 (vector-bound; round 3: 3 162); S4 stays dominated (T4r_s4_dominated_*). **Fixed cost 19.3 µs on the lazy chain**
+> (the first-block max the review found missing: round 3 said 11.3; cells were 0.6 % optimistic at 32k, 4 % at 4k — T4r_fixed), so
+> L_eq moves: 14 848 at 174.6 with the bounce (16 384 without; round 3: 16 896), 14 336 / 15 872 on the design page (T4r_crossover).
+> **The planner (DESIGN-4, fleet.py): with both bounce legs the MoE-128k cell is ATTENTION-bound at every G ≤ 174.6 (by 11.9 % at
+> 169.2, 36.7 % at 138.3; T4r_fleet_moe_128k_legs2); without them it is the round-3 tie (iff G ≤ 168.3) — the planner must read the
+> realised G and the realised bounce.** fleet.py now carries the page-waste term (4 MiB per layer-sequence at 256 KiB: 60 MiB per
+> 15-layer dense die, 480 MiB at B = 8, 120 MiB per 30-layer instance die — above every 2–30 MB instance-fit margin, +1–3 ‰ of int4
+> share; the dense 1M KV-int8 layout keeps 1.5 GB — T4r_waste, `[R4-waste-*]` `[R4-inst-fit-*]`), P_bytes as a parameter and the
+> 256 KiB page as four 64 KiB sub-pages (T4r_page256_*). **OPEN (session 2 owns it): 75–91 % of P lanes read back as raw scores from the
+> softmax reel — deterministic, every isolated piece passes; every vector-chain cell is marked OPEN in the ledger and is NOT modelled
+> around.** The KV-int8 × lazy cell is UNREACHABLE as specified (P at the fixed scale 127 vs the lazy e⁸; reachable only at μ = 0,
+> trip rate UNMEASURED — T4r_i8). The round-3 banner and body are kept; the round-4 section of the ledger marks what they no longer describe.
+
 > **ROUND-3 STATUS (re-grounding on the season (v1) measurements — HW-MAP commit e9349c8; `proof/attn.py` `[R3-*]`,
 > `proof/attn.lean` `T3r_*`, PROOF-COVERAGE-3.md round-3 section).** Every quantity this design carried as a branch is now
 > measured: the gather rate per page size (E21: 153.8 / 167.0 / 169.2 GB/s shuffled at 16 / 64 / 256 KiB; c_pg = 39 ns at
@@ -100,6 +136,11 @@ KV bytes per layer: 16.8 MB / 134.2 MB / 536.9 MB / **4.295 GB** (`[A0-kv-*]`).
 | σ_s | scalar iteration cost **19.9 ns per compare** (5.1 µs per 256-read tail — 10× the round-2 budget, 42 % of a block, below the 47 ns bind line); the tree's scalar tail is replaced by reduce-max calls (§3.2) | **M** (round 3) — E22 |
 | merge | online-softmax merge per block-fragment: **25 750 lane-equivalents** in the validation pack's itemisation (596 ns); this design's own itemisation of §3.1 at the measured per-call costs is 64 851 (1 501 ns; the α reel's 20 small calls dominate); round 2 assumed 7 000 — carried as a hypothesis variable, every round-3 verdict is insensitive to it (T3r_merge_*, T3r_s4_dominated_*) | **M / D** (round 3) |
 | c_call | per-call latency of a chained vector op on 1 024 lanes: f16 Mul 46.4 ns, f32 Mul / Add 63.5 / 63.7, exp 272.8, reduce-max 181.9 / 251.4, And<int16> 45.9 — latency-bound upper bounds; the **chained** convention (every call at its latency: f16 1.96, f32 2.69 lane-equivalents per lane) is the round-3 worst corner, the **throughput** convention (40 lanes/cycle, f32 × 1.37) the headline; small 16-lane calls (Duplicate, copies) are costed at one chained f16 call each (A, E22) | **M** (round 3) — E22 |
+| G_K1 (round 4) | the attention kernel's OWN fresh-path gather, session 1: **138.3 / 138.7 / 138.0 GB/s** aggregate at 256 / 128 / 64 KiB — page-size-insensitive, c_pg ≈ 0; 18 % under the E21 basis from the diagnostic loop's barrier density; the production loop halves the barriers per byte and its rate is UNMEASURED (between 138 and 169) | **M** (session 1, diagnostic loop) |
+| legs (round 4) | the P bounce (erratum #20: an A operand built in vector SRAM rides US → DDR scratch → DDR → S1 → loader): `legs` ∈ {0, 1, 2} transfers of the 16 KiB·mt of P per block charged on the K/V stream's DDR roof — headline 2 (+12.5 %·mt on the t = 1 block), 0 = a proven direct US → S1 route | **UNMEASURED** — E24′ |
+| k-shapes (round 4) | f16 (16,16,k) EXACT at every k ∈ {16, 32, 64, 128} (session 1); the i8 k = 64 anomaly is i8-only; issue cost measured at k = 128 only (A4: 15 ns at every k) | **M** (session 1) |
+| fresh chunks (round 4) | f16 accumulation into one C chunk corrupts across any full barrier or A re-lift (erratum #19): every C chunk written by exactly one matrix call per visit; C_o = one fresh chunk set per 128-token group, summed on the vector unit; Z, ±Q, NegSnap retired | **M** (session 1) |
+| merge (round 4) | the fresh-set merge, itemised: lazy **15 431** lane-eq (357 ns) / rowmax 70 462 (1 631 ns) per 512-token block-fragment at T; 30 300 / 88 372 chained; the pack's 25 750 is retired | **D** (round 4) — T4r_merge |
 
 ---
 
@@ -197,7 +238,7 @@ Pages are never zero-initialised and never reallocated: append-only growth (DESI
 
 ### 1.2 K page: tokens are the n-columns of the scores GEMM
 The scores call is `MMA(C_s, A = Q_frag[16 rows × 128 d], B = K_tile[128 d (k) × 16 tokens (n)], m=16, n=16,
-k=128)`: one call per 16 tokens at d = 128. At d = 64 a single (16,16,64) call is the **illegal k = 64 shape**
+k=128)`: one call per 16 tokens at d = 128. At d = 64 (round 2/3 text — superseded in round 4 below: the f16 sweep licenses one k = 64 call) a single (16,16,64) call was taken to be the **illegal k = 64 shape**
 (nondeterministically wrong, HW-MAP), so the call is (16,16,32) twice, accumulating: 2 calls per 16 tokens. B operand geometry,
 hypothesis **H-F16**: the f16 fragment is **[16 n × 16 k], column-major, element (k, n) at byte n·32 + k·2** —
 the f16 analogue of the settled i8 fragment [16 n × 32 k] at n·32 + k (a column is one 32 B run either way),
@@ -216,6 +257,26 @@ Append of token l = 8 runs of 32 B at stride 512 B inside call tile (l' div 16):
 (ISA-legal, ≤ 64 KB each; c_copy per call is U, budget ≤ 1 µs → ≤ 8 µs per layer-step on the writer core;
 one 2D COPY if E25 proves the US→DDR 2D position pair). The i8 variant (route 1b) uses the settled
 [16 n × 32 k] fragment: 4 runs of 32 B per token, 32 KiB pages of 256 tokens.
+
+**Round 4 — the k-shape verdict (session 1, M; `[R4-kshape-*]`, T4r_kshape).** The round-2/3 sentence above ("k = 64 is the illegal
+shape, so d = 64 uses two (16,16,32) calls, accumulating") was an i8 fact carried onto the f16 tuple: the f16 fragment is 16 dims deep,
+so f16 k = 32 is the two-fragment shape and f16 k = 64 the four-fragment shape, and f16 k = 128 had no i8 analogue at all. **The f16
+(16,16,k) sweep ran: EXACT at every k ∈ {16, 32, 64, 128}** (128 reps per shape, one-hot k-probes at every k position, all 8 cores) —
+the i8 k = 64 anomaly is i8-only, neither fragment- nor element-count-based. Consequences: the d = 128 mainline's one k = 128 call per
+16 tokens is licensed as written; a d = 64 variant uses **one k = 64 call** per 16 tokens — and with erratum #19 (§3.1) it must, since
+two accumulating f16 calls into one chunk would corrupt; the i8 variant (route 1b) at d = 64 keeps 2 × k = 32 (k = 64 is wrong on i8,
+and i8 accumulation across the two calls is the E21-proven safe class). Cost table at d = 64 (calls per 512-token block at mt = 1 /
+MMA share; per 256-token block at mt = 4, 4 fragments):
+
+| d = 64 scores shape | calls per block, mt = 1 | MMA share of the 6 005 ns block | calls per 256-token block, mt = 4 | share of 3 002 ns |
+|---|---|---|---|---|
+| **one k = 64 call (licensed)** | **48** (32 + 16 PV) | **12.0 %** | 96 | 48.0 % |
+| 2 × k = 32 (the i8 variant's shape) | 80 | 20.0 % | 160 | 79.9 % |
+| 4 × k = 16 | 144 | 36.0 % | 288 | 143.9 % — MMA-bound |
+
+The issue cost (15 ns per call) was measured at k = 128 only; the k = 64 and k = 16 calls are costed at the same 15 ns (ASSUMPTION A4,
+UNMEASURED — a k-dependent issue cost would move only the d = 64 rows).
+
 
 ### 1.3 V page: tokens are the k-rows of the PV GEMM
 The PV call is `MMA(C_o[16 rows × 16 d], A = P_frag[16 rows × 128 tokens], B = V_tile[128 tokens (k) × 16 d (n)],
@@ -343,6 +404,26 @@ reported separately as wall). The in-kernel ceiling of the design is the KV stre
 1M = 166.9 GB/s on the design's page (169.1 at 256 KiB), at 32k 163.2 (the fixed 19 µs), at 4k 140.7 (`[R3-t1-*]`; round 2:
 174.6 / 173.0 / 162.6 at the 174.6 basis with a 7 µs fixed cost).
 
+**Round 4 — what the engine table becomes with fresh chunk sets and the P bounce** (`[R4-bounce-*]` `[R4-drain-*]` `[R4-lift-density]`,
+T4r_bounce, T4r_drain, T4r_lift; per 512-token block, mt fragments, per core):
+
+| Engine | Round-4 work per block | Time | Status |
+|---|---|---|---|
+| **direct-load (copy-in)** | 4 K + 4 V tiles of 32 KiB as before, **plus the DDR → S1 staging leg of the P bounce** (erratum #20: the P fragments cast in US cannot be copied US → S1; they go US → DDR scratch → DDR → S1 → loader): 16 KiB·mt per block | K/V 256 KiB per core at G, + `legs` × 16 KiB·mt on the same DDR roof: **13 512·mt-independent K/V + 1 501·mt ns at 174.6** per leg — 12 011 / 12 761 / **13 512** ns at legs 0 / 1 / 2 (mt = 1); 13 943 (169.2) / 14 127 (167.0) / **17 059 (138.3, the session-1 loop)** at legs 2 | **UNMEASURED** (the bounce's cost on the shared roof; legs = 2 is the headline, the conservative reading; a proven direct US → S1 route is legs 0 = the round-3 cell) |
+| **copy-out (US → DDR)** | the write leg of the P bounce: 16 KiB·mt per block in 4 KiB pieces | counted in `legs` above; rate UNMEASURED | UNMEASURED |
+| **loader** | L0LOAD P: 4 × 4 KiB·mt S1 → L0A, between direct-load barriers — **the S1-resident exposure the review named**: 16 KiB per 256 KiB of direct loads at mt = 1 (1/16), 32 KiB per 128 KiB at mt = 4 (1/4) = **2× / 8×** the expert kernel's 2 KiB per 64 KiB lift density | 618·mt ns (serial) | E24 at the real P cadence (mt = 1 and 4) |
+| **matrix** | unchanged at d = 128: 32·mt scores + 32·mt PV calls, every C chunk written by exactly one call (no accumulate); d = 64: 48 calls per block (§1.2) | 960·mt ns | M (k-shapes), erratum #18: every C destination addressed by explicit byte-offset tensor construction, never by view slicing |
+| **L0C drain** | C_s 32 KiB·mt + **every fresh C_o set of the block: 4 × 8 KiB·mt = 32 KiB·mt** (round 3: one 8 KiB·mt C_o region) = **64 KiB·mt** (32 KiB·mt at 256-token blocks) | hidden iff R_drain ≥ **5.5 / 11.0 / 16.4 / 21.9 GB/s/core** at mt = 1..4 (iff, T4r_drain; round 3: 3.41 … 16.37); measured 152.8 … 285.5: **428 / 589 / 377 / 459 ns** per block, 27.7× … 13.0× under the line | M (rates) / PROVED (threshold) |
+| **vector** | the round-4 chain (§3.2): no Z difference, the fresh-set merge, the lazy guard | lazy-T **4 772·mt ns** (35.3 % of the legs-2 block at 174.6, 39.7 % at legs 0), lazy-C 5 867, rowmax-T 9 791 (72.5 / 81.5 %), rowmax-C 12 265 (90.8 / **102.1 %** — vector-bound at legs 0) | **OPEN** (the softmax-reel anomaly) |
+| **scalar** | 4 page-table lookups, barrier issue, the lazy guard's 8 reduce results read through the queue fence (erratum #15), the per-trip branch | < 1 µs; a trip ≈ 10.7 µs (§3.4) | — |
+
+Per step, fixed (`[R4-fixed-*]`, T4r_fixed): **19 328 ns on the lazy chain at t = 1** = 2 vector blocks (9 544) + the 428 ns drain + the
+16-token vector tail (4 156 — under append-then-attend the step's own token is always in the tail, so every 512-multiple carries a full
+16-token tail, §10.1) + **the first-block per-row max (5 200 ns: cast, tree, 16 reduce calls, reel — the item the review found missing
+from T3r_fixed)**; 26 831 chained, 24 166 / 33 119 on the rowmax chain. Round 3's 11 328 made the lazy cells 0.6 % optimistic at 32k and
+4 % at 4k.
+
+
 ### 2.3 When the matrix unit wins, and the DESIGN.md shapes it reuses
 T_gqa_matrix (`[A3-vecroute-*]`): vector-dot route (K and V laid out dim-major so lanes index tokens: per dim
 one Muls by the query scalar and one Add into the 1024-lane score accumulator; PV mirrored) needs 4·rows·d
@@ -374,6 +455,16 @@ gated on E24 (an L0A filled to exactly
 64 KiB — the L0C "exactly full" erratum was cleared, L0A is unprobed) and loses the ±Q drift bound (it uses the
 i8 variant's exact i32 difference or E11's reset).
 
+**Round 4 — the pass cap and S4 with fresh chunk sets.** Without −Q (the ±Q alternation is retired, §3.1) L0A holds Q 4 KiB·mt + a
+double-buffered P set 8 KiB·mt = **12 KiB·mt: 48 KiB at mt = 4, no longer exactly full** (T4r_l0a; the "L0A exactly-full at mt = 4 is
+unprobed" item is moot), and mt = 5 (60 KiB) would fit L0A — the 64-row pass cap now comes from **L0C**: at 256-token blocks mt = 5 needs
+3 × 80 + 2 × 40 = 320 KiB (T4r_l0c), and the only block that fits mt = 5 is S4's 128-token block. S4 itself stays dominated on the
+round-4 chain: at the fresh-set merges 2 680 vs 2 565 µs at 32k on lazy-T (+4.5 %), 13 096 vs 7 756 on rowmax-T (+68.8 %), for every
+merge count on rowmax and for every merge ≥ 640 lane-eq on lazy (the fresh-set merge at its block is 7 014; below 640 the DDR-bound
+two-pass cell would lose by ≤ 30 µs — a regime no itemisation reaches): T4r_t16, T4r_s4_dominated_rowmaxT, T4r_s4_dominated_lazyT,
+T4r_s4_cells. Keep two passes.
+
+
 ---
 
 ## 3. Softmax strategy
@@ -394,6 +485,34 @@ Exact: Σ_l p_l v_l with a common shift per row telescopes over blocks (T_online
 +6 204 ns of DDR per block (128 KiB of K per core at the measured 169.0) against a 596 ns merge (pack) / 1 501 (itemised) — online
 wins **10.4× / 4.1×** at every L and t (round 2 said 18× at 7 000 lane-ops); the L-regime boundary PROBLEM-3 asks for does not exist for this design (both costs are per
 block, L cancels — T_online_L_independent).
+
+**Round 4 — fresh chunk sets replace the region difference (erratum #19, M; `[R4-l0c-*]` `[R4-merge-*]`, T4r_l0c, T4r_merge).**
+Session 1 measured that **f16 accumulation into one C chunk corrupts across ANY full pipe barrier or A-operand re-lift** — broken at
+≥ 2 accumulations even with interleave ≥ 16, while the i8 tuple tolerates the same pattern (the E21 probe accumulated per n-chunk across
+all tiles: a spacing-8, depth-8192 same-destination i8 chain, exact 20/20 — the review's open question about E21's structure is
+**CONFIRMED as the i8 existence proof; f16 does not inherit it**). The review's spacing fixes (item 2: alternate the two k-halves, interleave
+scores and PV calls per tile pair) are therefore MOOT on f16: there are no accumulate chains at all. **Every C chunk is written by exactly
+one matrix call per visit.** The scores already were (one (16,16,128) call per 16-token chunk at d = 128; at d = 64 the single k = 64
+call of §1.2); the PV partials become **one fresh chunk set per 128-token group** — the 8 calls of a group write its 8 chunks ([16 rows]
+[16 dims] f32 each, 8 KiB per fragment) and nothing accumulates across groups: 4 sets per 512-token block (2 at 256, 8 at 1 024). The
+accumulator budget fits: L0C = 3 C_s regions + the block's fresh C_o sets = **128 / 256 / 192 / 256 KiB at mt = 1 / 2 / 3 / 4** (round 3:
+112 / 224 / 192 / 256; exactly full at mt = 2 and 4, so the C_o sets are single-buffered there — the drain of block b's sets must retire
+before block b + 1's first PV call, edge A10′ of §5; at mt = 1 double-buffering them costs 160 KiB). The partials are summed on the vector
+unit: **O_b = Σ_g partial_g (block-local), then O ← O + O_b** — two-level on purpose, so that the longest sequential f32 chain feeding O is
+O(L/block), not O(L/128) (§3.3). With fresh sets there is no region content: **no NegSnap, no ±Q, no snapshot copy, no drift of the
+accumulator** — the Z branch, E11's reset question and the 96 KiB of US it cost are retired; the drained scores are the scores (the
+2-op difference leaves the chain).
+
+The merge is re-costed (a new ledger row): per block-fragment, lazy = O_b over the 4 partials (4 × 2 048 f32 lanes, the first a copy
+costed as an op) + O += O_b (2 048) + the S fold (512 + 256) and running add (256) = 11 264 f32 lane-ops = **15 431 lane-eq = 357 ns** at
+the throughput convention (round 3's itemised lazy merge was 9 820 with the snapshot difference; the pack's 25 750 no longer applies
+to any chain); rowmax adds α = exp (1 call), the α reel (20 small calls), the O scale (2 048) and the S scale (256): **70 462 lane-eq =
+1 631 ns**; chained 30 300 / 88 372. At 256-token blocks (2 partials) the lazy merge is 9 820 — the same count as round 3's itemisation.
+The merge stays a hypothesis variable in the iff theorems (T4r_merge_threshold): t = 1 is DDR-bound at 174.6 with the bounce iff
+merge ≤ 393 019 (lazy-T) / 142 261 (rowmax-C) lane-eq, without it iff ≤ 328 176 / 77 418 — the fresh-set rowmax-C merge (88 372) exceeds
+the legs-0 line, which is the review's "flips vector-bound at the itemised merge" (it said 77 354 vs 56 932 at 167.0 on the round-3
+chain). What the fresh sets cost on the drain: 32 KiB·mt of C_o per block instead of 8 (§2.2, hidden with 13–28× margin).
+
 
 ### 3.2 The per-block vector chain (every op is in ISA.md's list; nothing else is assumed)
 Drained C_s block = [32 token-groups][16 rows][16 tokens] f32 = 8 reels of 1 024 lanes (mt = 1).
@@ -463,12 +582,65 @@ pass every line; the chained chain passes its own line by 175 ns. At 256-token b
 per fragment against 6 005 ns of DDR (113.9 %): the reduce calls and the reel do not shrink with the block, which is what makes
 t ≥ 4 vector-bound (§7) and S4 dead (§2.4).
 
+**Round 4 — the chain without the Z difference, with the fresh-set merge** (`[R4-chain-*]`, T4r_chain, T4r_chain_shares; per 512-token
+block-fragment; "T" throughput / "C" chained; **status OPEN**: session 1 found 75–91 % of the P lanes reading back as raw scores from the
+softmax reel — deterministic, every isolated piece passes; session 2 owns it. The cells below are the chain as specified; they are not
+modelled around the anomaly and must not be read as measured):
+
+| item | lazy-T | lazy-C | rowmax-T | rowmax-C | note |
+|---|---|---|---|---|---|
+| elementwise per score | shift, exp, cast P, sum (3 f32-class + exp) | | cast S, shift, exp, cast P, sum (4 + exp) | | step 1 (difference 2) is gone: fresh chunks |
+| f16 tree + 16 per-row reduce calls + 20-call reel | — | — | 1 102 + 2 910 + 928 ns | 2 161 + 2 910 + 928 | rowmax only |
+| guard (one reduce-max per P reel) | 8 calls, 1 455 ns | 1 455 | — | — | lazy only; REQUIRED (M) |
+| fresh-set merge (4 partials) | 357 ns | 701 | 1 631 | 2 046 | T4r_merge |
+| **chain per fragment** | **4 772 ns** | 5 867 | 9 791 | 12 265 | round 3: 5 530 / 6 782 / 9 276 / 11 836 |
+| share of the block at 174.6, legs 2 / legs 0 | **35.3 / 39.7 %** | 43.4 / 48.8 | 72.5 / 81.5 | 90.8 / **102.1 %** | the rowmax-C flag |
+| at 256-token blocks (mt ≥ 3) | 2 434 (29.5 / 40.5 %) | 3 029 | 7 482 (90.6 / **124.6 %**) | 8 784 | per fragment |
+| at 1 024-token blocks (mt = 1 variant, §4) | 9 447 (9.2 ns per token) | 11 544 | 14 409 (**14.1** ns per token vs 19.1) | 19 226 | T4r_chain_shares |
+
+Reading it: the lazy chain has 9.2 µs of slack per block on the design page with the bounce (13 943 − 4 772; 7 622 without) and the
+rowmax chain at chained latencies has 1.7 µs with the bounce and **−254 ns at 174.6 without it** — the one t = 1 cell that is
+vector-bound (T4r_t1_binding). rows* (the fragment count at which the vector unit reaches the block, T4r_rows_star): lazy-T mt = 4
+(64 rows, t ≥ 8) with the bounce, mt = 3 (48, t ≥ 6) without; rowmax-T mt = 2 (32, t ≥ 4) either way; rowmax-C mt = 1 without the bounce.
+The lazy chain's per-step extra — the first-block max — is in the fixed cost (§2.2), not here.
+
+
 ### 3.3 Numerics
 Scores are f32 (exact products of f16 inputs, f32 sums over d ≤ 128); the shift makes every exp argument ≤ 0 so
 no overflow is possible; P ≤ 1 in f16 (no saturation); O and S accumulate in f32 over ≤ 2²⁰ terms (relative
 2⁻²⁴·√L class); out = O/S in f32 then one cast to f16 (E9's rounding-mode check applies). The i8 variant adds
 per-token K scales (a reel per block, +1 Mul per score) and quantises P to i8 with the fixed scale 127 (p ≤ 1,
 no max needed) — its accuracy is the open item of E27, not its rate.
+
+
+**Round 4 — numerics re-aimed (review items 5 and 7; `[R4-drift-*]` `[R4-sink-*]`, T4r_drift_online, T4r_sum_error, T4r_sink).**
+(i) *The drift theorems' mechanism is retired.* T_drift_1M (683 visits per region, 512-token blocks) and T_drift_blocks (1 366 visits at
+256-token blocks) stand as theorems of the round-2 region-difference model, and the review's point is stated explicitly: their
+**deterministic bounds — f32 ulp 2⁻⁹ ≈ 1 953 ppm and 2⁻⁸ ≈ 3 906 ppm on a score — exceeded the 10⁻³ ship criterion at both block sizes;
+1M shipped only under the random-walk hypothesis** (832 → 61 ppm) that E26 was to measure, and the C_o region's difference (1 024 visits
+per region at 1M) never had a theorem at all. With fresh chunk sets (erratum #19) none of this exists: no region content, no visits, no
+±Q — the mechanism cannot be built on this tuple. smax = 32 (|s| ≤ 32, the qk-norm premise) remains the premise of the lazy guard
+(§3.4: without qk-norm the scores reach ~1 667 and the variant is dead, HW-MAP), not of any drift bound. (ii) *What remains is the
+online chain's f32 rounding*, and it is now bounded deterministically. The partials are exact products of f16 pairs (22 significant
+bits) summed over 128 tokens inside the matrix unit (internal order: UNMEASURED, E26′ = the former K5); the vector unit then runs the
+longest sequential f32 chains O: 3 (block-local sum of 4 partials) + 1 running add per block = **2 052 adds at 1M**, S: 8 reels into
+the block accumulator + 2 (fold 1 024 → 256) + 1 per block + 4 (final 16 → 1) = **2 062**. With IEEE round-to-nearest each add errs by
+≤ 2⁻²⁴ of the partial sum, so n adds err by ≤ n · 2⁻²⁴ of the sum of magnitudes (first order; T4r_sum_error is the telescoping half,
+the per-add bound is the INPUT): **123 + 123 = 246 ppm at 1M, 10 ppm at 32k, under the 1 000 ppm line without a hypothesis**
+(T4r_drift_online); 490 ppm at 256-token blocks (4 098 / 4 106 adds), 125 ppm at 1 024-token blocks; a single-level O chain of L/128 =
+8 192 adds would be 489 ppm and S summed straight into one accumulator (16 383 adds) 977 ppm — the two-level order of §3.1 is what buys
+the margin, at no extra op. For O the bound is relative to Σ p|v| (cancellation across signed v makes it looser relative to |O|); the
+random-walk figure is √2 052 · 2⁻²⁴ ≈ 2.7 ppb. E26′ measures the realised error against f64 on the online chain (not the region content).
+(iii) *The planted sink (item 7).* The f16 cast flushes p below 2⁻²⁴ ≈ 6·10⁻⁸ (the smallest f16 subnormal), i.e. tokens with
+s − m < −16.6 nats (e¹⁶ < 2²⁴ < e¹⁷, host arithmetic) — one-sided: mass is only lost. A row with one sink at p = 1 and L − 1 tokens just
+under the line (p = 2⁻²⁵) loses **122 / 976 / 3 906 / 31 249 ppm at 4k / 32k / 128k / 1M** of its mass (T4r_sink) — several % at 1M on
+either chain; random inputs never produce it, so E27 gets a planted-sink case. Two spec choices follow. The S sum (step 6 of §3.2) adds the
+f32 p while PV multiplies the flushed f16 p: out = O/S then carries the lost mass in the denominator; summing the cast-back f16 p instead
+(+1 f32-class op per score, +260 ns·mt per block) makes out the softmax over the surviving tokens — both are ≈ 3 % off on the sink row,
+so consistency is a choice, not a fix. The fix is the shift offset: on the lazy chain the shift m_r − β with β ≤ 3 puts the row's largest
+p at e^β (guard at e^(8+β) ≤ 59 874 < 65 504 only for β ≤ 3) and moves the flush line to −16.6 − β nats: at β = 3 the same tokens sit e³ ≈ 20×
+above the line and nothing is lost. β = 3 is the round-4 default (cost 0; E27's planted sink verifies it on both chains).
+
 
 ### 3.4 Round-3 variant "lazy": a fixed per-row shift with an overflow guard (the one change the measurements force)
 The measured chain is 77 % of a block at t = 1 and 4.6× a 256-token block at mt = 4 because the per-row block max costs 16
@@ -487,6 +659,40 @@ are unchanged (§4). Gate: **E35** — the exception rate with real q / K per (m
 stay under the 3.7 µs per block it saves, i.e. fewer than one exception per ~3 blocks; a needle-token profile that trips it every
 block falls back to §3.2 as specified. Everything else in this document is written for the chain as specified; the cells of this
 variant are the third number of each round-3 triple.
+
+
+**Round 4 — the lazy spec closed (review item 3 a–f, session 1; `[R4-lazy-trip]` `[R4-i8-t1-*]` `[R4-firstmax-*]`, T4r_lazy_trip,
+T4r_i8, T4r_firstmax).** The lazy chain is the round-4 headline (it is what session 1 implemented; the rowmax chain is the fallback).
+**(M) The guard's per-trip recompute is REQUIRED, not advisory: without it exactly the predicted 9 / 8 192 lanes per tripped block come
+out wrong** (HW-MAP, session 1). The closure:
+- **(a) m_r.** The per-row max of **this step's first block** (512 tokens at mt ≤ 2, 256 at mt ≥ 3 — the calibration window shrinks with
+  the block), computed once per step with the full machinery (cast S → f16, the f16 tree, 16 reduce-max calls, the reel: **5 200 ns at
+  the throughput convention, 6 508 chained; 4 501 / 5 138 at 256-token blocks** — in the fixed cost, T4r_fixed). The measured trip rate
+  (0.087–0.22 % of steps, HW-MAP) transfers only to this definition; a prefill-calibrated m_r is a different variant with an unmeasured
+  rate. The shift is m_r − β, β = 3 (§3.3 (iii)).
+- **(b) The guard's result path.** The 8 reduce-max results per fragment (one per P reel; value in lane 0, index-class in lane 1) cross to
+  the scalar unit **through the queue fence** (erratum #15: a raw read issued right after async vector math ships pre-fold values) —
+  one fence per block, cost UNMEASURED (A5, under 1 µs by the σ_s class; E35 times it).
+- **(c) Gate the merge, not the PV calls.** The PV calls of a block issue unconditionally on the (possibly overflowing) P; the guard
+  decides only whether the block's fresh partial sets are merged. On a trip the block's partial is **discarded** (fresh sets make this a
+  no-op: nothing to absorb or snapshot), the block is recomputed on the §3.2 machinery (per-row max, α = exp(m_r − m_r^new) on 16 lanes,
+  O ← α·O, S ← α·S, P recomputed, PV re-issued, partials re-drained and merged) and m_r is raised; the common path has no scalar stall.
+  Cost of a trip ≈ **10 699 ns** (the rowmax chain 9 791 + 480 ns of re-issued PV calls + a 428 ns re-drain).
+- **(d) Granularity.** Block (≈ 10.7 µs); the reel's argmax lane identifies the tripped row, which decides which m_r rises — a per-row
+  recompute would not be cheaper on the vector unit (every op is per reel), so block granularity it is.
+- **(e) Switch policy.** The lazy chain saves **5 019 ns per 512-token block** (9 791 − 4 772), so the variant pays iff fewer than one trip
+  per **2.1 blocks** (round 3 said 3 at its chain); a needle profile that trips every block costs **+685 µs at 32k (64 blocks), +21.9 ms at
+  1M**. After **k = 3 trips in one step** the kernel finishes the step on the rowmax chain: the worst case is +32 µs plus the rowmax cells
+  (917 µs at 32k instead of 912), never the needle cost. E35 measures the trip rate per (model, L) and the trip cost.
+- **(f) Padding rows.** The 16·mt − rows padding rows of the staged Q are exactly zero (there is no −Q copy any more): their scores are 0,
+  their first-block max is 0, their P is e^{0 − 0 + β} = e³ ≤ e^{8+β} — they never trip the guard and their rows are discarded at the end.
+
+**KV-int8 × lazy (review item 4).** The round-3 cell (413 µs, DDR-bound) quantised P to i8 at the fixed scale 127 assuming p ≤ 1, but the
+lazy P reaches e⁸ ≈ 2 981 (127 × 2 981 saturates i8): **the cell is UNREACHABLE as specified** (T4r_i8). It is reachable only with μ = 0
+(P ≤ 1, scale 127 fixed, every P > 1 trips) at a trip rate that is UNMEASURED (E35 at μ = 0 — expected far above 0.22 %); otherwise KV-int8
+needs the per-block max and lives on the rowmax chain: **651 µs at 32k (vector-bound: 9 791 > the 7 746 ns half-stream block), 20.1 ms at
+1M** on the design page with the bounce (T4r_i8). The KV-int8 lever therefore loses its DDR-bound cell until E35 at μ = 0 says otherwise.
+
 
 ---
 
@@ -518,6 +724,36 @@ Double-buffering depth is one block (12 µs) on every engine edge except the dir
 softmax of block b runs while DDR streams K_{b+1} and V_{b−1}, so a vector block up to 2× the DDR block
 (24 µs) is absorbed before any stall — the worst corner (12 839 ns) stalls DDR by 828 ns per block, the 6.9 %
 in §0, and the K-only rows of the table show why a one-block lag would stall at 6 µs instead.
+
+
+**Round 4 — the buffers with fresh chunk sets, the P bounce and 32-token tails** (`[R4-l0c-*]` `[R4-us-*]`, T4r_l0c, T4r_l0a, T4r_us;
+every size a function of (mt, d, block) only — T_buffers_no_OL still holds, the rows are re-summed):
+
+| Buffer | Memory | Size (mt = 1 / 2 / 3 / 4) | Round-4 change |
+|---|---|---|---|
+| K/V tile ring | L0B | 64 KiB | unchanged |
+| Q fragments | L0A | 4 KiB·mt | **no −Q** (the ±Q alternation is retired) |
+| P fragments | L0A | 2 × 4 KiB·mt | unchanged; L0A = **12 KiB·mt = 12 / 24 / 36 / 48 KiB** (round 3: 16 / 32 / 48 / 64; mt = 4 no longer exactly full) |
+| C_s score regions | L0C | 3 × 32 / 64 / 48 / 64 KiB·… = 96 / 192 / 144 / 192 KiB | fresh chunks (one call per chunk per visit); the 3-deep ring stays |
+| **C_o fresh chunk sets** | L0C | (block / 128) × 8 KiB·mt = 32 / 64 / 48 / 64 KiB | **replaces the 2 × 8 KiB·mt accumulating regions**; single-buffered (A10′) |
+| **L0C total** | | **128 / 256 / 192 / 256 KiB** | exactly full at mt = 2 and 4; mt = 1 with double-buffered sets 160 KiB; the mt = 1, 1 024-token-block variant (3 × 64 + 8 × 8) fills L0C exactly |
+| drained C_s | US | 32 / 64 / 48 / 64 KiB | unchanged |
+| **NegSnap** | — | **0** | retired (round 3: 96 KiB in US at mt = 1, 144–192 KiB in S1 above) |
+| P staging | US | 32 KiB at mt = 1 (double), 32 / 24 / 32 KiB single at mt ≥ 2 | the bounce drains each 4 KiB piece to DDR as it is cast |
+| O, partial ring | US | 8 KiB·mt + 2 × 8 KiB·mt (1 × at mt = 4) | slot 0 of the ring holds O_b (the block-local sum) |
+| S accumulator, shift reel, α | US | 4 + 4 KiB + 64 B | unchanged |
+| **K_tail, V_tail** | US | **8 + 8 KiB (32 tokens each)** | append-then-attend needs ≤ 31 tail tokens at t = 16 (§10.1) |
+| **mask reel** | US | 512·mt × 4 B = 2 / 4 / 6 / 8 KiB | the per-row causal mask (t > 1) |
+| q row-major, page-table window | US | 4 KiB·mt (aliased onto the idle drained-C_s buffer at mt = 4) + 4 KiB | the round-2 remedy, applied at mt = 4 |
+| **US total** | | **122 / 184 / 190 / 196 KiB + 64 B** | every mt under the 208 KiB evidence (round 3: 208 KiB + 64 B at mt = 1 and snapshots forced into S1 above) |
+| P ring | S1 | 2 × 4 KiB·mt (the DDR → S1 staging target) | no snapshots: 8 / 16 / 24 / 32 KiB |
+| **P scratch** | **DDR** | 2 × 16 KiB·mt (double-buffered) | new: the bounce's scratch, O(1) |
+
+The 1 024-token block at mt = 1 (review item 5's lever) is listed as a variant: L0C exactly full (256 KiB), drained C_s 64 KiB in US
+(154 KiB + 64 B total), the rowmax chain per token 14.1 instead of 19.1 ns (the 16 reduce calls and the reel amortise over twice the
+tokens; the lazy chain gains nothing: 9.2 vs 9.3), the O chain halves (1 032 adds, 62 ppm), the fixed cost doubles (two 9.4 µs blocks on
+lazy); its price is no longer S1 snapshots (there are none) but the exactly-full L0C and a 27 µs block at the design page.
+
 
 ---
 
@@ -553,6 +789,21 @@ f32 result is deterministic even though it is not associative.
 
 Cross-core: none (one head per core; the launch boundary is the only cross-core sync, and the head split of
 §9 uses it).
+
+
+**Round 4 — the edges that changed (errata #18–#21, session 1).** The P path is now **A5′ vector → copy-out** (the cast P piece retired
+before the US → DDR copy ships it), **A6′ copy-out → copy-in** (the 4 KiB piece landed in the DDR scratch before the DDR → S1 staging
+reads it — a DDR round trip, fenced like every direct load with the full barrier, the only working fence) and **A6″ copy-in → loader**
+(the S1 piece landed before L0LOAD lifts it); the old A5/A6 (US → S1 plain copy) are deleted — erratum #20 says that copy delivers data
+that is not the source. The P lift sits between direct-load barriers at 2× / 8× the expert kernel's lift density (§2.2): E24 runs at this
+cadence with differencing on A (E29's fault class). **A10′ vector → matrix (PV)**: at mt = 2 and 4 the fresh C_o sets are single-buffered
+(L0C exactly full), so the drain of block b's sets must retire before block b + 1's first PV call — one block of slack (12 µs) against a
+459 ns drain; at mt = 1 the sets are double-buffered and the edge is two blocks apart as before. **Every L0C destination is an explicit
+byte-offset tensor (erratum #18: a chunk-offset view lands in chunk 0)**: the C_s ring's 3 × (block/16) chunks and the C_o sets' 8 chunks
+per group are addressed by byte offset — E23(v)'s differencing (two patterns through one chunk address, out changes) is the check. The
+determinism criterion of E27 is unchanged (fixed order: blocks, groups, partials, the two-level merge), and its host patterns use **prime
+periods > L** (erratum #21: mod-N patterns alias tokens and hid a call-tile transposition as a clean one-token shift).
+
 
 ---
 
@@ -601,6 +852,39 @@ separate path at 152.8 GB/s/core (E26 measured).
 S4 (one pass, mt = 8, 128-token blocks): 11 596 µs / 368 ms (spec), 3 777 / 120 (lazy) — worse than two passes on every chain and
 for every merge count (T3r_s4, T3r_s4_dominated_*). KV-int8: 612 µs at 32k on spec (vector-bound: the halved stream, 6 278 ns per
 block, is under the 9 276 ns chain), 413 µs on lazy (DDR-bound) — `[R3-i8-t1]`, T3r_i8.
+
+
+### 6.1″ t = 1, round 4 (lazy chain, fresh chunk sets, the P bounce) — `[R4-t1-*]`, T4r_t1_4k … T4r_t1_1M
+
+In-kernel µs; wall = + 91 µs; each cell is **lazy-T / lazy-C / rowmax-T / rowmax-C**; "legs 2" charges both bounce legs on the DDR roof
+(headline, UNMEASURED), "legs 0" is a proven direct US → S1 route (= the round-3 model + the first-block max + the 16-token tail):
+
+| L | **256 KiB, 169.2 (design), legs 2** | 169.2, legs 0 | 64 KiB 167.0, legs 2 / 0 (lazy-T) | 174.6, legs 2 / 0 (lazy-T) | **session-1 loop 138.3, legs 2 / 0 (lazy-T)** | binding |
+|---|---|---|---|---|---|---|
+| 4k | **131** / 138 / 136 / 145 | 118 / 126 / 123 / 132 | 132 / 120 | 127 / 115 | **156** / 141 | KV on every cell |
+| 32k | **912** / 919 / 917 / 925 | 813 / 820 / 817 / 826 | 923 / 823 | 884 / 788 | **1 111** / 990 | KV (rowmax-C at 174.6 legs 0: vector, 818) |
+| 128k | **3 589** / 3 596 / 3 594 / 3 603 | 3 192 / 3 200 / 3 197 / 3 206 | 3 636 / 3 234 | 3 478 / 3 094 | **4 386** / 3 901 | KV |
+| 1M | **28 575** / 28 582 / 28 579 / 28 588 | 25 402 / 25 410 / 25 407 / 25 416 | 28 951 / 25 736 | 27 692 / 24 618 | **34 956** / 31 073 | KV |
+
+Effective KV rate on the design page with the bounce: 128.2 / 147.2 / 149.6 / 150.3 GB/s (the bounce bytes are not KV bytes); fraction of
+the 398 µs GEMV unit 0.33 / 2.29 / 9.02 / 71.8. The moves (T4r_moved): 32k 805 → **912 (+13.3 %)**, 1M 25.4 → **28.6 ms (+12.5 %)**
+against round 3's lazy cells; without the bounce +1.0 % / +0.0 % (the first-block max and the tail). The legs-1 cell (read leg only) is
+862 µs at 32k. The G column that will decide the first silicon numbers is the kernel's own: the session-1 diagnostic loop measured
+**138.3 / 138.7 / 138.0 GB/s at 256 / 128 / 64 KiB, page-size-insensitive, c_pg ≈ 0** — 18 % under the E21 basis because of that loop's
+barrier density; the production loop halves the barriers per byte and its rate is UNMEASURED (between 138 and 169). The page-size lever
+of round 3 (−1.3 % at 64 KiB) is inside that uncertainty: the planner reads the realised G (§10).
+
+### 6.2″ t = 16, round 4 (two passes of mt = 4, 256-token blocks) — `[R4-regime-t16-*]` `[R4-t16-*]`, T4r_t16
+
+| L | lazy-T | lazy-C | rowmax-T | rowmax-C | binding |
+|---|---|---|---|---|---|
+| 32k | **2 565** | 3 213 | 7 756 | 9 132 | vector (G- and bounce-independent) |
+| 1M | **79 853** | 99 373 | 245 288 | — | vector |
+
+Round 3's lazy-T 3 162 µs at 32k becomes 2 565 (the Z difference and the pack merge are gone), rowmax-T 7 057 → 7 756 (the larger
+fresh-set merge). S4 (one pass, 128-token blocks): 2 680 / 13 096 µs at 32k — dominated (§2.4). KV-int8: 651 µs at 32k on the rowmax
+chain (vector-bound); the lazy cell is unreachable as specified (§3.4).
+
 
 ### 6.1 t = 1, round 2 — superseded by 6.1′ (rows = 8, mt = 1, one pass) — `[A4-t1-*]`
 
@@ -654,6 +938,19 @@ bytes: for DESIGN-4's dense layer (3.19 GB, 18.26 ms) it is 4.5 % at 32k and 141
 135); for its MoE layer (serial regime, 3.21 ms) 25.6 % at 32k and **100.8 % at 128k** — the attention/weights tie of §1.4. So decode
 is attention-bound above ~16k tokens per 8192² GEMV-equivalent of weights, by the KV bytes alone — no kernel
 choice changes that ratio except KV-int8 (halves it) or page size (G).
+
+
+**The crossover, round 4** (`[R4-crossover-*]`, T4r_form_lazyT2, T4r_form_lazyT0, T4r_crossover, T4r_crossover_anyL). Two things move
+it: the fixed cost (19 328 on the lazy chain, with the first-block max — round 3's 11 328 gave 16 896 at 174.6) and, with the bounce,
+the stream term itself (13 512 instead of 12 011 ns per block at 174.6). Closed form for every L and every G ≤ 174.6 (the block is
+DDR-bound on the lazy chain at every such G): step = nb₄(L) · ⌊23 592 960 / G⌋ + 15 172 + the tail, nb₄(L) = ⌈16⌊(L−1)/16⌋ / 512⌉ (with
+both legs; 20 971 520 without). Over the 512-multiples attention equals one 398 µs GEMV unit at **L_eq = 14 848 (k ≥ 29) at 174.6 with
+the bounce, 16 384 (k ≥ 32) without; 14 336 / 15 872 on the design page (169.2); 11 776 / 12 800 on the session-1 loop's 138.3**. Over
+every L the crossover is monotone at 14 353 (174.6, legs 2), 15 889 (legs 0), 13 841 (169.2, legs 2); at 138.3 without the bounce it is
+not: L ≥ 12 817, or 12 305 ≤ L with a tail of ≥ 15 tokens (the vector tail decides inside the 26th block). T_crossover's round-2 statement
+(16 896) and round 3's (16 384 / 15 872 on the measured rates; 16 896 lazy) remain true of their models and are superseded. Per DESIGN-4
+layer the MoE-128k cell is no longer a tie with the bounce: attention 3 589 µs against the 3 208 µs layer (§1.4, §10; T4r_fleet_moe_128k_*).
+
 
 ---
 
@@ -722,6 +1019,25 @@ pipeline fill/tail 16 % (18.8 of 119 µs); at 32k 11 % and 2.3 %; at 1M 0.35 % a
 12 / 1, 0.4 / 0.03 % with the 7 µs fixed cost). Fusing the attention
 launch with a neighbour (§10) is worth more than any kernel change below 8k tokens.
 
+
+**Round 4 — the map on the lazy chain with the bounce** (`[R4-regime-*]`, T4r_regime, T4r_rows_star; in-kernel µs at 32k on the design
+page, 169.2; "legs 2" both bounce legs, "legs 0" none; the four columns are lazy-T / lazy-C / rowmax-T / rowmax-C):
+
+| t (rows) | legs 2 | legs 0 | binding (legs 2) | vec/ddr at legs 2 (lazy-T) |
+|---|---|---|---|---|
+| 1 (8) | **912** / 919 / 917 / 925 | 813 / 820 / 817 / 826 | KV on every chain | 34.2 % |
+| 2 (16) | 912 / 919 / 917 / 926 | 813 / 820 / 817 / 826 | KV (t = 2 = t = 1 + the 16 ns mask op) | 34.2 % |
+| 4 (32, mt = 2) | **1 030** / 1 045 / 1 301 / 1 636 | 832 / 847 / 1 301 / 1 636 | KV on lazy, vector on rowmax | 61.6 % |
+| 8 (64, mt = 4, 256-token blocks) | **1 301** / 1 629 / 3 908 / 4 601 | the same | vector on every chain | 104.8 % |
+| 16 (128, 2 passes) | **2 565** / 3 213 / 7 756 / 9 132 | the same | vector | 104.8 % |
+
+Reading the round-4 map: t = 1, 2 are the KV stream on every chain; **verify batches are DDR-bound through t = 4 on the lazy chain with
+the bounce (rows* = 64, t ≥ 8 — the bounce bytes raise the DDR side; without it rows* = 48, t ≥ 6)** and vector-bound from t = 4 on the
+rowmax chain (rows* = 32); the bounce never enters a vector-bound cell, so t ≥ 8 is bounce- and G-independent; S4 is dominated (§2.4);
+KV-int8 is vector-bound at t = 1 on the rowmax chain (651) and unreachable on lazy (§3.4). The E35-first build order stands: the lazy
+chain is the only one with slack at every t ≤ 4.
+
+
 ---
 
 ## 8. Experiment ladder (continues DESIGN-2's E11–E20; every row has an observable failure)
@@ -751,6 +1067,24 @@ Order (round 3): E21 and E22 are measured; **E35 first** (it decides the verify-
 E23 and E24 together (the chain with the identity-exp harness: exactness before any transcendental), E26 (drift, snapshots),
 E25, E27, E28. Round 2's order was E21 first, then E23 / E24, E22, E26, E25, E27, E28.
 
+
+**Round 4 — the ladder after session 1** (what moved to MEASURED, what the review added, what is OPEN):
+
+| # | Settles | Status / setup | Observable failure | Decides |
+|---|---|---|---|---|
+| **K-shape sweep — MEASURED (session 1)** | f16 (16,16,k) at k ∈ {16, 32, 64, 128} | EXACT on every k (128 reps per shape, one-hot k-probes at every k position, differencing through one L0B address, all 8 cores) — the gating row the review asked for, already run | — | §1.2: d = 128 k = 128 licensed, d = 64 single k = 64 (T4r_kshape) |
+| **E23 — (i), (ii), (v) MEASURED (session 1)** | H-F16 (the f16 B fragment [16 n × 16 k] column-major, k-fragment-major), the f16 A fragment ([16 m × 16 k], m-row-major: Q and P), the f32 C nesting ([16 m][16 n] per 1 KiB chunk) and the zero-copy P premise | the scores half verified exact at 32k: 2 097 152 score elements, bad 0 | — | the page layouts and the P path stand; **open: (iv) the V tile at the real PV cadence** (blocked on the softmax-reel anomaly), the m = 64 C nesting (stride 4 096 B — only if an m = 64 PV call is ever used) |
+| **E24′** | the direct-load choreography at the real P cadence **with the bounce**: K/V tiles interleaved with the P pieces' DDR → S1 staging and S1 → L0A lifts at 1/16 (mt = 1) and 1/4 (mt = 4) of the direct-load bytes; the rate of the US → DDR and DDR → S1 legs on the shared roof | the E13(a) accumulating oracle with alternating K/V patterns and one-hot P rows through the same L0A slot, 10⁴ tiles; the block time at legs 2 vs the round-3 cell | a stale P row (the E29 fault class: handshake faults after direct loads); the realised block time locates `legs` ∈ [0, 2] | the headline (912 vs 813 µs at 32k), rows*, L_eq, the MoE-128k verdict |
+| **E26′ (was E26 / the session's K5)** | the ONLINE-CHAIN f32 drift (the region-difference drift is retired): O and S against f64 at 32k and 1M on both chains, two-level accumulation | real-valued q, K, V; relerr of out per row; the matrix unit's internal summation order (UNMEASURED) is inside the measurement | relerr above 246 ppm (1M) / 10 ppm (32k) × a small constant = an order the bound does not cover | ship at 1M on the deterministic bound (T4r_drift_online) |
+| **E27′** | end-to-end numerics: **causal at t > 1** (the host reference masks the batch), the **planted sink** (one token at p = 1, the rest at 2⁻²⁵: expect 3.1 % row-mass loss at 1M with β = 0, none at β = 3), **prime-period host patterns > L** (erratum #21), fresh-set determinism | as E27, both chains | relerr > 10⁻³; any rep-to-rep difference; a mod-N pattern that passes while a prime-period one fails = aliasing | ship/no-ship; β |
+| **E35 — the guard is MEASURED REQUIRED (session 1)** | the per-trip recompute is mandatory (9 / 8 192 lanes wrong per tripped block without it); still open: the trip rate per (model, L) at μ = 8, β = 3 and at μ = 0 (the KV-int8 × lazy cell), the trip cost (≈ 10.7 µs), the queue-fence cost of the guard read | as before, plus μ = 0 | trips above one per 2.1 blocks = the variant loses; a guard that misses a planted overflow = blind | the verify-batch regime; KV-int8 on lazy |
+| **E36 — OPEN (session 2 owns it)** | the softmax reel: 75–91 % of P lanes read back as raw scores; deterministic; every isolated piece (exp, cast, reduce, drain, the C nesting) passes | the reel on the drained C_s in situ with differencing per op; the queue fence between the drain and the first vector op (erratum #15) is the first suspect | — | every vector-chain cell (OPEN in the ledger); E24′ and E26′ wait on it |
+| E25, E28 | unchanged; E28 reports the realised G of the production loop (138–169) beside the in-kernel ms | | | |
+
+Order (round 4): **E36 first** (nothing downstream of the reel can be measured until P is P), then E24′ (the bounce and the P cadence:
+the headline's largest unmeasured term), E35 (trip rate at β = 3 and μ = 0), E27′ with the sink and the causal reference, E26′, E25, E28.
+
+
 ---
 
 ## 9. Risk register and fallbacks
@@ -774,6 +1108,24 @@ E25, E27, E28. Round 2's order was E21 first, then E23 / E24, E22, E26, E25, E27
 | d = 64 shapes | shape | 2 × (16,16,32) calls per 16 tokens (k = 64 illegal): 80 MMA calls per block, 20.0 %·mt instead of 8 % (T2_d64); KV bytes halve so every DDR cell halves and the vector share per byte doubles (c_V ≤ 30 / 14 at ρ32 = 1 / 2 for t = 1 DDR-bound) | accept; the i8/poly corners become vector-bound at t = 1 |
 | Launch floor | DESIGN.md E0 | +91 µs per layer-step unless launches pipeline (88 % of the 4k step, 12 % at 32k) | fuse the attention launch with the QKV epilogue / O-projection prologue where the runtime allows |
 | Errata compliance | — | #2: every transfer ≤ 32 KiB (tiles), ≤ 4 KiB (P pieces), ≤ 64 KiB (COPY_FRAC source); #3: all vector calls ≤ 1 024 lanes (the reels are exactly 1 024); #5: no f16 accumulation anywhere; #6: casts verified by E9/E22; #7: out leaves through US; #8/#14: full barriers on direct loads, pipe barriers A1–A13, no queue staging; #9: depths = counts; #12/#13: no i4 anywhere, i8×i8→i32 only in the variant; k = 64 never issued; n ≤ 16 per call; init flags not relied on | — |
+
+
+**Round 4 — the risk rows the review and session 1 added or re-aimed:**
+
+| Risk | Trigger | Impact (from the model) | Fallback |
+|---|---|---|---|
+| **The P bounce costs its bytes on the DDR roof** (erratum #20: no US → S1 plain copy of an A slot) | E24′ | legs 2: +12.5 %·mt on the t = 1 block (912 vs 813 µs at 32k; 28.6 vs 25.4 ms at 1M); the MoE-128k cell attention-bound at every G; L_eq 14 848 | legs 1 (862 µs) if the write leg is free on this part; the one exact variant of the three US → S1 probe variants (HW-MAP: "1-of-3 exact, cold-pipe-class") re-probed as a legs-0 route — UNMEASURED |
+| **The softmax reel (OPEN)**: 75–91 % of P lanes = raw scores | E36 (session 2) | no cell moves until it lands; every vector-chain cell is OPEN | not modelled around; the queue fence (erratum #15) between the drain and the reel is the first suspect |
+| **The production loop's gather rate** | E28 | the session-1 diagnostic loop measured 138.3 GB/s, page-insensitive (1 111 µs / 35.0 ms at t = 1); the production loop halves the barriers per byte: UNMEASURED between 138 and 169 | the planner reads the realised G; the page-size lever (−1.3 %) is inside this uncertainty |
+| f16 accumulation across barriers (erratum #19) | measured | no f16 accumulate chain anywhere in this design (fresh chunk sets); d = 64 must use the single k = 64 call; the i8 variant may accumulate | — |
+| Lazy guard without the recompute | measured | 9 / 8 192 lanes wrong per tripped block | the recompute is in the spec (§3.4 (c)) |
+| The first-block max on every step | design | 5.2 µs per step on the lazy chain (4 % of the 4k step) | a prefill-calibrated m_r (trip rate UNMEASURED) |
+| KV-int8 on the lazy chain | E35 at μ = 0 | unreachable at μ = 8 (P up to e⁸ at scale 127); 651 µs vector-bound on rowmax | μ = 0 if its trip rate allows; else K-int8 only (ALTERNATIVES row 7) |
+| The planted sink | E27′ | 3.1 % row-mass loss at 1M with β = 0 | β = 3 (cost 0) |
+| Causality at t > 1 | E27′ (causal host reference) | 32-token tails (8 KiB each) and the per-row additive mask; the vector tail is 64 µs at t = 16 worst case | — |
+| Page waste in the planner | fleet.py `[R4-waste-*]` | 4 MiB per layer-sequence at 256 KiB: 120 MiB per instance die against 2–30 MB margins (+1–3 ‰ of int4 share), 60 MiB on the dense 1M KV-int8 die (1.5 GB left) | 64 KiB pages cut it to 1 MiB (30 MiB per instance die — still above every margin) |
+| The C destination and the host patterns | errata #18, #21 | silent chunk-0 landing; aliased verification | byte-offset tensors; prime periods > L |
+
 
 ---
 
@@ -814,6 +1166,34 @@ E25, E27, E28. Round 2's order was E21 first, then E23 / E24, E22, E26, E25, E27
 7. **What the runtime must not do.** Reallocate or compact pages behind the kernel (the table window is read
    once per 128k tokens); place K and V of one head on different dies; use pages smaller than 32 KiB with this
    kernel (tiles would straddle pages); zero pages (unnecessary — the kernel never reads beyond 16⌊L/16⌋).
+
+
+**Round 4 — what changed for the runtime (session 1, the review's items 6 and 11):**
+8. **Append-then-attend, spelled out.** The pages hold the 16-token groups completed BEFORE this step (L − t tokens); the current step's
+   t tokens and the open group are served from the tails, so **K_tail / V_tail hold 32 tokens (8 KiB each at d = 128)**: the tail is
+   (L − t) mod 16 + t ≤ 15 + t tokens (31 at t = 16 — the 16-token tail of round 3 cannot hold it; T4r_tail_bound), the vector path
+   applies the **per-row additive causal mask** over the ≤ 2 token groups of the tail (−65 504 at lanes j > i for query token i; one
+   512·mt-lane Add per step, 16 ns·mt), and nothing in the matrix path needs masking because no batch token is ever in a page during its
+   own step. At t = 1 this makes the tail 16 tokens at every 512-multiple (4.2 µs of fixed cost); the group completed by this step is
+   fractalised in the epilogue and read from its page next step. E27′'s host reference is causal.
+9. **Page size and the realised rate.** The kernel takes P_bytes as a parameter (a multiple of 32 KiB). A 256 KiB page is **four 64 KiB
+   sub-pages**: sub-page (l mod 1024) div 256, inside it the §1.2 / §1.3 maps unchanged (T4r_page256_*: a bijection onto the even bytes of
+   [0, 262 144) with explicit inverses); the 4 KiB table window then covers 512 × 1 024 = 524 288 tokens (131 072 at 64 KiB). The MoE-128k
+   verdict is NOT a page-size question any more: with both bounce legs it is attention-bound at every G ≤ 174.6 (T4r_fleet_moe_128k_legs2),
+   without them a ±1 % tie — the planner reads the realised G of the production loop (the session-1 diagnostic loop: 138.3, page-insensitive)
+   and the realised bounce, never a side.
+10. **Page waste is budgeted.** One partially filled page per (head, K|V) per (layer, sequence): 16 × (P − 256 B) = 1 / 4 / 16 MiB at
+    64 KiB / 256 KiB / 1 MiB (T4r_waste; fleet.py `[R4-waste-*]`, `[R4-mem-*]`, `[R4-inst-fit-*]`): 60 MiB per 15-layer dense die at B = 1
+    (480 at B = 8), 16 MiB per 4-layer MoE die, 120 MiB per 30-layer instance die — above every instance-fit margin of DESIGN-4 (+1–3 ‰ of
+    int4 share at 256 KiB, +0–1 ‰ at 64 KiB); L_max drops by ≈ 0.2 % (551 253 → 550 230 dense f16 at 256 KiB); the dense 1M KV-int8 layout
+    keeps 1.5 GB of margin. ALTERNATIVES §2.5's memory argument for two-tier pages (waste ≤ 1 MiB) is real but buys 3 MiB per layer-sequence
+    against a 1.3 % rate gain that 256 KiB pages already capture — dominated unless the instance fit is the binding constraint, where the
+    64 KiB page (1 MiB of waste, −1.3 % of G) is the cheaper lever.
+11. **The P scratch.** 2 × 16 KiB·mt of DDR per core (O(1)) for the bounce, allocated with the page tables; the DDR → S1 staging of P
+    rides the same bulk A-staging route the expert kernel measured ("one pack per launch" there, one pack per block here).
+12. **Verification data.** Host patterns for any token-mapped check use prime periods > L (erratum #21); every L0C destination the
+    kernel addresses is a byte-offset tensor (erratum #18).
+
 
 ---
 
@@ -863,3 +1243,11 @@ Round 3: of these only the merge count remains a hypothesis variable (25 750 pac
 insensitive, T3r_merge_*, T3r_s4_dominated_*); the new assumption is A3 (a 16-lane Duplicate or copy costs one chained f16 call,
 46.4 ns — E22), and the modelling choice T vs C (whether independent reels pipeline at the 40-lane/cycle wall or every call pays
 its chained latency) is carried as the headline / worst-corner pair.
+
+
+Round 4 (2026-11-07): the review's eleven items and session 1's measurements are the `T4r_*` theorems (66, listed in PROOF-COVERAGE-3.md
+rows R4-1–R4-30 with their `[R4-*]` labels). New hypothesis variables: `legs` ∈ {0, 1, 2} (the P bounce's transfers on the DDR roof,
+UNMEASURED, headline 2) and the fresh-set merge (itemised, 15 431 lazy / 70 462 rowmax lane-eq, carried as `m` in the iffs); new
+assumptions: A4 (the k = 64 / k = 16 issue cost equals the measured k = 128's 15 ns), A5 (the guard's queue-fence read under 1 µs); the
+conventions T / C and the chain cells are carried as OPEN until the softmax-reel anomaly (E36) lands. Retired as hypotheses: the pack's
+merge 25 750, the region-difference drift's random walk (its mechanism cannot be built: erratum #19), the i8 k-shape facts on f16.

@@ -1743,3 +1743,640 @@ theorem T3r_moved : stepH 32768 1 gStream cvNat 1 = 775778 ∧ step3H 32768 1 gS
     stepH 1048576 16 gStream cvNat 1 = 49209394 ∧ step3H 1048576 16 gShuf64 .rowmax .T = 224106244 ∧
     pct (822468 - 775778) 775778 = 60 ∧ pct (25735556 - 24605602) 24605602 = 46 ∧ pct (787524 - 775778) 775778 = 15 ∧
     fixedNs 32768 cvNat 1 rDrainA mergeOps 1 1 128 = 7074 ∧ fixed3 32768 .rowmax .T (mergePack * 100) 1 1 = 18820 := by decide
+
+/-! # ROUND 4 (2026-11-07) — the pre-implementation review and kernel session 1 (HW-MAP 423d433, errata #18–#21)
+
+  Silicon inputs: the f16 (16,16,k) sweep is EXACT at every k ∈ {16, 32, 64, 128} (the i8 k = 64 anomaly is i8-only);
+  f16 accumulation into one C chunk corrupts across any full barrier or A re-lift (erratum #19) — every C chunk is
+  FRESH (one matrix call per chunk per visit): the C_s chunks and one C_o chunk set per 128-token group, summed on
+  the vector unit — the region difference, the ±Q alternation and the snapshots are gone; an A operand built in
+  vector SRAM (the P fragments) rides a DDR bounce (erratum #20) — `legs` ∈ {0, 1, 2} DDR transfers of the P bytes per
+  block on the K/V stream's roof (UNMEASURED; 2 = the conservative headline, 0 = the round-3 model); the lazy
+  guard's per-trip recompute is REQUIRED (measured); the kernel's own fresh-path gather runs 138.3 GB/s (diagnostic
+  loop, page-size-insensitive; the production loop is UNMEASURED). OPEN: the softmax-reel anomaly (session 2) —
+  the vector-chain cells below are modelled as specified and carried as OPEN in the ledger.
+  Every round-2 / round-3 theorem above is kept; the `T4r_*` theorems are the round-4 cells (attn.py `[R4-*]`). -/
+namespace Measured4
+/-- kernel session 1: the attention kernel's own fresh-path gather, aggregate tenths GB/s at 256 / 128 / 64 KiB (diagnostic loop) -/
+def gK1_256 : Nat := 1383
+def gK1_128 : Nat := 1387
+def gK1_64 : Nat := 1380
+/-- DESIGN-4 / proof/fleet.py memory margins used by the page-waste theorem (D4 inputs, bytes): the dense 1M KV-int8 layout's
+    worst-die margin at the 2 GiB overhead (`[F1-ort-threshold]`), the instance-fit worst-die margins (`[R3-inst-fit-*]`) -/
+def marginDense1Mi8 : Nat := 1656740864
+def marginInstDense32k : Nat := 3346208
+def marginInstDense128k : Nat := 15012346
+def marginInstMoe32k : Nat := 24485516
+def marginInstMoe1M : Nat := 2733854
+end Measured4
+
+namespace Design4
+open Measured Measured3 Measured4 Design Design3
+
+/-! ### Fresh chunk sets (erratum #19): L0C, L0A, the drain, the P bounce (erratum #20) -/
+/-- fresh C_o chunk sets per block-fragment: one per 128-token group -/
+def coSets (block : Nat) : Nat := block / 128
+/-- L0C: 3 C_s regions + the block's fresh C_o sets, single-buffered -/
+def l0c4 (mt : Nat) : Nat := 3 * blockOf mt * 16 * 4 * mt + coSets (blockOf mt) * 16 * dH * 4 * mt
+/-- L0A: Q (no −Q: the ±Q alternation is gone) + a double-buffered P set -/
+def l0a4 (mt : Nat) : Nat := fragB * mt + 2 * fragB * mt
+/-- drain bytes per block: C_s + every fresh C_o set of the block -/
+def drain4Bytes (mt : Nat) : Nat := (blockOf mt * 16 * 4 + coSets (blockOf mt) * 16 * dH * 4) * mt
+def drain4 (mt Rd : Nat) : Nat := tn (drain4Bytes mt) Rd
+/-- P fragments per block per core (f16, 4 KiB per 128-token group per fragment) -/
+def pBytes (mt : Nat) : Nat := coSets (blockOf mt) * fragB * mt
+/-- the DDR bytes the bounce adds per block per core: legs ∈ {0, 1, 2} transfers of the P bytes -/
+def bounceBytes (mt legs : Nat) : Nat := legs * pBytes mt
+def ddr4Block (G mt legs : Nat) : Nat := tn ((blockOf mt * coreTok dH + bounceBytes mt legs) * 8) G
+def ddr4BlockI8 (G mt legs : Nat) : Nat := tn ((blockOf mt * coreTok dH / 2 + bounceBytes mt legs) * 8) G
+
+/-! ### The round-4 vector chain (OPEN: softmax-reel anomaly) and the fresh-set merge -/
+/-- fresh-set merge per block-fragment, lane-eq ×100: O_b = the sum of the block's coSets partials (2048 f32 lanes each, the first
+    a copy costed as an op), O += O_b (two-level: block-local, then running — T4r_drift_online); rowmax adds α = exp (1 call),
+    the α reel (20 small calls), the O scale (2048) and the S scale (256); S: fold 1024 → 256 (512 + 256) and the running add (256) -/
+def merge4 (block : Nat) : Var → Conv → Nat
+  | .rowmax, c => call100 tExp + 20 * call100 tF16 + (2048 * (coSets block + 1) + 2048 + 512 + 256 + 256 + 256) * unitF32 c
+  | .lazy, c => (2048 * (coSets block + 1) + 512 + 256 + 256) * unitF32 c
+/-- rowmax = §3.2 without the Z difference: cast S → f16, shift, exp, cast P, sum (4 f32-class ops + exp per score) + the f16 tree +
+    16 per-row reduce-max calls + the 20-call shift reel + the merge -/
+def chain4Rowmax (block mt f16 f32 cexp m : Nat) : Nat :=
+  mt * (block * 16 * (4 * f32 + cexp) + treeOps block * f16 + 16 * call100 tRm16 + 20 * call100 tF16 + m)
+/-- lazy = §3.4: shift, exp, cast P, sum (3 f32 ops + exp) + one guard reduce-max per P reel + the merge -/
+def chain4Lazy (block mt f32 cexp m : Nat) : Nat :=
+  mt * (block * 16 * (3 * f32 + cexp) + (block * 16 / 1024) * call100 tRm16 + m)
+def chain4 (block mt : Nat) : Var → Conv → Nat → Nat
+  | .rowmax, c, m => chain4Rowmax block mt (unitF16 c) (unitF32 c) cExp100 m
+  | .lazy, c, m => chain4Lazy block mt (unitF32 c) cExp100 m
+def vec4 (block mt : Nat) (v : Var) (c : Conv) (m : Nat) : Nat := chain4 block mt v c m * 10 / (rVecCore * 100)
+/-- the headline chain: the itemised fresh-set merge -/
+def vec4H (block mt : Nat) (v : Var) (c : Conv) : Nat := vec4 block mt v c (merge4 block v c)
+/-- lazy: the first block's per-row max, once per step (cast S → f16, the tree, 16 reduce calls, the reel) -/
+def firstMax4 (block mt : Nat) (c : Conv) : Nat :=
+  mt * (block * 16 * unitF32 c + treeOps block * unitF16 c + 16 * call100 tRm16 + 20 * call100 tF16)
+def firstMax4Ns (block mt : Nat) (c : Conv) : Nat := firstMax4 block mt c * 10 / (rVecCore * 100)
+def firstMaxOf (block mt : Nat) : Var → Conv → Nat
+  | .lazy, c => firstMax4Ns block mt c
+  | .rowmax, _ => 0
+
+/-! ### Append-then-attend (review item 6): the tails serve the open group and the t new tokens; the per-row causal mask -/
+def tail4Tok (L t : Nat) : Nat := (L - t) % 16 + t
+def lMatrix4 (L t : Nat) : Nat := 16 * ((L - t) / 16)
+def nblocks4 (L t mt : Nat) : Nat := ceilDiv (lMatrix4 L t) (blockOf mt)
+def tail4Ops (L t mt : Nat) : Nat := tail4Tok L t * dH * 16 * mt * 4
+def mask4 (t mt : Nat) : Nat := if 2 ≤ t then 512 * mt else 0
+
+/-! ### The round-4 step -/
+def fixed4 (L t : Nat) (v : Var) (c : Conv) (m mt mtAll : Nat) : Nat :=
+  2 * vec4 (blockOf mt) mt v c m + drain4 mt (rDrainM mt)
+  + (tail4Ops L t mtAll + mask4 t mtAll) * unitF32 c * 10 / (rVecCore * 100) + firstMaxOf (blockOf mt) mt v c
+def blockMax4 (G : Nat) (v : Var) (c : Conv) (m mt legs : Nat) : Nat :=
+  max (max (max (ddr4Block G mt legs) (vec4 (blockOf mt) mt v c m)) (mmaBlock mt dH)) (loaderBlock mt)
+def blockMax4I8 (G : Nat) (v : Var) (c : Conv) (m mt legs : Nat) : Nat :=
+  max (max (max (ddr4BlockI8 G mt legs) (vec4 (blockOf mt) mt v c m)) (mmaBlock mt dH)) (loaderBlock mt)
+def pn4 (L t : Nat) (onepass : Bool) : Nat := pSel (rowsOf t gH) onepass * nblocks4 L t (mtS t onepass)
+def step4 (L t G : Nat) (v : Var) (c : Conv) (m legs : Nat) (onepass : Bool) : Nat :=
+  pn4 L t onepass * blockMax4 G v c m (mtS t onepass) legs + fixed4 L t v c m (mtS t onepass) (mtOf (rowsOf t gH))
+def step4I8 (L t G : Nat) (v : Var) (c : Conv) (m legs : Nat) : Nat :=
+  pn4 L t false * blockMax4I8 G v c m (mtS t false) legs + fixed4 L t v c m (mtS t false) (mtOf (rowsOf t gH))
+def step4H (L t G : Nat) (v : Var) (c : Conv) (legs : Nat) : Nat := step4 L t G v c (merge4 (blockOf (mtS t false)) v c) legs false
+def step4S4 (L G : Nat) (v : Var) (c : Conv) (legs : Nat) : Nat := step4 L 16 G v c (merge4 (blockOf (mtS 16 true)) v c) legs true
+def step4I8H (L t G : Nat) (v : Var) (c : Conv) (legs : Nat) : Nat := step4I8 L t G v c (merge4 (blockOf (mtS t false)) v c) legs
+
+/-! ### k-shape (review item 1), the online-chain rounding (item 5), the planted sink (7), the C_o nesting (8), 256 KiB pages (11) -/
+/-- d = 64 scores as kc calls per 16 tokens: MMA calls per 512-token block at mt = 1 and per 256-token block at mt = 4 -/
+def d64Calls512 (kc : Nat) : Nat := 32 * kc + 16
+def d64Calls256mt4 (kc : Nat) : Nat := 4 * (16 * kc + 8)
+/-- longest sequential f32 addition chain feeding O (block-local sum of the partials, then one running add per block) and S
+    (8 reels into the block accumulator, the 1024 → 256 fold, one running add per block, the final 16 → 1 fold) -/
+def chainO (L block : Nat) : Nat := (coSets block - 1) + 1 + L / block
+def chainS (L block : Nat) : Nat := block * 16 / 1024 + 2 + L / block + 4
+/-- first-order relative bound n · 2⁻²⁴ in ppm, rounded up -/
+def relPpm (n : Nat) : Nat := (n * 1000000 + 2 ^ 24 - 1) / 2 ^ 24
+/-- the telescoped error of n rounded additions -/
+def errSum (e : Nat → Int) : Nat → Int
+  | 0 => 0
+  | n + 1 => errSum e n + e n
+/-- a row with one sink at p = 1 and L − 1 tokens at p = 2⁻²⁵ (just under the f16 flush line 2⁻²⁴) loses this much of its mass (ppm) -/
+def sinkLostPpm (L : Nat) : Nat := (L - 1) * 1000000 / 2 ^ 25
+/-- worst tail waste per (layer, sequence): one partially filled page per (head, K|V) = 16 pages of (P − one token) -/
+def pageWaste (P : Nat) : Nat := 16 * (P - 256)
+/-- C_o drain nesting: chunk (fragment f, n-group g) = 1 KiB = [16 rows][16 dims] f32; after an f16 cast; an m = 64 call -/
+def coAddr (f g r j : Nat) : Nat := f * 8192 + g * 1024 + r * 64 + j * 4
+def coAddr16 (f g r j : Nat) : Nat := f * 4096 + g * 512 + r * 32 + j * 2
+def coAddrM64 (g r j : Nat) : Nat := g * 4096 + r * 64 + j * 4
+/-- a 256 KiB page = four 64 KiB sub-pages, sub-page (l mod 1024) div 256, inside it the round-2 maps -/
+def kAddr256 (l j : Nat) : Nat := ((l % 1024) / 256) * 65536 + kAddr (l % 256) j
+def vAddr256 (l j : Nat) : Nat := ((l % 1024) / 256) * 65536 + vAddr (l % 256) j
+def kInv256L (a : Nat) : Nat := 256 * (a / 32768) + kInvL (a % 32768)
+def kInv256J (a : Nat) : Nat := kInvJ (a % 32768)
+def vInv256L (a : Nat) : Nat := 256 * (a / 32768) + vInvL (a % 32768)
+def vInv256J (a : Nat) : Nat := vInvJ (a % 32768)
+/-- the US rows of §4, round 4: no NegSnap, 32-token tails, the mask reel, the partial ring (slot 0 holds O_b); P staging
+    double-buffered at mt = 1 only; the ring has 2 slots at mt ≤ 3, 1 at mt = 4; q row-major aliased at mt = 4 -/
+def us4 (mt : Nat) : Nat :=
+  blockOf mt * 16 * 4 * mt + (if mt = 1 then 2 else 1) * (blockOf mt * 16 * 2 * mt) + 16 * dH * 4 * mt
+  + (if mt ≤ 3 then 2 else 1) * (16 * dH * 4 * mt) + 4096 + 4096 + 64 + 8192 + 8192 + 512 * mt * 4
+  + (if mt < 4 then 4096 * mt else 0) + 4096
+end Design4
+
+open Measured4 Design4
+
+/-! ## T4r_kshape — the f16 k-shape verdict and the d = 64 cost table (`[R4-kshape-*]`) -/
+/-- d = 64: one k = 64 call per 16 tokens (licensed by the f16 sweep) = 48 calls per 512-token block (12.0 %), 96 per 256-token
+    block at mt = 4 (48.0 %); 2 × k = 32 = 80 / 160 (20.0 / 79.9 %); 4 × k = 16 = 144 / 288 (36.0 / 143.9 %: MMA-bound) -/
+theorem T4r_kshape : d64Calls512 1 = 48 ∧ d64Calls512 2 = 80 ∧ d64Calls512 4 = 144 ∧ d64Calls256mt4 1 = 96 ∧ d64Calls256mt4 2 = 160 ∧
+    d64Calls256mt4 4 = 288 ∧ ddrBlock gStream 1 64 = 6005 ∧ tn (256 * 256 * 8) gStream = 3002 ∧
+    pct (48 * cMma) 6005 = 120 ∧ pct (96 * cMma) 3002 = 480 ∧ pct (80 * cMma) 6005 = 200 ∧ pct (160 * cMma) 3002 = 799 ∧
+    pct (144 * cMma) 6005 = 360 ∧ pct (288 * cMma) 3002 = 1439 ∧ 3002 < 288 * cMma ∧ 96 * cMma ≤ 3002 ∧ mmaCalls 1 64 = 80 := by decide
+
+/-! ## T4r_l0c, T4r_l0a, T4r_us — the buffers with fresh chunk sets (`[R4-l0c-*]` `[R4-us-*]`) -/
+/-- L0C = 128 / 256 / 192 / 256 KiB for mt = 1..4 (exactly full at mt = 2 and 4); mt = 5 at 256-token blocks would need 320 KiB
+    (the 64-row pass cap now comes from L0C, not L0A); the 1 024-token block at mt = 1 fills L0C exactly; double-buffering the
+    C_o sets at mt = 1 costs 160 KiB -/
+theorem T4r_l0c : l0c4 1 = 128 * KiB ∧ l0c4 2 = 256 * KiB ∧ l0c4 3 = 192 * KiB ∧ l0c4 4 = 256 * KiB ∧ l0c4 2 = l0cCap ∧ l0c4 4 = l0cCap ∧
+    3 * 256 * 16 * 4 * 5 + 2 * 16 * dH * 4 * 5 = 320 * KiB ∧ l0cCap < 320 * KiB ∧ l0c4 5 = 160 * KiB ∧ blockOf 5 = 128 ∧
+    3 * 1024 * 16 * 4 + 8 * 16 * dH * 4 = 256 * KiB ∧ l0c4 1 + 4 * 16 * dH * 4 = 160 * KiB ∧ coSets 512 = 4 ∧ coSets 256 = 2 ∧ coSets 1024 = 8 := by decide
+/-- L0A = 12 KiB·mt without −Q (round 2: 16 KiB·mt): 48 KiB at mt = 4 — no longer exactly full; mt = 5 (60 KiB) would fit L0A -/
+theorem T4r_l0a (mt : Nat) : l0a4 mt = 12 * KiB * mt ∧ l0a4 4 = 48 * KiB ∧ l0a4 5 = 60 * KiB ∧ l0a4 5 ≤ l0aCap ∧ l0aTotal (cfgH 4 0) = 64 * KiB := by
+  refine ⟨?_, by decide, by decide, by decide, by decide⟩
+  unfold l0a4 fragB KiB; omega
+/-- US = 122 / 184 / 190 / 196 KiB + 64 B for mt = 1..4 — every mt fits the 208 KiB evidence (round 2's mt = 1 table was over by 64 B);
+    S1 holds only the P ring (8 KiB·mt, no snapshots); the DDR scratch for the P bounce is 2 × 16 KiB·mt -/
+theorem T4r_us : us4 1 = 124992 ∧ us4 2 = 188480 ∧ us4 3 = 194624 ∧ us4 4 = 200768 ∧ 124992 = 122 * KiB + 64 ∧ 200768 = 196 * KiB + 64 ∧
+    us4 1 ≤ usEvid ∧ us4 2 ≤ usEvid ∧ us4 3 ≤ usEvid ∧ us4 4 ≤ usEvid ∧ 2 * fragB * 4 = 32 * KiB ∧ 2 * pBytes 1 = 32 * KiB ∧ 2 * pBytes 4 = 64 * KiB := by decide
+
+/-! ## T4r_drain, T4r_bounce, T4r_lift — the drain with fresh sets, the P bounce (`[R4-drain-*]` `[R4-bounce-*]` `[R4-lift-density]`) -/
+/-- drain bytes 64 / 128 / 96 / 128 KiB per block (round 3: 40 / 80 / 72 / 96): hidden iff R_drain ≥ 5.5 / 11.0 / 16.4 / 21.9 GB/s/core
+    (iff over R_drain); the measured 152.8 / 222.3 / 260.3 / 285.5 leave 27.7× / 20.2× / 15.8× / 13.0× — 428 / 589 / 377 / 459 ns per block -/
+theorem T4r_drain (Rd : Nat) (h : 0 < Rd) :
+    (drain4 1 Rd ≤ ddrBlock gStream 1 128 ↔ 55 ≤ Rd) ∧ (drain4 2 Rd ≤ ddrBlock gStream 2 128 ↔ 110 ≤ Rd) ∧
+    (drain4 3 Rd ≤ ddrBlock gStream 3 128 ↔ 164 ≤ Rd) ∧ (drain4 4 Rd ≤ ddrBlock gStream 4 128 ↔ 219 ≤ Rd) := by
+  have e1 : ddrBlock gStream 1 128 = 12011 := by decide
+  have e2 : ddrBlock gStream 2 128 = 12011 := by decide
+  have e3 : ddrBlock gStream 3 128 = 6005 := by decide
+  have e4 : ddrBlock gStream 4 128 = 6005 := by decide
+  have d1 : drain4Bytes 1 = 65536 := by decide
+  have d2 : drain4Bytes 2 = 131072 := by decide
+  have d3 : drain4Bytes 3 = 98304 := by decide
+  have d4 : drain4Bytes 4 = 131072 := by decide
+  rw [e1, e2, e3, e4]; unfold drain4 tn; rw [d1, d2, d3, d4]
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> rw [Nat.div_le_iff_le_mul_add_pred h] <;> constructor <;> intro hh <;> omega
+theorem T4r_drain_cells : drain4Bytes 1 = 65536 ∧ drain4Bytes 2 = 131072 ∧ drain4Bytes 3 = 98304 ∧ drain4Bytes 4 = 131072 ∧
+    drain4 1 rDrain1 = 428 ∧ drain4 2 rDrain2 = 589 ∧ drain4 3 rDrain3 = 377 ∧ drain4 4 rDrain4 = 459 ∧ drain4 8 rDrain4 = 459 ∧
+    pct 428 12011 = 36 ∧ pct 589 12011 = 49 ∧ pct 377 6005 = 63 ∧ pct 459 6005 = 76 ∧ x10 rDrain1 55 = 277 ∧ x10 rDrain2 110 = 202 ∧
+    x10 rDrain3 164 = 158 ∧ x10 rDrain4 219 = 130 ∧ drainBytes 1 128 = 40960 := by decide
+/-- the bounce: P is 16 / 32 / 32 KiB per block per core at mt = 1 / 2 / 4; with both legs on the DDR roof the block grows 12.5 / 25.0 /
+    50.0 % (13 512 / 15 013 / 9 008 ns at 174.6; 12 761 / 13 512 / 7 506 with the read leg only); at the measured rates, legs 2, mt = 1:
+    13 943 (169.2) / 14 127 (167.0) / 17 059 (138.3) / 15 340 (153.8) ns -/
+theorem T4r_bounce : pBytes 1 = 16384 ∧ pBytes 2 = 32768 ∧ pBytes 4 = 32768 ∧ bounceBytes 1 2 = 32768 ∧
+    ddr4Block gStream 1 0 = 12011 ∧ ddr4Block gStream 1 1 = 12761 ∧ ddr4Block gStream 1 2 = 13512 ∧
+    ddr4Block gStream 2 0 = 12011 ∧ ddr4Block gStream 2 1 = 13512 ∧ ddr4Block gStream 2 2 = 15013 ∧
+    ddr4Block gStream 4 0 = 6005 ∧ ddr4Block gStream 4 1 = 7506 ∧ ddr4Block gStream 4 2 = 9008 ∧ ddr4Block gStream 8 2 = 6005 ∧ ddr4Block gStream 3 2 = 8257 ∧
+    pct (13512 - 12011) 12011 = 125 ∧ pct (15013 - 12011) 12011 = 250 ∧ pct (9008 - 6005) 6005 = 500 ∧ pct (12761 - 12011) 12011 = 62 ∧
+    ddr4Block g256 1 2 = 13943 ∧ ddr4Block gShuf64 1 2 = 14127 ∧ ddr4Block gK1_256 1 2 = 17059 ∧ ddr4Block gShuf16 1 2 = 15340 ∧
+    ddr4Block g256 1 0 = 12394 ∧ ddr4Block gK1_256 1 0 = 15163 ∧ ddr4Block g256 1 1 = 13169 ∧ ddr4Block g256 2 2 = 15493 ∧ ddr4Block g256 4 2 = 9295 ∧
+    ddr4BlockI8 g256 1 2 = 7746 ∧ ddr4Block gStream 1 0 = ddrBlock gStream 1 128 := by decide
+/-- the P lift density: 16 KiB per 256 KiB of direct loads at mt = 1 (1/16), 32 KiB per 128 KiB at mt = 4 (1/4) — 2× / 8× the expert
+    kernel's 2 KiB per 64 KiB (1/32): E24 must run at this cadence -/
+theorem T4r_lift : 262144 / pBytes 1 = 16 ∧ 131072 / pBytes 4 = 4 ∧ 32 / 16 = 2 ∧ 32 / 4 = 8 ∧ 65536 / 2048 = 32 ∧ blockOf 4 * coreTok dH = 131072 := by decide
+
+/-! ## T4r_merge, T4r_chain, T4r_firstmax, T4r_fixed — the chain cells (`[R4-merge-*]` `[R4-chain-*]` `[R4-firstmax-*]` `[R4-fixed-*]`; OPEN) -/
+/-- the fresh-set merge (lane-eq ×100): lazy 1 543 168 / 982 016 / 701 440 / 2 665 472 at blocks 512 / 256 / 128 / 1024 (357 / 227 / 162 / 617 ns, T);
+    rowmax 7 046 272 / 6 485 120 / 6 204 544 / 8 168 576 (1 631 / 1 501 / 1 436 / 1 890 ns); chained: lazy 3 030 016, rowmax 8 837 248 at 512 -/
+theorem T4r_merge : merge4 512 .lazy .T = 1543168 ∧ merge4 256 .lazy .T = 982016 ∧ merge4 128 .lazy .T = 701440 ∧ merge4 1024 .lazy .T = 2665472 ∧
+    merge4 512 .rowmax .T = 7046272 ∧ merge4 256 .rowmax .T = 6485120 ∧ merge4 128 .rowmax .T = 6204544 ∧ merge4 1024 .rowmax .T = 8168576 ∧
+    merge4 512 .lazy .C = 3030016 ∧ merge4 512 .rowmax .C = 8837248 ∧ merge4 128 .lazy .C = 1377280 ∧ merge4 256 .rowmax .C = 7735424 ∧
+    1543168 * 10 / 43200 = 357 ∧ 982016 * 10 / 43200 = 227 ∧ 7046272 * 10 / 43200 = 1631 ∧ 2665472 * 10 / 43200 = 617 ∧
+    merge4 256 .lazy .T = mergeItem .lazy .T ∧ merge4 256 .rowmax .T = mergeItem .rowmax .T := by decide
+/-- the 16 chain cells at the fresh-set merge (ns per fragment): lazy 4 772 / 2 434 / 1 266 / 9 447 (T), 5 867 / 3 029 / 1 610 / 11 544 (C);
+    rowmax 9 791 / 7 482 / 6 328 / 14 409 (T), 12 265 / 8 784 / 7 044 / 19 226 (C) at blocks 512 / 256 / 128 / 1024 -/
+theorem T4r_chain : vec4H 512 1 .lazy .T = 4772 ∧ vec4H 256 1 .lazy .T = 2434 ∧ vec4H 128 1 .lazy .T = 1266 ∧ vec4H 1024 1 .lazy .T = 9447 ∧
+    vec4H 512 1 .lazy .C = 5867 ∧ vec4H 256 1 .lazy .C = 3029 ∧ vec4H 128 1 .lazy .C = 1610 ∧ vec4H 1024 1 .lazy .C = 11544 ∧
+    vec4H 512 1 .rowmax .T = 9791 ∧ vec4H 256 1 .rowmax .T = 7482 ∧ vec4H 128 1 .rowmax .T = 6328 ∧ vec4H 1024 1 .rowmax .T = 14409 ∧
+    vec4H 512 1 .rowmax .C = 12265 ∧ vec4H 256 1 .rowmax .C = 8784 ∧ vec4H 128 1 .rowmax .C = 7044 ∧ vec4H 1024 1 .rowmax .C = 19226 ∧
+    vec4H 256 4 .lazy .T = 9739 ∧ vec4H 256 4 .lazy .C = 12117 ∧ vec4H 256 4 .rowmax .T = 29931 ∧ vec4H 256 4 .rowmax .C = 35139 ∧
+    vec4H 512 2 .lazy .T = 9545 ∧ vec4H 512 2 .rowmax .T = 19583 ∧ vec4H 128 8 .lazy .T = 10129 ∧ vec4H 128 8 .rowmax .T = 50628 ∧
+    vec4H 256 3 .lazy .T = 7304 ∧ chain4 512 1 .lazy .T (merge4 512 .lazy .T) / 100 = 206173 ∧ chain4 512 1 .rowmax .T (merge4 512 .rowmax .T) / 100 = 422997 := by decide
+/-- vector shares at t = 1: lazy-T 35.3 % of the legs-2 block (39.7 % at legs 0), rowmax-C 90.8 % (102.1 % at legs 0: VECTOR-bound at 174.6 —
+    the review's flag); at 256-token blocks rowmax-T is 90.6 / 124.6 %; the 1 024-token block halves the rowmax cost per token (14.1 vs 19.1 ns) -/
+theorem T4r_chain_shares : pct 4772 13512 = 353 ∧ pct 4772 12011 = 397 ∧ pct 5867 13512 = 434 ∧ pct 9791 13512 = 725 ∧ pct 9791 12011 = 815 ∧
+    pct 12265 13512 = 908 ∧ pct 12265 12011 = 1021 ∧ 12011 < 12265 ∧ pct 7482 8257 = 906 ∧ pct 7482 6005 = 1246 ∧ pct 6328 3002 = 2108 ∧
+    pct 9447 27025 = 350 ∧ pct 14409 27025 = 533 ∧ 14409 * 1000 / 1024 = 14071 ∧ 9791 * 1000 / 512 = 19123 ∧ 9447 * 1000 / 1024 = 9225 ∧
+    4772 * 1000 / 512 = 9320 ∧ tn ((1024 * coreTok dH + 2 * 8 * fragB) * 8) gStream = 27025 := by decide
+theorem T4r_firstmax : firstMax4 512 1 .T = 22465792 ∧ firstMax4Ns 512 1 .T = 5200 ∧ firstMax4Ns 512 1 .C = 6508 ∧
+    firstMax4Ns 256 1 .T = 4501 ∧ firstMax4Ns 256 1 .C = 5138 ∧ 8192 * 137 / 100 = 11223 ∧ treeOps 512 = 47616 ∧
+    16 * call100 tRm16 / 100 = 125729 ∧ 20 * call100 tF16 / 100 = 40089 ∧ firstMaxOf 512 1 .rowmax .T = 0 := by decide
+/-- fixed cost at t = 1 (16-token tail at every 512-multiple under append-then-attend): lazy-T 19 328 = 2 × 4 772 + 428 + 4 156 + 5 200
+    (the first-block max the review found missing: round 3 said 11 328); lazy-C 26 831, rowmax-T 24 166, rowmax-C 33 119 -/
+theorem T4r_fixed : fixed4 32768 1 .lazy .T (merge4 512 .lazy .T) 1 1 = 19328 ∧ fixed4 32768 1 .lazy .C (merge4 512 .lazy .C) 1 1 = 26831 ∧
+    fixed4 32768 1 .rowmax .T (merge4 512 .rowmax .T) 1 1 = 24166 ∧ fixed4 32768 1 .rowmax .C (merge4 512 .rowmax .C) 1 1 = 33119 ∧
+    tail4Tok 32768 1 = 16 ∧ tail4Ops 32768 1 1 * 137 * 10 / 43200 = 4156 ∧ tail4Ops 32768 1 1 * 269 * 10 / 43200 = 8161 ∧
+    2 * 4772 + 428 + 4156 + 5200 = 19328 ∧ mask4 1 1 = 0 ∧ mask4 2 1 = 512 ∧ 512 * 137 * 10 / 43200 = 16 ∧
+    fixed4 32768 16 .lazy .T (merge4 256 .lazy .T) 4 8 = 71326 ∧ fixed4 32768 16 .rowmax .T (merge4 256 .rowmax .T) 4 8 = 93704 := by decide
+
+/-! ## T4r_t1 — the headline cells (`[R4-t1-*]`): L × G ∈ {169.2 (E21, the design page), 138.3 (session-1 loop), 174.6, 167.0} ×
+    legs ∈ {2 (headline), 0 (round-3 model)} × chain ∈ {lazy-T (headline), lazy-C, rowmax-T, rowmax-C} -/
+theorem T4r_t1_4k : step4H 4096 1 g256 .lazy .T 2 = 130872 ∧ step4H 4096 1 g256 .lazy .C 2 = 138375 ∧ step4H 4096 1 g256 .rowmax .T 2 = 135710 ∧
+    step4H 4096 1 g256 .rowmax .C 2 = 144663 ∧ step4H 4096 1 g256 .lazy .T 0 = 118480 ∧ step4H 4096 1 g256 .lazy .C 0 = 125983 ∧
+    step4H 4096 1 g256 .rowmax .T 0 = 123318 ∧ step4H 4096 1 g256 .rowmax .C 0 = 132271 ∧ step4H 4096 1 gK1_256 .lazy .T 2 = 155800 ∧
+    step4H 4096 1 gK1_256 .rowmax .C 2 = 169591 ∧ step4H 4096 1 gK1_256 .lazy .T 0 = 140632 ∧ step4H 4096 1 gStream .lazy .T 2 = 127424 ∧
+    step4H 4096 1 gStream .lazy .T 0 = 115416 ∧ step4H 4096 1 gShuf64 .lazy .T 2 = 132344 ∧ step4H 4096 1 gShuf64 .lazy .T 0 = 119784 ∧
+    usR 130872 = 131 ∧ usR (wallNs 130872) = 222 ∧ effRate 4096 8 128 1 130872 = 1282 ∧ pct 130872 tGemvUnit = 329 ∧ usR 155800 = 156 := by decide
+theorem T4r_t1_32k : step4H 32768 1 g256 .lazy .T 2 = 911680 ∧ step4H 32768 1 g256 .lazy .C 2 = 919183 ∧ step4H 32768 1 g256 .rowmax .T 2 = 916518 ∧
+    step4H 32768 1 g256 .rowmax .C 2 = 925471 ∧ step4H 32768 1 g256 .lazy .T 0 = 812544 ∧ step4H 32768 1 g256 .lazy .C 0 = 820047 ∧
+    step4H 32768 1 g256 .rowmax .T 0 = 817382 ∧ step4H 32768 1 g256 .rowmax .C 0 = 826335 ∧ step4H 32768 1 gK1_256 .lazy .T 2 = 1111104 ∧
+    step4H 32768 1 gK1_256 .rowmax .C 2 = 1124895 ∧ step4H 32768 1 gK1_256 .lazy .T 0 = 989760 ∧ step4H 32768 1 gStream .lazy .T 2 = 884096 ∧
+    step4H 32768 1 gStream .lazy .T 0 = 788032 ∧ step4H 32768 1 gStream .rowmax .C 0 = 818079 ∧ step4H 32768 1 gShuf64 .lazy .T 2 = 923456 ∧
+    step4H 32768 1 gShuf64 .lazy .T 0 = 822976 ∧ step4H 32768 1 g256 .lazy .T 1 = 862144 ∧
+    usR 911680 = 912 ∧ usR (wallNs 911680) = 1003 ∧ effRate 32768 8 128 1 911680 = 1472 ∧ pct 911680 tGemvUnit = 2291 ∧ usR 1111104 = 1111 ∧
+    usR 812544 = 813 ∧ usR 884096 = 884 ∧ usR 923456 = 923 ∧ usR 919183 = 919 ∧ usR 925471 = 925 ∧ usR 862144 = 862 := by decide
+theorem T4r_t1_128k : step4H 131072 1 g256 .lazy .T 2 = 3588736 ∧ step4H 131072 1 g256 .lazy .C 2 = 3596239 ∧ step4H 131072 1 g256 .rowmax .T 2 = 3593574 ∧
+    step4H 131072 1 g256 .rowmax .C 2 = 3602527 ∧ step4H 131072 1 g256 .lazy .T 0 = 3192192 ∧ step4H 131072 1 g256 .lazy .C 0 = 3199695 ∧
+    step4H 131072 1 g256 .rowmax .T 0 = 3197030 ∧ step4H 131072 1 g256 .rowmax .C 0 = 3205983 ∧ step4H 131072 1 gK1_256 .lazy .T 2 = 4386432 ∧
+    step4H 131072 1 gK1_256 .lazy .T 0 = 3901056 ∧ step4H 131072 1 gStream .lazy .T 2 = 3478400 ∧ step4H 131072 1 gStream .lazy .T 0 = 3094144 ∧
+    step4H 131072 1 gShuf64 .lazy .T 2 = 3635840 ∧ step4H 131072 1 gShuf64 .lazy .T 0 = 3233920 ∧ step4H 131072 1 g256 .lazy .T 1 = 3390592 ∧
+    usR 3588736 = 3589 ∧ effRate 131072 8 128 1 3588736 = 1496 ∧ pct 3588736 tGemvUnit = 9017 ∧ usR 4386432 = 4386 := by decide
+theorem T4r_t1_1M : step4H 1048576 1 g256 .lazy .T 2 = 28574592 ∧ step4H 1048576 1 g256 .lazy .C 2 = 28582095 ∧ step4H 1048576 1 g256 .rowmax .T 2 = 28579430 ∧
+    step4H 1048576 1 g256 .rowmax .C 2 = 28588383 ∧ step4H 1048576 1 g256 .lazy .T 0 = 25402240 ∧ step4H 1048576 1 g256 .lazy .C 0 = 25409743 ∧
+    step4H 1048576 1 g256 .rowmax .T 0 = 25407078 ∧ step4H 1048576 1 g256 .rowmax .C 0 = 25416031 ∧ step4H 1048576 1 gK1_256 .lazy .T 2 = 34956160 ∧
+    step4H 1048576 1 gK1_256 .lazy .T 0 = 31073152 ∧ step4H 1048576 1 gStream .lazy .T 2 = 27691904 ∧ step4H 1048576 1 gStream .lazy .T 0 = 24617856 ∧
+    step4H 1048576 1 gStream .rowmax .C 0 = 25151839 ∧ step4H 1048576 1 gShuf64 .lazy .T 2 = 28951424 ∧ step4H 1048576 1 gShuf64 .lazy .T 0 = 25736064 ∧
+    usR 28574592 = 28575 ∧ usR (wallNs 28574592) = 28666 ∧ effRate 1048576 8 128 1 28574592 = 1503 ∧ pct 28574592 tGemvUnit = 71795 ∧
+    usR 34956160 = 34956 ∧ usR 25402240 = 25402 := by decide
+/-- the binding engine at t = 1: the KV stream on every chain at every measured G with the bounce (slack 1 678 ns for rowmax-C at 169.2);
+    at legs 0 and 174.6 the rowmax-C chain is VECTOR-bound (12 265 > 12 011) — the review's flag (the fresh-set merge, 88 372 lane-eq, is
+    above the 77 418 line); lazy-T keeps 9 171 ns of slack on the design page -/
+theorem T4r_t1_binding : blockMax4 g256 .lazy .T (merge4 512 .lazy .T) 1 2 = ddr4Block g256 1 2 ∧ blockMax4 g256 .rowmax .C (merge4 512 .rowmax .C) 1 2 = ddr4Block g256 1 2 ∧
+    blockMax4 gK1_256 .rowmax .C (merge4 512 .rowmax .C) 1 2 = ddr4Block gK1_256 1 2 ∧ blockMax4 gStream .rowmax .C (merge4 512 .rowmax .C) 1 2 = ddr4Block gStream 1 2 ∧
+    blockMax4 g256 .rowmax .C (merge4 512 .rowmax .C) 1 0 = ddr4Block g256 1 0 ∧ blockMax4 gStream .rowmax .C (merge4 512 .rowmax .C) 1 0 = vec4H 512 1 .rowmax .C ∧
+    blockMax4 gStream .lazy .T (merge4 512 .lazy .T) 1 0 = ddr4Block gStream 1 0 ∧ 13943 - 4772 = 9171 ∧ 13943 - 12265 = 1678 ∧ 12394 - 12265 = 129 := by decide
+/-- t = 2 differs from t = 1 by the 16 ns mask op only; the round-3 → round-4 moves of the design-page cells: lazy-T +13.3 % at 32k /
+    +12.5 % at 1M with both bounce legs, +1.0 % / +0.0 % without them (the first-block max and the 16-token tail) -/
+theorem T4r_moved : step3H 32768 1 g256 .lazy .T = 804544 ∧ step3H 32768 1 g256 .rowmax .T = 812036 ∧ step3H 1048576 1 g256 .lazy .T = 25394240 ∧
+    step3H 32768 1 gShuf64 .rowmax .T = 822468 ∧ pct (911680 - 804544) 804544 = 133 ∧ pct (28574592 - 25394240) 25394240 = 125 ∧
+    pct (812544 - 804544) 804544 = 10 ∧ pct (25402240 - 25394240) 25394240 = 0 ∧ pct (923456 - 822468) 822468 = 123 ∧
+    step4H 32768 2 g256 .lazy .T 2 = 911696 ∧ 911696 - 911680 = 16 ∧ step3H 32768 1 gK1_256 .lazy .T = 981760 := by decide
+
+/-! ## linear forms, the merge as a hypothesis variable (`[R4-merge-threshold-*]`), rows* -/
+theorem chain4_rowmax (b mt m : Nat) (c : Conv) : chain4 b mt .rowmax c m = chain4Rowmax b mt (unitF16 c) (unitF32 c) cExp100 m := rfl
+theorem chain4_lazy (b mt m : Nat) (c : Conv) : chain4 b mt .lazy c m = chain4Lazy b mt (unitF32 c) cExp100 m := rfl
+theorem vec4_lazyT_512 (m : Nat) : vec4 512 1 .lazy .T m = (19074176 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_lazy, unitT32]; unfold chain4Lazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+theorem vec4_lazyC_512 (m : Nat) : vec4 512 1 .lazy .C m = (22318208 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_lazy, unitC32]; unfold chain4Lazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+theorem vec4_rowmaxT_512 (m : Nat) : vec4 512 1 .rowmax .T m = (35253504 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_rowmax, unitT16, unitT32]; unfold chain4Rowmax
+  have ht : treeOps 512 = 47616 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec4_rowmaxC_512 (m : Nat) : vec4 512 1 .rowmax .C m = (44150016 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_rowmax, unitC16, unitC32]; unfold chain4Rowmax
+  have ht : treeOps 512 = 47616 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec4_rowmaxT_256_4 (m : Nat) : vec4 256 4 .rowmax .T m = 4 * (25840896 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_rowmax, unitT16, unitT32]; unfold chain4Rowmax
+  have ht : treeOps 256 = 23040 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec4_rowmaxT_128_8 (m : Nat) : vec4 128 8 .rowmax .T m = 8 * (21134592 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_rowmax, unitT16, unitT32]; unfold chain4Rowmax
+  have ht : treeOps 128 = 10752 := by decide
+  rw [ht]; unfold call100 lanePerNs10 tRm16 tF16 cExp100 rVecCore; omega
+theorem vec4_lazyT_256_4 (m : Nat) : vec4 256 4 .lazy .T m = 4 * (9537088 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_lazy, unitT32]; unfold chain4Lazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+theorem vec4_lazyT_128_8 (m : Nat) : vec4 128 8 .lazy .T m = 8 * (4768544 + m) * 10 / 43200 := by
+  unfold vec4; rw [chain4_lazy, unitT32]; unfold chain4Lazy call100 lanePerNs10 tRm16 cExp100 rVecCore; omega
+/-- t = 1 DDR-bound at 174.6 with both bounce legs iff merge ≤ 393 019 (lazy-T) / 142 261 (rowmax-C) lane-eq; without the bounce
+    iff merge ≤ 328 176 / 77 418 — the fresh-set rowmax-C merge (88 372) exceeds the legs-0 line (iffs over the merge count) -/
+theorem T4r_merge_threshold (m : Nat) : (vec4 512 1 .lazy .T m ≤ ddr4Block gStream 1 2 ↔ m ≤ 39301983) ∧
+    (vec4 512 1 .rowmax .C m ≤ ddr4Block gStream 1 2 ↔ m ≤ 14226143) ∧ (vec4 512 1 .lazy .T m ≤ ddr4Block gStream 1 0 ↔ m ≤ 32817663) ∧
+    (vec4 512 1 .rowmax .C m ≤ ddr4Block gStream 1 0 ↔ m ≤ 7741823) ∧ (vec4 512 1 .rowmax .T m ≤ ddr4Block gStream 1 2 ↔ m ≤ 23122655) := by
+  have e2 : ddr4Block gStream 1 2 = 13512 := by decide
+  have e0 : ddr4Block gStream 1 0 = 12011 := by decide
+  rw [e2, e0, vec4_lazyT_512, vec4_rowmaxC_512, vec4_rowmaxT_512]
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T4r_merge_cells : merge4 512 .lazy .T ≤ 39301983 ∧ merge4 512 .rowmax .C ≤ 14226143 ∧ 7741823 < merge4 512 .rowmax .C ∧
+    39301983 / 100 = 393019 ∧ 14226143 / 100 = 142261 ∧ 7741823 / 100 = 77418 ∧ 32817663 / 100 = 328176 ∧ merge4 512 .rowmax .C / 100 = 88372 := by decide
+/-- rows*: with the bounce the lazy-T chain reaches the block at mt = 4 (rows* = 64, t ≥ 8); without it at mt = 3 (48, t ≥ 6);
+    rowmax-T at mt = 2 (32, t ≥ 4) either way; rowmax-C at mt = 1 without the bounce (the review's flag) -/
+theorem T4r_rows_star : vec4H 256 4 .lazy .T ≥ ddr4Block gStream 4 2 ∧ vec4H 256 3 .lazy .T < ddr4Block gStream 3 2 ∧ vec4H 512 2 .lazy .T < ddr4Block gStream 2 2 ∧
+    vec4H 512 1 .lazy .T < ddr4Block gStream 1 2 ∧ vec4H 256 3 .lazy .T ≥ ddr4Block gStream 3 0 ∧ vec4H 512 2 .lazy .T < ddr4Block gStream 2 0 ∧
+    vec4H 512 2 .rowmax .T ≥ ddr4Block gStream 2 2 ∧ vec4H 512 1 .rowmax .T < ddr4Block gStream 1 2 ∧ vec4H 512 1 .rowmax .C ≥ ddr4Block gStream 1 0 ∧
+    vec4H 512 1 .rowmax .C < ddr4Block gStream 1 2 ∧ vec4H 512 2 .rowmax .C ≥ ddr4Block gStream 2 2 := by decide
+
+/-! ## T4r_regime, T4r_t16, T4r_s4 — verify batches (`[R4-regime-*]` `[R4-t16-*]` `[R4-s4-threshold-*]`) -/
+/-- the regime map at 32k on the design page with the bounce: t = 1, 2 KV-bound on every chain (912 / 919 / 917 / 925 µs); t = 4 KV-bound on
+    lazy (1 030 / 1 045) and vector-bound on rowmax (1 301 / 1 636); t = 8 and 16 vector-bound on every chain (lazy-T 1 301 / 2 565,
+    rowmax-T 3 908 / 7 756); without the bounce t = 4 lazy is 832 / 847 and the vector-bound cells do not move -/
+theorem T4r_regime : usR (step4H 32768 1 g256 .lazy .T 2) = 912 ∧ usR (step4H 32768 1 g256 .lazy .C 2) = 919 ∧ usR (step4H 32768 1 g256 .rowmax .T 2) = 917 ∧
+    usR (step4H 32768 1 g256 .rowmax .C 2) = 925 ∧ usR (step4H 32768 2 g256 .rowmax .C 2) = 926 ∧
+    usR (step4H 32768 4 g256 .lazy .T 2) = 1030 ∧ usR (step4H 32768 4 g256 .lazy .C 2) = 1045 ∧ usR (step4H 32768 4 g256 .rowmax .T 2) = 1301 ∧
+    usR (step4H 32768 4 g256 .rowmax .C 2) = 1636 ∧ usR (step4H 32768 8 g256 .lazy .T 2) = 1301 ∧ usR (step4H 32768 8 g256 .lazy .C 2) = 1629 ∧
+    usR (step4H 32768 8 g256 .rowmax .T 2) = 3908 ∧ usR (step4H 32768 8 g256 .rowmax .C 2) = 4601 ∧ usR (step4H 32768 16 g256 .lazy .T 2) = 2565 ∧
+    usR (step4H 32768 16 g256 .lazy .C 2) = 3213 ∧ usR (step4H 32768 16 g256 .rowmax .T 2) = 7756 ∧ usR (step4H 32768 16 g256 .rowmax .C 2) = 9132 ∧
+    usR (step4H 32768 4 g256 .lazy .T 0) = 832 ∧ usR (step4H 32768 4 g256 .lazy .C 0) = 847 ∧ step4H 32768 8 g256 .rowmax .T 0 = step4H 32768 8 g256 .rowmax .T 2 ∧
+    step4H 32768 16 g256 .lazy .T 0 = step4H 32768 16 g256 .lazy .T 2 ∧ pct 9545 15493 = 616 ∧ pct 9739 9295 = 1048 ∧ pct 29931 9295 = 3220 := by decide
+/-- t = 16 two passes vs S4 at the fresh-set merge: lazy-T 2 565 / 2 680 µs at 32k (S4 +4.5 %), 79.9 / 83.1 ms at 1M; rowmax-T 7 756 / 13 096
+    (+68.8 %), 245.3 / 414.9 ms — two passes win on both chains; round 3's lazy-T cell was 3 162 (the Z difference and the pack merge) -/
+theorem T4r_t16 : step4H 32768 16 gStream .lazy .T 2 = 2564510 ∧ step4S4 32768 gStream .lazy .T 2 = 2680341 ∧ step4H 32768 16 gStream .rowmax .T 2 = 7756040 ∧
+    step4S4 32768 gStream .rowmax .T 2 = 13095866 ∧ step4H 1048576 16 gStream .lazy .T 2 = 79853214 ∧ step4S4 1048576 gStream .lazy .T 2 = 83064085 ∧
+    step4H 1048576 16 gStream .rowmax .T 2 = 245288456 ∧ step4S4 1048576 gStream .rowmax .T 2 = 414879674 ∧ step4H 32768 16 gStream .lazy .C 2 = 3212748 ∧
+    step4S4 32768 gStream .lazy .C 2 = 3425450 ∧ pct 2680341 2564510 = 1045 ∧ pct 13095866 7756040 = 1688 ∧ pct 83064085 79853214 = 1040 ∧
+    usR 2564510 = 2565 ∧ usR 7756040 = 7756 ∧ 79853214 / 100000 = 798 ∧ step3H 32768 16 gStream .lazy .T = 3161876 := by decide
+theorem bm4_vec (G : Nat) (v : Var) (c : Conv) (m mt legs : Nat) (h1 : ddr4Block G mt legs ≤ vec4 (blockOf mt) mt v c m)
+    (h2 : mmaBlock mt dH ≤ vec4 (blockOf mt) mt v c m) (h3 : loaderBlock mt ≤ vec4 (blockOf mt) mt v c m) :
+    blockMax4 G v c m mt legs = vec4 (blockOf mt) mt v c m := by
+  unfold blockMax4; rw [Nat.max_eq_right h1, Nat.max_eq_left h2, Nat.max_eq_left h3]
+theorem bm4_ddr (G : Nat) (v : Var) (c : Conv) (m mt legs : Nat) (h1 : vec4 (blockOf mt) mt v c m ≤ ddr4Block G mt legs)
+    (h2 : mmaBlock mt dH ≤ ddr4Block G mt legs) (h3 : loaderBlock mt ≤ ddr4Block G mt legs) :
+    blockMax4 G v c m mt legs = ddr4Block G mt legs := by
+  unfold blockMax4; rw [Nat.max_eq_left h1, Nat.max_eq_left h2, Nat.max_eq_left h3]
+/-- S4 (one pass, mt = 8, 128-token blocks) loses to two passes at 32k on the rowmax chain for EVERY merge count (both vector-bound) -/
+theorem T4r_s4_dominated_rowmaxT (m : Nat) : step4 32768 16 gStream .rowmax .T m 2 false < step4 32768 16 gStream .rowmax .T m 2 true := by
+  have hm4 : mtS 16 false = 4 := by decide
+  have hm8 : mtS 16 true = 8 := by decide
+  have hp2 : pn4 32768 16 false = 256 := by decide
+  have hp1 : pn4 32768 16 true = 256 := by decide
+  have hb4 : blockOf 4 = 256 := by decide
+  have hb8 : blockOf 8 = 128 := by decide
+  have hmo : mtOf (rowsOf 16 gH) = 8 := by decide
+  have hd4 : drain4 4 (rDrainM 4) = 459 := by decide
+  have hd8 : drain4 8 (rDrainM 8) = 459 := by decide
+  have hddr4 : ddr4Block gStream 4 2 = 9008 := by decide
+  have hddr8 : ddr4Block gStream 8 2 = 6005 := by decide
+  have hmm4 : mmaBlock 4 dH = 1920 := by decide
+  have hmm8 : mmaBlock 8 dH = 1920 := by decide
+  have hl4 : loaderBlock 4 = 1236 := by decide
+  have hl8 : loaderBlock 8 = 1236 := by decide
+  have hf4 : firstMaxOf (blockOf 4) 4 .rowmax .T = 0 := by decide
+  have hf8 : firstMaxOf (blockOf 8) 8 .rowmax .T = 0 := by decide
+  have h4 : blockMax4 gStream .rowmax .T m 4 2 = vec4 (blockOf 4) 4 .rowmax .T m :=
+    bm4_vec _ _ _ _ _ _ (by rw [hb4, hddr4, vec4_rowmaxT_256_4]; omega) (by rw [hb4, hmm4, vec4_rowmaxT_256_4]; omega)
+      (by rw [hb4, hl4, vec4_rowmaxT_256_4]; omega)
+  have h8 : blockMax4 gStream .rowmax .T m 8 2 = vec4 (blockOf 8) 8 .rowmax .T m :=
+    bm4_vec _ _ _ _ _ _ (by rw [hb8, hddr8, vec4_rowmaxT_128_8]; omega) (by rw [hb8, hmm8, vec4_rowmaxT_128_8]; omega)
+      (by rw [hb8, hl8, vec4_rowmaxT_128_8]; omega)
+  unfold step4
+  rw [hm4, hm8, hp2, hp1, h4, h8]
+  unfold fixed4
+  rw [hf4, hf8, hb4, hb8, hd4, hd8, hmo, vec4_rowmaxT_256_4, vec4_rowmaxT_128_8, unitT32]
+  unfold rVecCore; omega
+/-- on the lazy chain S4 loses for every merge ≥ 640 lane-eq (63 916 in the ×100 units: below it the DDR-bound two-pass cell would lose by
+    ≤ 30 µs — a regime no itemisation reaches: the fresh-set merge is 7 014 lane-eq at the 128-token block, 9 820 at 256); the two-pass block is
+    DDR-bound up to 1 916 lane-eq and vector-bound above, S4 is vector-bound at every merge -/
+theorem T4r_s4_dominated_lazyT (m : Nat) (hm : 63916 ≤ m) : step4 32768 16 gStream .lazy .T m 2 false < step4 32768 16 gStream .lazy .T m 2 true := by
+  have hm4 : mtS 16 false = 4 := by decide
+  have hm8 : mtS 16 true = 8 := by decide
+  have hp2 : pn4 32768 16 false = 256 := by decide
+  have hp1 : pn4 32768 16 true = 256 := by decide
+  have hb4 : blockOf 4 = 256 := by decide
+  have hb8 : blockOf 8 = 128 := by decide
+  have hmo : mtOf (rowsOf 16 gH) = 8 := by decide
+  have hd4 : drain4 4 (rDrainM 4) = 459 := by decide
+  have hd8 : drain4 8 (rDrainM 8) = 459 := by decide
+  have hddr4 : ddr4Block gStream 4 2 = 9008 := by decide
+  have hddr8 : ddr4Block gStream 8 2 = 6005 := by decide
+  have hmm4 : mmaBlock 4 dH = 1920 := by decide
+  have hmm8 : mmaBlock 8 dH = 1920 := by decide
+  have hl4 : loaderBlock 4 = 1236 := by decide
+  have hl8 : loaderBlock 8 = 1236 := by decide
+  have hf4 : firstMaxOf (blockOf 4) 4 .lazy .T = 18006 := by decide
+  have hf8 : firstMaxOf (blockOf 8) 8 .lazy .T = 33217 := by decide
+  have h4 : blockMax4 gStream .lazy .T m 4 2 = max 9008 (4 * (9537088 + m) * 10 / 43200) := by
+    unfold blockMax4; rw [hb4, hddr4, hmm4, hl4, vec4_lazyT_256_4]; omega
+  have h8 : blockMax4 gStream .lazy .T m 8 2 = 8 * (4768544 + m) * 10 / 43200 := by
+    unfold blockMax4; rw [hb8, hddr8, hmm8, hl8, vec4_lazyT_128_8]; omega
+  unfold step4
+  rw [hm4, hm8, hp2, hp1, h4, h8]
+  unfold fixed4
+  rw [hf4, hf8, hb4, hb8, hd4, hd8, hmo, vec4_lazyT_256_4, vec4_lazyT_128_8, unitT32]
+  unfold rVecCore; omega
+theorem T4r_s4_cells : step4 32768 16 gStream .lazy .T 63915 2 true < step4 32768 16 gStream .lazy .T 63915 2 false ∧
+    step4 32768 16 gStream .lazy .T 63916 2 false < step4 32768 16 gStream .lazy .T 63916 2 true ∧ 63916 / 100 = 639 ∧
+    merge4 128 .lazy .T = 701440 ∧ merge4 256 .lazy .T = 982016 ∧ 63916 ≤ merge4 128 .lazy .T ∧ 63916 ≤ merge4 256 .lazy .T ∧
+    vec4 256 4 .lazy .T 191552 = 9008 ∧ vec4 256 4 .lazy .T 191551 = 9007 := by decide
+
+/-! ## T4r_i8, T4r_lazy_trip — KV-int8 × lazy (review item 4), the lazy economics and switch policy (§3.4 closure) -/
+/-- KV-int8 at 169.2 with the bounce: rowmax 651 µs / 20.1 ms (vector-bound: 9 791 > the 7 746 ns half-stream block), lazy 515 / 15.9 —
+    but the lazy cell is UNREACHABLE as specified: the fixed P scale 127 assumes p ≤ 1 and the lazy P reaches e⁸ ≈ 2 981 (127 × 2 981 saturates i8) -/
+theorem T4r_i8 : step4I8H 32768 1 g256 .rowmax .T 2 = 650790 ∧ step4I8H 1048576 1 g256 .rowmax .T 2 = 20076134 ∧
+    step4I8H 32768 1 g256 .lazy .T 2 = 515072 ∧ step4I8H 1048576 1 g256 .lazy .T 2 = 15883136 ∧ ddr4BlockI8 g256 1 2 = 7746 ∧
+    7746 < vec4H 512 1 .rowmax .T ∧ vec4H 512 1 .lazy .T ≤ 7746 ∧ 127 * 2981 = 378587 ∧ 127 < 127 * 2981 ∧ usR 650790 = 651 ∧ usR 515072 = 515 := by decide
+/-- per 512-token block the lazy chain saves 5 019 ns; a trip costs ≈ 10 699 (the rowmax chain + 480 ns of re-issued PV calls + a 428 ns
+    re-drain): the variant pays iff fewer than one trip per 2.1 blocks; a needle profile costs +685 µs at 32k (64 blocks) / +21.9 ms at 1M;
+    the switch after k = 3 trips bounds the worst case at +32 µs plus the rowmax cells -/
+theorem T4r_lazy_trip : 9791 - 4772 = 5019 ∧ 9791 + 32 * cMma + 428 = 10699 ∧ 10699 * 10 / 5019 = 21 ∧ 64 * 10699 = 684736 ∧ usR 684736 = 685 ∧
+    2048 * 10699 / 1000 = 21911 ∧ 3 * 10699 = 32097 ∧ 5019 * 64 = 321216 ∧ vec4H 512 1 .rowmax .T - vec4H 512 1 .lazy .T = 5019 := by decide
+
+/-! ## T4r_tail — causality at t > 1 (review item 6): tails of 32 tokens, the per-row mask -/
+/-- under append-then-attend the tail holds the open group plus the t new tokens: ≤ 15 + t for every L ≥ t (31 at t = 16; the
+    16-token tail of round 3 cannot hold it); the vector tail at the worst L is 4.2 / 4.4 / 9.9 / 23.9 / 64.4 µs at t = 1 / 2 / 4 / 8 / 16 -/
+theorem T4r_tail_bound (L t : Nat) (h : t ≤ L) : tail4Tok L t ≤ 15 + t ∧ lMatrix4 L t + tail4Tok L t = L := by
+  unfold tail4Tok lMatrix4; have := Nat.mod_lt (L - t) (show 16 > 0 by decide); omega
+theorem T4r_tail : tail4Tok 32783 16 = 31 ∧ tail4Tok 32768 1 = 16 ∧ tail4Tok 32769 1 = 1 ∧ tail4Tok 32769 2 = 17 ∧ tail4Tok 32771 4 = 19 ∧
+    tail4Tok 32775 8 = 23 ∧ tail4Tok 32770 2 = 2 ∧ 32 * dH * 2 = 8192 ∧ 31 * dH * 16 * 8 * 4 = 2031616 ∧ 2031616 * 137 * 10 / 43200 = 64428 ∧
+    16 * dH * 16 * 1 * 4 * 137 * 10 / 43200 = 4156 ∧ 19 * dH * 16 * 2 * 4 * 137 * 10 / 43200 = 9872 ∧ 23 * dH * 16 * 4 * 4 * 137 * 10 / 43200 = 23900 ∧
+    mask4 16 8 = 4096 ∧ 4096 * 137 * 10 / 43200 = 129 ∧ 15 < 16 := by decide
+
+/-! ## T4r_sink, T4r_drift_online, T4r_sum_error — numerics (review items 5, 7) -/
+/-- the f16 cast flushes p < 2⁻²⁴ ≈ 6·10⁻⁸: a planted sink row loses 122 / 976 / 3 906 / 31 249 ppm at 4k / 32k / 128k / 1M (one-sided, several % at 1M) -/
+theorem T4r_sink : sinkLostPpm 4096 = 122 ∧ sinkLostPpm 32768 = 976 ∧ sinkLostPpm 131072 = 3906 ∧ sinkLostPpm 1048576 = 31249 ∧
+    2 ^ 24 = 16777216 ∧ 2 ^ 25 = 33554432 ∧ 1000 < 3906 ∧ 31249 * 100 / 1000000 = 3 ∧ 65504 < 2 ^ 16 := by decide
+/-- the online chain with fresh sets and the two-level (block-local, then running) accumulation: longest f32 chains O 2 052 / S 2 062 at 1M
+    (512-token blocks) → 123 + 123 = 246 ppm deterministic first-order — under the 1 000 ppm ship line; 4 098 / 4 106 (490 ppm) at
+    256-token blocks, 1 032 / 1 046 (125 ppm) at 1 024; a single-level O chain of L/128 = 8 192 adds would be 489 ppm; 32k: 10 ppm;
+    the retired region-difference bounds (1 953 / 3 906 ppm) exceeded the line -/
+theorem T4r_drift_online : chainO 1048576 512 = 2052 ∧ chainS 1048576 512 = 2062 ∧ relPpm 2052 = 123 ∧ relPpm 2062 = 123 ∧ 123 + 123 < 1000 ∧
+    chainO 1048576 256 = 4098 ∧ chainS 1048576 256 = 4106 ∧ relPpm 4098 = 245 ∧ relPpm 4106 = 245 ∧ 245 + 245 < 1000 ∧
+    chainO 1048576 1024 = 1032 ∧ chainS 1048576 1024 = 1046 ∧ relPpm 1032 = 62 ∧ relPpm 1046 = 63 ∧
+    chainO 32768 512 = 68 ∧ chainS 32768 512 = 78 ∧ relPpm 68 = 5 ∧ relPpm 78 = 5 ∧ 1048576 / 128 = 8192 ∧ relPpm 8192 = 489 ∧ relPpm 16383 = 977 ∧
+    isqrtLe 2052 = 45 ∧ ulpU 21856 * 1000000 / 2 ^ 24 = 1953 ∧ 1000 < 1953 ∧ ulpU 43712 * 1000000 / 2 ^ 24 = 3906 ∧ (1000000 + 2 ^ 24 - 1) / 2 ^ 24 = 1 := by decide
+/-- the telescoped error of n rounded additions is at most n times the per-addition bound (the structural half of the first-order
+    bound: with |e_k| ≤ 2⁻²⁴ · M for every partial sum ≤ M, the chain of n adds errs by ≤ n · 2⁻²⁴ · M) -/
+theorem T4r_sum_error (e : Nat → Int) (b : Nat) (h : ∀ i, (e i).natAbs ≤ b) : ∀ n, (errSum e n).natAbs ≤ n * b := by
+  intro n
+  induction n with
+  | zero => simp [errSum]
+  | succ n ih =>
+    unfold errSum
+    have h1 := h n
+    have h2 := Int.natAbs_add_le (errSum e n) (e n)
+    rw [Nat.succ_mul]
+    omega
+
+/-! ## T4r_stride, T4r_page256 — the C_o nesting (review item 8) and the 256 KiB page (item 11) -/
+/-- C_o f32 nesting: chunk (f, g) at f·8192 + g·1024, element (r, j) at + r·64 + j·4 — row r of fragment f is 8 runs of 64 B at stride 1 024 B
+    from f·8192 + r·64; after the f16 cast 32 B runs at stride 512 B from f·4096 + r·32; an m = 64 call: stride 4 096 B; the map is injective on
+    (f < 4, g < 8, r < 16, j < 16) and stays inside the 32 KiB of four fresh sets -/
+theorem T4r_stride : coAddr 0 1 0 0 - coAddr 0 0 0 0 = 1024 ∧ coAddr 1 0 0 0 = 8192 ∧ coAddr 0 0 1 0 = 64 ∧ coAddr 0 0 0 1 = 4 ∧
+    coAddr16 0 1 0 0 - coAddr16 0 0 0 0 = 512 ∧ coAddr16 1 0 0 0 = 4096 ∧ coAddr16 0 0 1 0 = 32 ∧ coAddrM64 1 0 0 - coAddrM64 0 0 0 = 4096 ∧
+    coAddrM64 0 1 0 = 64 ∧ coAddr 3 7 15 15 = 32764 ∧ 16 * 16 * 4 = 1024 ∧ 64 * 16 * 4 = 4096 ∧ 16 * dH * 4 = 8192 := by decide
+theorem T4r_stride_runs (f g r j : Nat) : coAddr f (g + 1) r j = coAddr f g r j + 1024 ∧ coAddr16 f (g + 1) r j = coAddr16 f g r j + 512 ∧
+    coAddrM64 (g + 1) r j = coAddrM64 g r j + 4096 ∧ coAddr f g r j = f * 8192 + r * 64 + g * 1024 + j * 4 := by
+  unfold coAddr coAddr16 coAddrM64; omega
+theorem T4r_stride_injective (f g r j f' g' r' j' : Nat) (_hf : f < 4) (hg : g < 8) (hr : r < 16) (hj : j < 16)
+    (_hf' : f' < 4) (hg' : g' < 8) (hr' : r' < 16) (hj' : j' < 16) (h : coAddr f g r j = coAddr f' g' r' j') :
+    f = f' ∧ g = g' ∧ r = r' ∧ j = j' := by
+  unfold coAddr at h; omega
+theorem T4r_stride_range (f g r j : Nat) (hf : f < 4) (hg : g < 8) (hr : r < 16) (hj : j < 16) : coAddr f g r j < 32768 ∧ coAddr f g r j % 4 = 0 := by
+  unfold coAddr; omega
+/-- a 256 KiB page = four 64 KiB sub-pages (sub-page (l mod 1024) div 256): the K and V maps on [0, 1024) × [0, 128) are bijections onto the
+    even bytes of [0, 262 144) with explicit inverses; the 4 KiB table window then covers 512 × 1 024 = 524 288 tokens (131 072 at 64 KiB) -/
+theorem T4r_page256_range (l j : Nat) (hl : l < 1024) (hj : j < 128) : kAddr256 l j < 262144 ∧ kAddr256 l j % 2 = 0 ∧ vAddr256 l j < 262144 ∧ vAddr256 l j % 2 = 0 := by
+  unfold kAddr256 vAddr256 kAddr vAddr; omega
+theorem T4r_page256_k_injective (l j l' j' : Nat) (hl : l < 1024) (hj : j < 128) (hl' : l' < 1024) (hj' : j' < 128)
+    (h : kAddr256 l j = kAddr256 l' j') : l = l' ∧ j = j' := by
+  unfold kAddr256 kAddr at h; omega
+theorem T4r_page256_v_injective (l j l' j' : Nat) (hl : l < 1024) (hj : j < 128) (hl' : l' < 1024) (hj' : j' < 128)
+    (h : vAddr256 l j = vAddr256 l' j') : l = l' ∧ j = j' := by
+  unfold vAddr256 vAddr at h; omega
+theorem T4r_page256_k_inverse (l j : Nat) (hl : l < 1024) (hj : j < 128) : kInv256L (kAddr256 l j / 2) = l ∧ kInv256J (kAddr256 l j / 2) = j := by
+  unfold kInv256L kInv256J kAddr256 kAddr kInvL kInvJ; omega
+theorem T4r_page256_v_inverse (l j : Nat) (hl : l < 1024) (hj : j < 128) : vInv256L (vAddr256 l j / 2) = l ∧ vInv256J (vAddr256 l j / 2) = j := by
+  have hr := T_vpage_range (l % 256) j (Nat.mod_lt _ (by decide)) hj
+  have hb := T_vpage_bijection (l % 256) j (Nat.mod_lt _ (by decide)) hj
+  unfold vInv256L vInv256J vAddr256
+  generalize hv : vAddr (l % 256) j = v at hr hb
+  clear hv
+  obtain ⟨hr1, _hr2⟩ := hr
+  obtain ⟨hb1, hb2⟩ := hb
+  generalize ha : (l % 1024) / 256 = a
+  have hw : v / 2 < 32768 := by omega
+  have e1 : (a * 65536 + v) / 2 = a * 32768 + v / 2 := by
+    have h65 : a * 65536 = a * 32768 * 2 := by rw [Nat.mul_assoc]
+    rw [h65, Nat.add_comm, Nat.add_mul_div_right _ _ (by decide : 0 < 2), Nat.add_comm]
+  have e2 : (a * 32768 + v / 2) / 32768 = a := by
+    rw [Nat.add_comm, Nat.add_mul_div_right _ _ (by decide : 0 < 32768), Nat.div_eq_of_lt hw, Nat.zero_add]
+  have e3 : (a * 32768 + v / 2) % 32768 = v / 2 := by
+    rw [Nat.add_comm, Nat.add_mul_mod_self_right, Nat.mod_eq_of_lt hw]
+  rw [e1, e2, e3, hb1, hb2]
+  constructor
+  · omega
+  · rfl
+theorem T4r_page256_cells : kAddr256 300 5 = 74122 ∧ kAddr 44 5 = 8586 ∧ vAddr256 1023 127 = 262142 ∧ kAddr256 1023 127 = 262142 ∧
+    512 * 1024 = 524288 ∧ ptWindowEntries * pageTok (256 * KiB) 128 = 524288 ∧ kAddr256 255 127 = kAddr 255 127 ∧ kAddr256 256 0 = 65536 := by decide
+
+/-! ## T4r_waste — the page-waste term the planner lacked (review item 11; `[R4-waste-*]`) -/
+/-- worst tail waste 1.00 / 4.00 / 16.00 MiB per (layer, sequence) at 64 KiB / 256 KiB / 1 MiB pages: 60 MiB per 15-layer dense die at
+    256 KiB (480 MiB at B = 8), 16 MiB per 4-layer MoE die; a 30-layer instance die carries 120 MiB — above every instance-fit margin
+    (3.3 / 15.0 / 24.5 / 2.7 MB), and even the 64 KiB waste (30 MiB) exceeds them: the minimal int4 share x rises by ≈ 3 ‰; the dense 1M
+    KV-int8 layout keeps 1.59 GB of its 1.66 GB margin -/
+theorem T4r_waste : pageWaste 65536 = 1044480 ∧ pageWaste 262144 = 4190208 ∧ pageWaste 1048576 = 16773120 ∧ pageWaste 262144 ≤ 4 * MiB ∧
+    (15 * 4190208 + MiB / 2) / MiB = 60 ∧ (15 * 8 * 4190208 + MiB / 2) / MiB = 480 ∧ (4 * 4190208 + MiB / 2) / MiB = 16 ∧
+    (15 * 16 * 4190208 + MiB / 2) / MiB = 959 ∧ 30 * 4190208 = 125706240 ∧ marginInstMoe32k < 125706240 ∧ marginInstDense128k < 125706240 ∧
+    marginInstDense32k < 125706240 ∧ marginInstMoe1M < 125706240 ∧ 30 * 1044480 = 31334400 ∧ marginInstMoe32k < 31334400 ∧
+    15 * 4190208 ≤ marginDense1Mi8 ∧ marginDense1Mi8 - 15 * 4190208 = 1593887744 ∧ 15 * 16773120 ≤ marginDense1Mi8 ∧
+    (125706240 * 21 + 500000000) / 1000000000 = 3 ∧ (125706240 * 23 + 500000000) / 1000000000 = 3 := by decide
+
+/-! ## T4r_form, T4r_crossover, T4r_fleet — closed forms of the t = 1 lazy-T step for every L and every G ≤ 174.6, with and without the bounce -/
+/-- with both bounce legs: step = nb₄(L) · ⌊23 592 960 / G⌋ + 15 172 + the tail, nb₄(L) = ⌈16⌊(L−1)/16⌋ / 512⌉ (the block is DDR-bound on
+    every G ≤ 174.6: 13 512 ≥ the 4 772 ns chain) -/
+theorem T4r_form_lazyT2 (L G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    step4H L 1 G .lazy .T 2 = ((16 * ((L - 1) / 16) + 511) / 512) * (23592960 / G) + 15172 + ((L - 1) % 16 + 1) * 8192 * 137 * 10 / 43200 := by
+  have hm : mtS 1 false = 1 := by decide
+  have hp : pSel (rowsOf 1 gH) false = 1 := by decide
+  have hmo : mtOf (rowsOf 1 gH) = 1 := by decide
+  have hbl : blockOf 1 = 512 := by decide
+  have hbyte : (blockOf 1 * coreTok dH + bounceBytes 1 2) * 8 * 10 = 23592960 := by decide
+  have hddr : ddr4Block G 1 2 = 23592960 / G := by unfold ddr4Block tn; rw [hbyte]
+  have hge : 13512 ≤ 23592960 / G := by
+    have := Nat.div_le_div_left (a := 23592960) h2 h1
+    have e : 23592960 / gStream = 13512 := by decide
+    omega
+  have hv : vec4 (blockOf 1) 1 .lazy .T (merge4 (blockOf 1) .lazy .T) = 4772 := by decide
+  have hmm : mmaBlock 1 dH = 960 := by decide
+  have hl : loaderBlock 1 = 618 := by decide
+  have hd : drain4 1 (rDrainM 1) = 428 := by decide
+  have hfm : firstMaxOf (blockOf 1) 1 .lazy .T = 5200 := by decide
+  have hmask : mask4 1 1 = 0 := by decide
+  have hmax : blockMax4 G .lazy .T (merge4 (blockOf 1) .lazy .T) 1 2 = 23592960 / G := by
+    rw [← hddr]; exact bm4_ddr _ _ _ _ _ _ (by rw [hv, hddr]; omega) (by rw [hmm, hddr]; omega) (by rw [hl, hddr]; omega)
+  unfold step4H step4 pn4
+  rw [hm, hp, hmax]
+  unfold fixed4
+  rw [hv, hd, hmo, hfm, hmask, unitT32]
+  unfold nblocks4 lMatrix4 ceilDiv tail4Ops tail4Tok dH rVecCore
+  rw [hbl]
+  simp only [Nat.one_mul, Nat.mul_one, Nat.add_zero]
+  have ha : (16 * ((L - 1) / 16) + 512 - 1) / 512 = (16 * ((L - 1) / 16) + 511) / 512 := by omega
+  rw [ha]
+  omega
+/-- without the bounce (a proven direct US → S1 route): step = nb₄(L) · ⌊20 971 520 / G⌋ + 15 172 + the tail -/
+theorem T4r_form_lazyT0 (L G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) :
+    step4H L 1 G .lazy .T 0 = ((16 * ((L - 1) / 16) + 511) / 512) * (20971520 / G) + 15172 + ((L - 1) % 16 + 1) * 8192 * 137 * 10 / 43200 := by
+  have hm : mtS 1 false = 1 := by decide
+  have hp : pSel (rowsOf 1 gH) false = 1 := by decide
+  have hmo : mtOf (rowsOf 1 gH) = 1 := by decide
+  have hbl : blockOf 1 = 512 := by decide
+  have hbyte : (blockOf 1 * coreTok dH + bounceBytes 1 0) * 8 * 10 = 20971520 := by decide
+  have hddr : ddr4Block G 1 0 = 20971520 / G := by unfold ddr4Block tn; rw [hbyte]
+  have hge : 12011 ≤ 20971520 / G := by
+    have := Nat.div_le_div_left (a := 20971520) h2 h1
+    have e : 20971520 / gStream = 12011 := by decide
+    omega
+  have hv : vec4 (blockOf 1) 1 .lazy .T (merge4 (blockOf 1) .lazy .T) = 4772 := by decide
+  have hmm : mmaBlock 1 dH = 960 := by decide
+  have hl : loaderBlock 1 = 618 := by decide
+  have hd : drain4 1 (rDrainM 1) = 428 := by decide
+  have hfm : firstMaxOf (blockOf 1) 1 .lazy .T = 5200 := by decide
+  have hmask : mask4 1 1 = 0 := by decide
+  have hmax : blockMax4 G .lazy .T (merge4 (blockOf 1) .lazy .T) 1 0 = 20971520 / G := by
+    rw [← hddr]; exact bm4_ddr _ _ _ _ _ _ (by rw [hv, hddr]; omega) (by rw [hmm, hddr]; omega) (by rw [hl, hddr]; omega)
+  unfold step4H step4 pn4
+  rw [hm, hp, hmax]
+  unfold fixed4
+  rw [hv, hd, hmo, hfm, hmask, unitT32]
+  unfold nblocks4 lMatrix4 ceilDiv tail4Ops tail4Tok dH rVecCore
+  rw [hbl]
+  simp only [Nat.one_mul, Nat.mul_one, Nat.add_zero]
+  have ha : (16 * ((L - 1) / 16) + 512 - 1) / 512 = (16 * ((L - 1) / 16) + 511) / 512 := by omega
+  rw [ha]
+  omega
+/-- the crossover (attention = one 398 µs GEMV unit) over the 512-multiples, lazy-T: with the bounce k ≥ 29 (L_eq = 14 848) at 174.6, k ≥ 28
+    (14 336) at 169.2, k ≥ 23 (11 776) at the session-1 138.3; without it k ≥ 32 (16 384) / 31 (15 872) / 25 (12 800) — round 3's lazy
+    16 896 at 174.6 moves one block down from the first-block max alone and three more from the bounce -/
+theorem T4r_crossover (k : Nat) : (tGemvUnit ≤ step4H (512 * k) 1 gStream .lazy .T 2 ↔ 29 ≤ k) ∧ (tGemvUnit ≤ step4H (512 * k) 1 gStream .lazy .T 0 ↔ 32 ≤ k) ∧
+    (tGemvUnit ≤ step4H (512 * k) 1 g256 .lazy .T 2 ↔ 28 ≤ k) ∧ (tGemvUnit ≤ step4H (512 * k) 1 g256 .lazy .T 0 ↔ 31 ≤ k) ∧
+    (tGemvUnit ≤ step4H (512 * k) 1 gK1_256 .lazy .T 2 ↔ 23 ≤ k) ∧ (tGemvUnit ≤ step4H (512 * k) 1 gK1_256 .lazy .T 0 ↔ 25 ≤ k) := by
+  rw [T4r_form_lazyT2 _ _ (by decide) (by decide), T4r_form_lazyT0 _ _ (by decide) (by decide), T4r_form_lazyT2 _ _ (by decide) (by decide),
+    T4r_form_lazyT0 _ _ (by decide) (by decide), T4r_form_lazyT2 _ _ (by decide) (by decide), T4r_form_lazyT0 _ _ (by decide) (by decide)]
+  unfold tGemvUnit gStream rGemm g256 gK1_256
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T4r_crossover_cells : step4H 14848 1 gStream .lazy .T 2 = 411176 ∧ step4H 14336 1 gStream .lazy .T 2 = 397664 ∧
+    step4H 16384 1 gStream .lazy .T 0 = 403680 ∧ step4H 15872 1 gStream .lazy .T 0 = 391669 ∧ step4H 14336 1 g256 .lazy .T 2 = 409732 ∧
+    step4H 13824 1 g256 .lazy .T 2 = 395789 ∧ step4H 11776 1 gK1_256 .lazy .T 2 = 411685 ∧ step4H 12800 1 gK1_256 .lazy .T 0 = 398403 ∧
+    29 * 512 = 14848 ∧ 28 * 512 = 14336 ∧ 23 * 512 = 11776 ∧ step3H 16896 1 gStream .lazy .T = 407691 := by decide
+/-- over every L: with the bounce the lazy-T step reaches the unit iff L ≥ 14 353 at 174.6 (monotone) and L ≥ 13 841 at 169.2; without it
+    iff L ≥ 15 889 at 174.6; at the session-1 138.3 without the bounce it is NOT monotone: L ≥ 12 817, or 12 305 ≤ L with a 15-token tail -/
+theorem T4r_crossover_anyL (L : Nat) : (tGemvUnit ≤ step4H L 1 gStream .lazy .T 2 ↔ 14353 ≤ L) ∧ (tGemvUnit ≤ step4H L 1 gStream .lazy .T 0 ↔ 15889 ≤ L) ∧
+    (tGemvUnit ≤ step4H L 1 g256 .lazy .T 2 ↔ 13841 ≤ L) ∧
+    (tGemvUnit ≤ step4H L 1 gK1_256 .lazy .T 0 ↔ 12817 ≤ L ∨ (12305 ≤ L ∧ 14 ≤ (L - 1) % 16)) := by
+  rw [T4r_form_lazyT2 _ _ (by decide) (by decide), T4r_form_lazyT0 _ _ (by decide) (by decide), T4r_form_lazyT2 _ _ (by decide) (by decide),
+    T4r_form_lazyT0 _ _ (by decide) (by decide)]
+  unfold tGemvUnit gStream rGemm g256 gK1_256
+  refine ⟨?_, ?_, ?_, ?_⟩ <;> constructor <;> intro h <;> omega
+theorem T4r_crossover_anyL_cells : step4H 14353 1 gStream .lazy .T 2 = 407279 ∧ step4H 14352 1 gStream .lazy .T 2 = 397664 ∧
+    step4H 15889 1 gStream .lazy .T 0 = 399783 ∧ step4H 15888 1 gStream .lazy .T 0 = 391669 ∧ step4H 12319 1 gK1_256 .lazy .T 0 = 398143 ∧
+    step4H 12798 1 gK1_256 .lazy .T 0 = 397884 ∧ step4H 12817 1 gK1_256 .lazy .T 0 = 409669 ∧ step4H 12816 1 gK1_256 .lazy .T 0 = 398403 := by decide
+/-- THE PLANNER CONSTRAINT (review item 11): with both bounce legs the DESIGN-4 MoE-128k cell is ATTENTION-bound at EVERY G ≤ 174.6
+    (the line is G ≤ 189.4: 256 · ⌊23 592 960 / G⌋ + 19 328 ≥ 3 207 719 for every such G) — by 11.9 % at 169.2, 13.3 % at 167.0, 36.7 % at
+    138.3, 8.4 % at the W8 ceiling; without the bounce it is the round-3 tie: attention-bound iff G ≤ 168.3 (weights-bound by 0.5 % at
+    169.2, attention-bound by 0.8 % at 167.0 and 21.6 % at 138.3). The planner must read the realised G and the realised bounce, not assume a side. -/
+theorem T4r_fleet_moe_128k_legs2 (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ step4H 131072 1 G .lazy .T 2 := by
+  rw [T4r_form_lazyT2 131072 G h1 h2]; unfold tLayerMoe
+  have : 13512 ≤ 23592960 / G := by
+    have := Nat.div_le_div_left (a := 23592960) h2 h1
+    have e : 23592960 / gStream = 13512 := by decide
+    omega
+  omega
+theorem T4r_fleet_moe_128k_legs0 (G : Nat) (h1 : 0 < G) (h2 : G ≤ gStream) : tLayerMoe ≤ step4H 131072 1 G .lazy .T 0 ↔ G ≤ 1683 := by
+  rw [T4r_form_lazyT0 131072 G h1 h2]; unfold tLayerMoe
+  have key : 12455 ≤ 20971520 / G ↔ G ≤ 1683 := by
+    rw [Nat.le_div_iff_mul_le h1]; constructor <;> intro h <;> omega
+  constructor
+  · intro h; exact key.mp (by omega)
+  · intro h; have := key.mpr h; omega
+theorem T4r_fleet_moe_128k_cells : 3588736 - tLayerMoe = 381017 ∧ pct 381017 tLayerMoe = 119 ∧ 3635840 - tLayerMoe = 428121 ∧ pct 428121 tLayerMoe = 133 ∧
+    4386432 - tLayerMoe = 1178713 ∧ pct 1178713 tLayerMoe = 367 ∧ 3478400 - tLayerMoe = 270681 ∧ pct 270681 tLayerMoe = 84 ∧
+    step4H 131072 1 g256 .lazy .T 1 = 3390592 ∧ 3390592 - tLayerMoe = 182873 ∧ pct 182873 tLayerMoe = 57 ∧
+    tLayerMoe - 3192192 = 15527 ∧ pct 15527 tLayerMoe = 5 ∧ 3233920 - tLayerMoe = 26201 ∧ pct 26201 tLayerMoe = 8 ∧
+    3901056 - tLayerMoe = 693337 ∧ pct 693337 tLayerMoe = 216 ∧ tLayerMoe - 3094144 = 113575 ∧ pct 113575 tLayerMoe = 35 ∧
+    g256 ≤ 1746 ∧ 1746 < 1894 ∧ 23592960 / 12455 = 1894 ∧ 20971520 / 12455 = 1683 ∧ 1683 < g256 ∧ gShuf64 ≤ 1683 ∧ gK1_256 ≤ 1683 := by decide

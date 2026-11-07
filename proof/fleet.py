@@ -997,5 +997,137 @@ def main3():
     for name, gate, dd, mm in rows:
         print(f"      {name} | gate {gate} | dense {t3(dd)} ({spc(pcs(dd, hd['dense']['primary']))}) | MoE {t3(mm)} ({spc(pcs(mm, hd['moe']['primary']))})")
 
+# ================================================================== ROUND 4 (2026-11-07): DESIGN-3 round 4 for the planner ================
+# The pre-implementation review (PROMPT-3R2 item 11) and kernel session 1 (HW-MAP 423d433) change what the planner must carry:
+#   * a page-waste term: one partially filled page per (head, K|V) per (layer, sequence) = 16 x (P - one token) worst case -- 1 / 4 / 16 MiB
+#     per layer-sequence at 64 KiB / 256 KiB / 1 MiB pages, against instance-fit margins of 2-30 MB (the memory model above had none);
+#   * P_bytes as a parameter and the REALISED gather rate G (the MoE-128k cell is a tie within 1 % at every page size >= 64 KiB on the
+#     round-3 model, and with the P bounce of erratum #20 it is attention-bound at every G <= 174.6 -- T4r_fleet_moe_128k_*);
+#   * the attention term of DESIGN-3 round 4 (proof/attn.py step4: fresh C_o chunk sets, no Z difference, the P bounce legs, the lazy
+#     chain with its first-block max, append-then-attend tails) at the fleet shapes.
+# Every [F*] and [R3-*] label above keeps printing its value; the [R4-*] labels below are the round-4 cells.
+PAGE4 = {"64k": 64 * KiB, "256k": 256 * KiB, "1M": MiB}
+G4F = dict(G3, k1loop=1383)                               # + the session-1 kernel loop (diagnostic; the production loop is UNMEASURED)
+def page_waste4(P, i8=False): return 16 * (P - (128 if i8 else 256))          # bytes per (layer, sequence): 16 pages x (P - one token's K or V)
+def die_kv4(s, pos, L, B=1, i8=False, P=256 * KiB): return die_kv(s, pos, L, B, i8) + s["layers"][pos] * B * page_waste4(P, i8)
+def die_total4(s, pos, L, B=1, i8=False, P=256 * KiB, draft=True): return die_weights(s, pos, draft) + die_kv4(s, pos, L, B, i8, P) + WS + O_RT
+def feasible4(s, L, B=1, i8=False, P=256 * KiB): return all(die_total4(s, p, L, B, i8, P) <= DIE_MEM for p in range(DIES))
+def Lmax4(s, B=1, i8=False, P=256 * KiB):
+    per = []
+    for p in range(DIES):
+        room = DIE_MEM - O_RT - WS - die_weights(s, p) - s["layers"][p] * B * page_waste4(P, i8)
+        per_tok = s["layers"][p] * s["kv_tok"] * B // (2 if i8 else 1)
+        per.append(room // per_tok)
+    return min(per)
+def inst_die_kv4(s, pos, L, B=1, i8=False, P=256 * KiB): return inst_die_kv(s, pos, L, B, i8) + LAYERS4[s["name"]][pos] * B * page_waste4(P, i8)
+def min_x4(s, pos, L, B=1, i8=False, P=256 * KiB, ort=O_RT):
+    room = DIE_MEM - ort - WS - inst_die_kv4(s, pos, L, B, i8, P)
+    if inst_die_weights(s, pos, 1000) > room: return None
+    if inst_die_weights(s, pos, 0) <= room: return 0
+    lo, hi = 0, 1000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if inst_die_weights(s, pos, mid) <= room: hi = mid
+        else: lo = mid + 1
+    return lo
+def attn4_seq(s, L, t, G, variant="lazy", conv="T", legs=2, i8=False):
+    """DESIGN-3 round-4 step (proof/attn.py step4) for ONE sequence with t query tokens at this shape (rows = t*g per core; H_kv = 8 = cores,
+    d = 128). Returns (ns, binding engine, parts)."""
+    rows = t * g_of(s)
+    p, mt = A.passes_of(rows), A.mt_pass(rows)
+    bl = A.BL_of(mt); nb = A.nblocks4(L, t, mt); Rd = A.R_DRAIN_M[min(mt, 4)]
+    v = A.vec4_ns(bl, mt, variant, conv)
+    ddr = p * nb * A.ddr4_block_ns(G, mt, legs, i8)
+    vec, mma, ldr = p * nb * v, p * nb * A.mma_block_ns(mt), p * nb * A.loader_block_ns(mt)
+    f32u = A.UNIT[conv][1]
+    fixed = 2 * v + A.drain4_ns(mt, Rd) + (A.tail4_ops(L, t, A.mt_of(rows)) + A.mask4_lanes(t, A.mt_of(rows))) * f32u * 10 // (A.R_VEC * 100)
+    if variant == "lazy": fixed += A.firstmax4_ns(bl, mt, conv)
+    c = {"KV": ddr, "VEC": vec, "MMA": mma, "LDR": ldr}
+    return max(c.values()) + fixed, max(c, key=c.get), dict(c, fixed=fixed, passes=p, mt=mt, nb=nb, vblk=v)
+BR4 = dict(BR3, G="p256k", var="lazy", conv="T", legs=2, P="256k")
+def step4f(s, L, B=1, t=1, **kw):
+    """the round-3 fleet step with the round-4 attention term (lazy chain, both bounce legs, 256 KiB pages by default)."""
+    br = dict(BR4); br.update(kw)
+    rows = B * t; assert rows <= ROWS_FLAT
+    G, lam = G4F[br["G"]], LAM3_BR[br["lam"]]
+    gemm = s["nL"] * gemm3_ns(s, rows, br["fam"], br["regime"], br["gemm"])
+    a_seq, a_bind, _ = attn4_seq(s, L, t, G, br["var"], br["conv"], br["legs"], br["i8"])
+    attn = s["nL"] * B * a_seq
+    head = tn(s["w_head"], R_GEMM if br["gemm"] == "direct" else R_GEMM_INT)
+    launch = launch3_ns(s, rows, br["launch"], br["mega"])
+    quant = s["nL"] * quant_ns(s, rows, br["cq"])
+    xch, xbw, nlat = exchange(s, rows, lam)
+    draft = draft3_ns(lam, br["launch"], br["cq"], br["mega"]) if t > 1 else 0
+    T = gemm + attn + head + launch + quant + xch + draft
+    parts = {"W": gemm + head, "ATTN": attn, "LAUNCH": launch, "QUANT": quant, "XCH": xch, "DRAFT": draft}
+    return T, parts, a_bind
+def binding4(s, L, B, t, parts, a_bind, i8=False, P=256 * KiB):
+    if not feasible4(s, L, B, i8, P): return "MEM"
+    big = max(parts, key=lambda k: parts[k])
+    return f"ATTN:{a_bind}" if big == "ATTN" else big
+
+def main4():
+    D, M = DENSE, MOE
+    print("\n# ---- ROUND 4 (2026-11-07; DESIGN-3 round 4: page waste, P_bytes and the realised G as planner inputs, the round-4 attention term): [R4-*] cells. [F*]/[R3-*] above unchanged. ----")
+    # ------------------------------------------------------------ the page-waste term
+    for pk, P in PAGE4.items():
+        w = page_waste4(P)
+        print(f"[R4-waste-{pk}] worst tail waste per (layer, sequence) = 16 x (P - 256 B) = {w} B = {w/MiB:.2f} MiB (KV-int8 pages: {page_waste4(P, True)} B); "
+              f"per die B = 1 / 8 / 16: dense (15 layers) {15*w/MiB:.0f} / {15*8*w/MiB:.0f} / {15*16*w/MiB:.0f} MiB, MoE (4 layers) {4*w/MiB:.0f} / {4*8*w/MiB:.0f} / {4*16*w/MiB:.0f} MiB; "
+              f"share of the KV at 32k: {t10(pct(w, 32768 * 4096))}% per layer-sequence, at 1M {pct(w, (1 << 20) * 4096)} tenths")
+    for s in SHAPES:
+        for pk, P in (("64k", 64 * KiB), ("256k", 256 * KiB)):
+            cells = []
+            for lab, L in (("4k", 4096), ("32k", 32768), ("128k", 131072), ("1M", 1048576)):
+                for i8 in ((False,) if s["moe"] or lab != "1M" else (False, True)):
+                    worst = max(range(DIES), key=lambda p: die_total4(s, p, L, 1, i8, P))
+                    cells.append(f"{lab}{'-kvi8' if i8 else ''}: {'fits' if feasible4(s, L, 1, i8, P) else 'INFEASIBLE'} worst die {gb1(die_total4(s, worst, L, 1, i8, P))} GB (round 3 {gb1(die_total(s, worst, L, 1, i8))})")
+            print(f"[R4-mem-{s['name']}-{pk}] with the {pk} page-waste term, B = 1: " + "; ".join(cells) + f"; L_max f16 B=1 {Lmax4(s, 1, False, P)} (round 3 {Lmax(s)}), B=16 {Lmax4(s, 16, False, P)} ({Lmax(s, 16)}); KV-i8 B=1 {Lmax4(s, 1, True, P)} ({Lmax(s, 1, True)})")
+    room = DIE_MEM - die_weights(D, 0) - die_kv4(D, 0, 1 << 20, 1, True, 256 * KiB) - WS
+    print(f"[R4-ort-threshold-256k] dense 1M KV-int8 with 256 KiB pages fits iff the per-die runtime overhead <= {room} B = {gb1(room)} GB (round 3: 3.8 GB); margin at 2 GiB {DIE_MEM - die_total4(D, 0, 1 << 20, 1, True, 256 * KiB)} B = {gb1(DIE_MEM - die_total4(D, 0, 1 << 20, 1, True, 256 * KiB))} GB (round 3: 1 656 740 864 B = 1.6 GB); "
+          f"the waste is {15 * page_waste4(256 * KiB, True)} B = {15 * page_waste4(256 * KiB, True) / MiB:.0f} MiB on that die")
+    # ------------------------------------------------------------ the instance fit (ALT-2) with the waste term
+    for s in SHAPES:
+        for lab, L in L_SET.items():
+            if lab == "1M" and not s["moe"]: continue
+            xs3 = [min_x(s, p, L) for p in range(4)]
+            for pk, P in (("64k", 64 * KiB), ("256k", 256 * KiB)):
+                xs = [min_x4(s, p, L, 1, False, P) for p in range(4)]
+                if any(x is None for x in xs): print(f"[R4-inst-fit-{s['name']}-{lab}-{pk}] infeasible"); continue
+                tots = [inst_die_weights(s, p, xs[p]) + inst_die_kv4(s, p, L, 1, False, P) + WS + O_RT for p in range(4)]
+                margin = min(DIE_MEM - tt for tt in tots)
+                print(f"[R4-inst-fit-{s['name']}-{lab}-{pk}] waste per instance die {LAYERS4[s['name']][0] * page_waste4(P) / MiB:.0f} MiB: minimal x {xs} (round 3 {xs3}: +{[a - b for a, b in zip(xs, xs3)]} thousandths); worst-die margin {margin} B")
+    # ------------------------------------------------------------ the round-4 attention term at the fleet shapes
+    for s in SHAPES:
+        g = g_of(s)
+        for lab, L in L_SET.items():
+            cells = "; ".join(f"{gk} legs {lg}: {attn4_seq(s, L, 1, G4F[gk], legs=lg)[0]} ({attn4_seq(s, L, 1, G4F[gk], legs=lg)[1]})" for gk in ("p256k", "shuf64k", "k1loop", "stream174") for lg in (2, 0))
+            r3 = attn3_seq(s, L, 1, 1692, "lazy", "T")[0]
+            print(f"[R4-attn-{s['name']}-{lab}] t=1 rows={g} per layer ns (lazy-T; binding): {cells}; round-3 lazy-T at 169.2 {r3} (rowmax-T {attn3_seq(s, L, 1, 1692)[0]}); "
+                  f"t=4 lazy-T legs 2 at 169.2: {attn4_seq(s, L, 4, 1692)[0]} ({attn4_seq(s, L, 4, 1692)[1]}); KV-int8 rowmax-T legs 2: {attn4_seq(s, L, 1, 1692, 'rowmax', 'T', 2, True)[0]} ({attn4_seq(s, L, 1, 1692, 'rowmax', 'T', 2, True)[1]})")
+    # ------------------------------------------------------------ the MoE-128k verdict: read the realised G and the realised bounce
+    for lg in (2, 1, 0):
+        verd = []
+        for gk in ("p256k", "shuf64k", "k1loop", "stream174"):
+            T, p, ab = step4f(M, 131072, G=gk, legs=lg)
+            a1 = attn4_seq(M, 131072, 1, G4F[gk], legs=lg)[0]; Tw = gemm3_ns(M, 1, "uniform", "anchor")
+            verd.append(f"{gk}: {'ATTN-bound' if a1 >= Tw else 'weights-bound'} by {t10(pct(abs(a1 - Tw), Tw))}% per layer, step {ms2(T)} ms -> {t3(tps_card(1000, T))} tok/s/card ({binding4(M, 131072, 1, 1, p, ab)})")
+        print(f"[R4-moe-128k-legs{lg}] MoE 128k, lazy-T, bounce legs {lg}: " + "; ".join(verd))
+    print(f"[R4-G-param] the planner reads the REALISED gather rate and bounce: the MoE-128k cell is attention-bound at every G <= 174.6 with both bounce legs (T4r_fleet_moe_128k_legs2), a +-1 % tie without them (iff G <= 168.3, T4r_fleet_moe_128k_legs0); "
+          f"the session-1 loop's 138.3 is attention-bound by {t10(pct(attn4_seq(M, 131072, 1, 1383, legs=0)[0] - gemm3_ns(M, 1, 'uniform', 'anchor'), gemm3_ns(M, 1, 'uniform', 'anchor')))}% even without the bounce")
+    # ------------------------------------------------------------ the primary step cells, round 4 vs round 3
+    for s in SHAPES:
+        for lab, L in L_SET.items():
+            if not feasible(s, L): continue
+            T3 = step3(s, L)[0]; T3l = step3(s, L, var="lazy")[0]
+            T4, p4, ab4 = step4f(s, L); T40 = step4f(s, L, legs=0)[0]; T4k = step4f(s, L, G="k1loop")[0]
+            print(f"[R4-step-{s['name']}-{lab}] t=1: round-3 primary (rowmax-T, 169.2) {ms2(T3)} ms -> {t3(tps_card(1000, T3))} (lazy {t3(tps_card(1000, T3l))}); round 4 lazy-T legs 2 {ms2(T4)} -> {t3(tps_card(1000, T4))} "
+                  f"({spc(pcs(tps_card(1000, T4), tps_card(1000, T3l)))}; binding {binding4(s, L, 1, 1, p4, ab4)}); legs 0 {ms2(T40)} -> {t3(tps_card(1000, T40))}; at the session-1 138.3, legs 2: {ms2(T4k)} -> {t3(tps_card(1000, T4k))}")
+    for s in SHAPES:
+        T3 = step3(s, 32768, 1, 4, var="lazy")[0]; T4 = step4f(s, 32768, 1, 4)[0]
+        print(f"[R4-spec-{s['name']}-32k] spec k=3, a=0.7 (lazy chain): round 3 {ms2(T3)} ms -> {t3(tps_card(tau_milli(700), T3))}; round 4 legs 2 {ms2(T4)} -> {t3(tps_card(tau_milli(700), T4))} ({spc(pcs(tps_card(tau_milli(700), T4), tps_card(tau_milli(700), T3)))})")
+    Ti8 = step4f(D, 1048576, i8=True, var="rowmax")[0]
+    print(f"[R4-dense-1M-kvi8] dense 1M KV-int8 (the only dense 1M layout): the lazy x KV-int8 cell is UNREACHABLE as specified (P at the fixed scale 127 vs the lazy e^8); rowmax chain, legs 2: {ms2(Ti8)} ms -> {t3(tps_card(1000, Ti8))} (round 3 rowmax {t3(tps_card(1000, step3(D, 1048576, i8=True)[0]))}, lazy {t3(tps_card(1000, step3(D, 1048576, i8=True, var='lazy')[0]))}); fits with the 256 KiB waste term: {feasible4(D, 1048576, 1, True, 256 * KiB)}")
+
 if __name__ == "__main__":
-    main(); main3()
+    main(); main3(); main4()
