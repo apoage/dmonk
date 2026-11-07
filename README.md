@@ -67,3 +67,8 @@ PROOF-COVERAGE*.md         claim → theorem ledgers
 PROMPT*.md                 design / proof round prompts
 proof/                     *.lean theorems, *.py models, lakefile
 ```
+
+## License
+
+MIT — see `LICENSE`.
+
