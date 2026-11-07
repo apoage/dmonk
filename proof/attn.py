@@ -9,6 +9,9 @@ Run: python3 -I proof/attn.py   (Python >= 3.8, no dependencies). Labels [A..] a
 PROOF-COVERAGE-3.md; every label is transcribed 1:1 into proof/attn.lean (round 2).
 Round 3 (2026-11-05): the season (v1) measurements (HW-MAP commit e9349c8) are added as the [R3-*] section at the end; every
 round-2 label keeps printing its round-2 value so that `diff` lists exactly what moved (see [R3-moved-*]).
+Round 4 (2026-11-07): the pre-implementation review + kernel session 1 (HW-MAP 423d433, errata #18-#21) are the [R4-*] section at the
+end (fresh C chunk sets, the P bounce as `legs`, the round-4 chains and merge, append-then-attend tails, the online-chain rounding
+bound, the planted sink, the C_o nesting, 256 KiB pages, the page-waste term); the [A*] and [R3-*] lines keep printing unchanged.
 Round-2 changes: [A4b-drain-threshold] compares the mt=4 drain bytes with the mt=4 block time (164, not 82);
 [A4b-G-threshold] prints the c_V=33 vector time; [A7-us-*] sums the section-4 table rows (the old [A7-sram]
 omitted q row-major and the page-table window); [A7-l0a] is 16 KiB*mt (+-Q resident); new labels
@@ -483,3 +486,268 @@ if __name__ == "__main__":
     for var, conv in CORNERS3:
         print(f"[R3-lin-{var}-{conv}] chain100(block, 1, merge100 = 0): 512 {chain100(512,1,var,conv,0)}, 256 {chain100(256,1,var,conv,0)}, 128 {chain100(128,1,var,conv,0)} (lane-eq x100; vec ns = (base + merge100) x 10 // 43200)")
     print(f"[R3-chain-rowmax-t1-8calls] at t = 1 the 8 padding rows need no reduce call: rowmax-T with 8 calls = {(chain100(512,1,'rowmax','T',MERGE_PACK*100) - 8*call100(T_RM16))*10//(R_VEC*100)} ns ({t10(pct((chain100(512,1,'rowmax','T',MERGE_PACK*100) - 8*call100(T_RM16))*10//(R_VEC*100), blk174))}% of the block); the headline keeps the 16-call fragment accounting (holds for every t)")
+
+# ============================================================ ROUND 4 (2026-11-07): pre-implementation review + kernel session 1 ====
+# Silicon inputs (HW-MAP 423d433, errata #18-#21; "K1" = kernel session 1):
+#   * f16 k-shape sweep: (16,16,k) EXACT at every k in {16, 32, 64, 128} on the f16 x f16 tuple (128 reps/shape, one-hot k-probes,
+#     all 8 cores) -- the i8 k = 64 anomaly is i8-only. d = 128 keeps one k = 128 call per 16 tokens; d = 64 may use ONE k = 64 call.
+#   * erratum #19: f16 accumulation into one C chunk corrupts across ANY full barrier or A re-lift (>= 2 accumulations). Consequence:
+#     every C chunk is FRESH (written by exactly one matrix call per visit): C_s chunks (one (16,16,128) call per 16 tokens) and
+#     C_o = one fresh chunk set per 128-token group (8 calls, 8 chunks); the partials are summed on the vector unit. The region
+#     difference (Z, the +-Q alternation, the NegSnap buffers) is gone: no mechanism, no drift, no snapshot.
+#   * erratum #20: an A operand built in vector SRAM (the P fragments) must ride a DDR bounce (US -> DDR scratch -> DDR -> S1 staging
+#     -> loader lift): `legs` DDR transfers of the P bytes per block ride the same DDR roof as the K/V stream (legs = 2: both legs
+#     charged, the headline / conservative reading; 1: only the read leg; 0: a direct US -> S1 route, the round-3 model). UNMEASURED.
+#   * erratum #18 (C destination by byte-offset tensor), #21 (prime-period host patterns): spec items, no number.
+#   * the lazy guard's per-trip recompute is REQUIRED (measured: 9 / 8192 lanes wrong per tripped block without it).
+#   * the kernel's own fresh-path gather: 138.3 / 138.7 / 138.0 GB/s aggregate at 256 / 128 / 64 KiB (diagnostic loop; the production
+#     loop halves the barriers per byte: its rate is UNMEASURED, between 138 and the E21 169).
+#   * OPEN (session 2): 75-91 % of P lanes read back as raw scores from the softmax reel -- the vector-chain cells are OPEN.
+# Every round-2 / round-3 label above keeps printing its value; the [R4-*] labels below are the round-4 cells.
+G_K1 = {256 * KiB: 1383, 128 * KiB: 1387, 64 * KiB: 1380}   # session-1 kernel loop, aggregate tenths GB/s (M, diagnostic loop)
+G4 = {"p256k": G_SHUF[256 * KiB], "shuf64k": G_SHUF[64 * KiB], "stream174": R_GEMM, "k1loop": G_K1[256 * KiB], "shuf16k": G_SHUF[16 * KiB]}
+LEGS_HEAD = 2                                              # headline: both bounce legs on the DDR roof (UNMEASURED, conservative)
+def co_sets(block): return block // 128                     # fresh C_o chunk sets per block-fragment (one per 128-token group)
+def l0c4(mt):  return 3 * BL_of(mt) * 16 * 4 * mt + co_sets(BL_of(mt)) * 16 * D * 4 * mt    # 3 C_s regions + single-buffered fresh C_o sets
+def l0a4(mt):  return 4 * KiB * mt + 2 * 4 * KiB * mt                                      # Q (no -Q) + double-buffered P
+def drain4_bytes(mt): return (BL_of(mt) * 16 * 4 + co_sets(BL_of(mt)) * 16 * D * 4) * mt   # C_s + every fresh C_o set of the block
+def drain4_ns(mt, Rd): return tn(drain4_bytes(mt), Rd)
+def p_bytes(mt): return co_sets(BL_of(mt)) * 4096 * mt                                     # P fragments per block per core (f16)
+def bounce_bytes(mt, legs): return legs * p_bytes(mt)                                      # DDR bytes the bounce adds per block per core
+def ddr4_block_ns(G, mt, legs, i8=False): return tn((BL_of(mt) * CORE_TOK // (2 if i8 else 1) + bounce_bytes(mt, legs)) * 8, G)
+def merge4_100(block, variant, conv):
+    """fresh-set merge per block-fragment, lane-eq x100: O_b = sum of the block's co_sets partials (2048 f32 lanes each: n adds, the
+    first a copy costed as an op), O += O_b (1 add) [rowmax: O scaled by alpha first (1 Mul), alpha = exp (1 call) + alpha reel (20 small
+    calls)]; S: fold 1024 -> 256 (512 + 256), [rowmax: scale 256], running add 256. Two-level (block-local, then running) so that the
+    longest f32 rounding chain is O(L/block), not O(L/128) -- T4r_drift_online."""
+    f16, f32 = UNIT[conv]; n = co_sets(block)
+    if variant == "rowmax": return call100(T_EXP) + 20 * call100(T_F16) + (2048 * (n + 1) + 2048 + 512 + 256 + 256 + 256) * f32
+    return (2048 * (n + 1) + 512 + 256 + 256) * f32
+def chain4_100(block, mt, variant, conv, merge100=None):
+    """round-4 vector chain per block for mt fragments, lane-eq x100. rowmax (section 3.2 minus the Z difference): cast S -> f16, shift,
+    exp, cast P, sum (4 f32-class ops + exp per score) + the f16 tree + 16 per-row reduce-max calls + the 20-call shift reel + merge.
+    lazy (section 3.4): shift, exp, cast P, sum (3 f32 ops + exp) + one guard reduce-max per P reel + merge.  OPEN: the softmax reel's
+    cost is modelled as specified; session 2 owns the P-lane anomaly."""
+    f16, f32 = UNIT[conv]; sc = block * 16
+    m = merge4_100(block, variant, conv) if merge100 is None else merge100
+    if variant == "rowmax":
+        el = sc * (f32 + f32 + C_EXP100 + f32 + f32) + tree_ops(block) * f16
+        calls = 16 * call100(T_RM16) + 20 * call100(T_F16)
+    else:
+        el = sc * (f32 + C_EXP100 + f32 + f32)
+        calls = (sc // 1024) * call100(T_RM16)
+    return mt * (el + calls + m)
+def vec4_ns(block, mt, variant, conv, merge100=None): return chain4_100(block, mt, variant, conv, merge100) * 10 // (R_VEC * 100)
+def firstmax4_100(block, mt, conv):   # lazy: the first block's per-row max, once per step (cast S -> f16, tree, 16 reduce calls, reel)
+    f16, f32 = UNIT[conv]
+    return mt * (block * 16 * f32 + tree_ops(block) * f16 + 16 * call100(T_RM16) + 20 * call100(T_F16))
+def firstmax4_ns(block, mt, conv): return firstmax4_100(block, mt, conv) * 10 // (R_VEC * 100)
+# append-then-attend (section 10.1 / review item 6): the pages hold the 16-token groups completed BEFORE this step (L - t tokens), the
+# tails serve the open group plus the t new tokens: tail4_tok <= 15 + 16 = 31 (two 16-token groups); the per-row causal mask is one
+# additive op over <= 32 lanes x 16 rows per fragment, once per step
+def tail4_tok(L, t): return (L - t) % 16 + t
+def L_matrix4(L, t): return 16 * ((L - t) // 16)
+def nblocks4(L, t, mt): return ceil(L_matrix4(L, t), BL_of(mt))
+def tail4_ops(L, t, mt): return tail4_tok(L, t) * D * 16 * mt * 4
+def mask4_lanes(t, mt): return 512 * mt if t > 1 else 0
+def step4(L, t, G, variant="lazy", conv="T", merge100=None, legs=LEGS_HEAD, onepass=False, i8=False):
+    rows = rows_of(t)
+    p, mt = (1, mt_of(rows)) if onepass else (passes_of(rows), mt_pass(rows))
+    bl = BL_of(mt); nb = nblocks4(L, t, mt); Rd = R_DRAIN_M[min(mt, 4)]
+    v = vec4_ns(bl, mt, variant, conv, merge100)
+    ddr = p * nb * ddr4_block_ns(G, mt, legs, i8)
+    vec, mma, ldr, drn = p * nb * v, p * nb * mma_block_ns(mt), p * nb * loader_block_ns(mt), p * nb * drain4_ns(mt, Rd)
+    f32u = UNIT[conv][1]
+    fixed = 2 * v + drain4_ns(mt, Rd) + (tail4_ops(L, t, mt_of(rows)) + mask4_lanes(t, mt_of(rows))) * f32u * 10 // (R_VEC * 100)
+    if variant == "lazy": fixed += firstmax4_ns(bl, mt, conv)
+    c = {"KV stream": ddr, "vector": vec, "MMA": mma, "loader": ldr}
+    return max(c.values()) + fixed, dict(ddr=ddr, vec=vec, mma=mma, loader=ldr, drain=drn, fixed=fixed, passes=p, mt=mt, nb=nb, vblk=v), max(c, key=c.get)
+CORNERS4 = (("lazy", "T"), ("lazy", "C"), ("rowmax", "T"), ("rowmax", "C"))
+# C_o drain nesting (review item 8): chunk (fragment f, n-group g) = 1 KiB = [16 rows][16 dims] f32 at f*8192 + g*1024; element (r, j) at
+# + r*64 + j*4 -> row r of fragment f = 8 runs of 64 B at stride 1024 B from f*8192 + r*64; after an f16 cast 32 B runs at stride 512 B
+# from f*4096 + r*32; an m = 64 call writes [64 rows][16 dims] chunks of 4 KiB: row r at g*4096 + r*64 (stride 4096)
+def co_addr(f, g, r, j): return f * 8192 + g * 1024 + r * 64 + j * 4
+def co_addr16(f, g, r, j): return f * 4096 + g * 512 + r * 32 + j * 2
+def co_addr_m64(g, r, j): return g * 4096 + r * 64 + j * 4
+# 256 KiB pages (review item 11): four 64 KiB sub-pages, sub-page = (l mod 1024) div 256, inside it the round-2 maps
+def kAddr64(l, j): return (l // 16) * 4096 + (j // 16) * 512 + (l % 16) * 32 + (j % 16) * 2
+def vAddr64(l, j): return ((l // 128) * 8 + j // 16) * 4096 + ((l % 128) // 16) * 512 + (j % 16) * 32 + (l % 16) * 2
+def kAddr256(l, j): return ((l % 1024) // 256) * 65536 + kAddr64(l % 256, j)
+def vAddr256(l, j): return ((l % 1024) // 256) * 65536 + vAddr64(l % 256, j)
+# online-chain f32 rounding (review item 5, re-aimed): longest sequential chain of f32 additions feeding out = O / S, first-order
+# bound (n - 1) * 2^-24 relative to the sum of magnitudes (IEEE round-to-nearest; the matrix unit's internal order: UNMEASURED)
+U24_PPB = 10 ** 9 // 2 ** 24 + 1          # 2^-24 = 59.6e-9: 60 ppb (rounded up)
+def chain_O(L, block): return (co_sets(block) - 1) + 1 + L // block          # block-local sum of the partials, then one running add per block
+def chain_S(L, block): return block * 16 // 1024 + 2 + L // block + 4         # 8 reels into the block Acc, fold 1024 -> 256 (2), running add per block, final 16 -> 1 (4)
+def rel_ppm(n): return (n * 10 ** 6 + 2 ** 24 - 1) // 2 ** 24                 # ceil(n * 2^-24 * 1e6)
+def isqrt(n):
+    r = int(n ** 0.5)
+    while r * r > n: r -= 1
+    while (r + 1) * (r + 1) <= n: r += 1
+    return r
+# planted sink (review item 7): the f16 cast flushes p < 2^-24 (the smallest f16 subnormal); a row with one sink at p = 1 and L - 1
+# tokens just under the flush line (p = 2^-25 each) loses (L - 1) * 2^-25 of its mass -- one-sided
+def sink_lost_ppm(L): return ((L - 1) * 10 ** 6) // 2 ** 25
+# page waste (review item 11): one partially filled page per (head, K|V) per (layer, sequence) = 16 pages of (P - one token)
+def page_waste(P, tokB=256): return 16 * (P - tokB)
+# US rows, round 4 (section 4): no NegSnap (fresh chunks), 32-token tails, the mask reel, the fresh-set partial ring (slot 0 holds the
+# block-local sum O_b); P staging double-buffered at mt = 1 only (the bounce drains each 4 KiB piece as it is cast); the partial ring is
+# 2 slots at mt <= 3, 1 at mt = 4; the prologue-only q row-major buffer is aliased onto the idle drained-C_s buffer at mt = 4 (round-2 remedy)
+def us4_rows(mt):
+    bl = BL_of(mt); cs = bl * 16 * 4 * mt; co = 16 * D * 4 * mt
+    return {"drained C_s": cs, "P staging": (2 if mt == 1 else 1) * bl * 16 * 2 * mt, "O": co, "partial ring (O_b in slot 0)": (2 if mt <= 3 else 1) * co,
+            "S acc": 4 * KiB, "shift reel": 4 * KiB, "alpha": 64, "K_tail (32 tokens)": 8 * KiB, "V_tail (32 tokens)": 8 * KiB,
+            "mask reel": 512 * mt * 4, "q row-major": 4 * KiB * mt if mt < 4 else 0, "page-table window": 4 * KiB}
+
+def main4():
+    print("\n# ---- ROUND 4 (2026-11-07; pre-implementation review + kernel session 1, HW-MAP 423d433): [R4-*] cells; [A*]/[R3-*] above unchanged ----")
+    blk174 = ddr_block_ns(R_GEMM); blk169 = ddr_block_ns(G_SHUF[256 * KiB]); blk167 = ddr_block_ns(G_SHUF[64 * KiB])
+    # ---- k-shape (review item 1): measured verdict; d = 64 cost table
+    blk64 = tn(BL * 2 * 64 * 2 * 8, R_GEMM); blk64_256 = tn(256 * 2 * 64 * 2 * 8, R_GEMM)
+    for name, kc in (("k64", 1), ("2xk32", 2), ("4xk16", 4)):
+        c1 = 32 * kc + 16; c4 = 4 * (16 * kc + 8)
+        print(f"[R4-kshape-d64-{name}] d = 64, scores as {name} per 16 tokens: calls per 512-token block (mt 1) = {c1} -> {c1*C_MMA} ns = {t10(pct(c1*C_MMA, blk64))}% of the {blk64} ns block; "
+              f"per 256-token block at mt 4 = {c4} -> {c4*C_MMA} ns = {t10(pct(c4*C_MMA, blk64_256))}% of {blk64_256} ns" + (" -- MMA-bound" if c4 * C_MMA > blk64_256 else ""))
+    print(f"[R4-kshape-verdict] f16 (16,16,k) EXACT at k in {{16, 32, 64, 128}} (session 1, 128 reps/shape): d = 128 mainline = one k = 128 call per 16 tokens (licensed); d = 64 = one k = 64 call (48 calls per block, 12.0 %); "
+          f"the i8 variant keeps 2 x k = 32 at d = 64 (k = 64 wrong on i8); issue cost 15 ns measured at k = 128 only (k = 64 / 16 calls: ASSUMED 15 ns, UNMEASURED)")
+    # ---- fresh chunk sets (erratum #19): L0C, L0A, drain, merge
+    for mt in (1, 2, 3, 4, 5):
+        print(f"[R4-l0c-mt{mt}] block {BL_of(mt)}: C_s {3*BL_of(mt)*16*4*mt//KiB} KiB (3 regions) + fresh C_o sets {co_sets(BL_of(mt))} x {16*D*4*mt//KiB} KiB = {l0c4(mt)//KiB} KiB"
+              + (" (exactly full)" if l0c4(mt) == L0C else (" OVER 256 KiB" if l0c4(mt) > L0C else "")) + f"; L0A = Q {4*mt} + P 2 x {4*mt} = {l0a4(mt)//KiB} KiB (no -Q)")
+    print(f"[R4-l0c-1024] mt = 1, 1024-token blocks: C_s 3 x 64 KiB + 8 fresh sets x 8 KiB = {(3*1024*16*4 + 8*16*D*4)//KiB} KiB (exactly full); 512-token blocks at mt = 1 with double-buffered C_o sets: {(l0c4(1) + 4*16*D*4)//KiB} KiB")
+    for mt in (1, 2, 3, 4):
+        d = ddr_block_ns(R_GEMM, mt); b = drain4_bytes(mt); thr = (b * 10 + d - 1) // d
+        while tn(b, thr) > d: thr += 1
+        print(f"[R4-drain-mt{mt}] drain bytes per block {b} (C_s {BL_of(mt)*16*4*mt} + C_o fresh sets {co_sets(BL_of(mt))*16*D*4*mt}; round 3: {drain_block_bytes(mt)}) -> hidden iff R_drain >= {thr} tenths GB/s/core; "
+              f"measured {t10(R_DRAIN_M[mt])}: {drain4_ns(mt, R_DRAIN_M[mt])} ns per block = {t10(pct(drain4_ns(mt, R_DRAIN_M[mt]), d))}% ({t10(R_DRAIN_M[mt]*10//thr)}x margin)")
+    for var, conv in CORNERS4:
+        for bl in (512, 256, 128, 1024):
+            m = merge4_100(bl, var, conv)
+            print(f"[R4-merge-{var}-{conv}-{bl}] fresh-set merge at block {bl} ({co_sets(bl)} partials): {m//100} lane-eq = {m*10//(R_VEC*100)} ns (round 3 itemised {merge_item(var, conv)//100}, pack 25 750)")
+    # ---- the bounce (erratum #20)
+    for mt in (1, 2, 4):
+        print(f"[R4-bounce-mt{mt}] P per block {p_bytes(mt)} B per core; DDR bytes per block (per core) K/V {BL_of(mt)*CORE_TOK} + bounce legs x {p_bytes(mt)}: "
+              + "; ".join(f"legs {lg}: {ddr4_block_ns(R_GEMM, mt, lg)} ns at 174.6 ({t10(pct(ddr4_block_ns(R_GEMM, mt, lg) - ddr_block_ns(R_GEMM, mt), ddr_block_ns(R_GEMM, mt)))}% over round 3)" for lg in (0, 1, 2))
+              + f"; at 169.2 legs 2: {ddr4_block_ns(G_SHUF[256*KiB], mt, 2)}; at 138.3: {ddr4_block_ns(G_K1[256*KiB], mt, 2)}")
+    print(f"[R4-lift-density] P lifted per direct-load byte: {p_bytes(1)} B per {BL*CORE_TOK} B at mt 1 = 1/{BL*CORE_TOK//p_bytes(1)}, {p_bytes(4)} per {256*CORE_TOK} at mt 4 = 1/{256*CORE_TOK//p_bytes(4)}; the expert kernel lifts 2 KiB per 64 KiB = 1/32 -> {32*p_bytes(1)//(BL*CORE_TOK)}x / {32*p_bytes(4)//(256*CORE_TOK)}x (E24 at the real P cadence)")
+    # ---- the chain (OPEN: softmax-reel anomaly), fixed cost
+    for var, conv in CORNERS4:
+        for bl in (512, 256, 128, 1024):
+            v = vec4_ns(bl, 1, var, conv); d = ddr4_block_ns(R_GEMM, 1 if bl >= 512 else (3 if bl == 256 else 8), 2) if bl != 1024 else tn((1024 * CORE_TOK + 2 * 8 * 4096) * 8, R_GEMM)
+            d0 = ddr_block_ns(R_GEMM, 1 if bl >= 512 else (3 if bl == 256 else 8)) if bl != 1024 else tn(1024 * CORE_TOK * 8, R_GEMM)
+            print(f"[R4-chain-{var}-{conv}-{bl}] per fragment at block {bl}: {chain4_100(bl,1,var,conv)//100} lane-eq = {v} ns = {t10(pct(v, d))}% of the {d} ns block (174.6, legs 2) / {t10(pct(v, d0))}% of {d0} (legs 0); round 3: {vec3_ns(bl,1,var,conv,MERGE_PACK*100) if bl != 1024 else '-'} -- OPEN (softmax-reel anomaly, session 2)")
+    for conv in ("T", "C"):
+        print(f"[R4-firstmax-{conv}] lazy: first-block per-row max once per step at block 512 = {firstmax4_100(512,1,conv)//100} lane-eq = {firstmax4_ns(512,1,conv)} ns per fragment (cast {8192*UNIT[conv][1]//100} + tree {tree_ops(512)*UNIT[conv][0]//100} + 16 reduce {16*call100(T_RM16)//100} + reel {20*call100(T_F16)//100}); at block 256: {firstmax4_ns(256,1,conv)} ns")
+    for var, conv in CORNERS4:
+        s = step4(32768, 1, R_GEMM, var, conv)[1]
+        print(f"[R4-fixed-{var}-{conv}] fixed cost at 32k, t = 1: {s['fixed']} ns = 2 x {s['vblk']} + drain {drain4_ns(1, R_DRAIN_M[1])} + tail ({tail4_tok(32768,1)} token: {tail4_ops(32768,1,1)*UNIT[conv][1]*10//(R_VEC*100)} ns)" + (f" + first-block max {firstmax4_ns(512,1,conv)}" if var == "lazy" else "") + f"; round 3: {step3(32768,1,R_GEMM,var,conv)[1]['fixed']}")
+    # ---- t = 1 headline cells
+    print("\n[R4-t1] t = 1 x L x G x legs x chain -> in-kernel ns (wall = + 91 000); G: p256k 169.2 (E21, design page), shuf64k 167.0, stream174, k1loop 138.3 (session-1 diagnostic loop), shuf16k 153.8")
+    for k, L in LS.items():
+        for gk, G in G4.items():
+            for lg in (2, 1, 0):
+                for var, conv in CORNERS4:
+                    T, s, b = step4(L, 1, G, var, conv, legs=lg)
+                    print(f"[R4-t1-{k}-{gk}-legs{lg}-{var}-{conv}] T={T} ns ({usR(T)} us; wall {usR(T+T_LAUNCH)}) bind={b} ddr={s['ddr']} vec={s['vec']} mma={s['mma']} ldr={s['loader']} drain={s['drain']} fixed={s['fixed']} vblk={s['vblk']} nb={s['nb']} "
+                          f"| eff {t10(rateT(L*KV_TOK, T))} GB/s | x GEMV {t10(pct(T, T_GEMV))}%")
+    for k in ("32k", "1M"):
+        L = LS[k]
+        for gk in ("p256k", "shuf64k", "k1loop"):
+            G = G4[gk]; r3 = step3(L, 1, G if gk != "k1loop" else G, "lazy", "T")[0] if gk != "k1loop" else None
+            a = step4(L, 1, G, "lazy", "T")[0]; a0 = step4(L, 1, G, "lazy", "T", legs=0)[0]; w = step4(L, 1, G, "lazy", "C")[0]; rm = step4(L, 1, G, "rowmax", "T")[0]; rc = step4(L, 1, G, "rowmax", "C")[0]
+            print(f"[R4-moved-t1-{k}-{gk}] round-3 lazy-T {step3(L,1,G,'lazy','T')[0]} ({usR(step3(L,1,G,'lazy','T')[0])} us) / rowmax-T {step3(L,1,G)[0]} ({usR(step3(L,1,G)[0])}) -> round 4 lazy-T legs 2 {a} ({usR(a)} us, {'+' if a >= step3(L,1,G,'lazy','T')[0] else '-'}{t10(pct(abs(a - step3(L,1,G,'lazy','T')[0]), step3(L,1,G,'lazy','T')[0]))}%) / legs 0 {a0} ({usR(a0)}) / lazy-C {w} ({usR(w)}) / rowmax-T {rm} ({usR(rm)}) / rowmax-C {rc} ({usR(rc)})")
+    for gk in ("p256k", "k1loop", "stream174"):
+        G = G4[gk]
+        for lg in (2, 0):
+            d = ddr4_block_ns(G, 1, lg)
+            print(f"[R4-t1-binding-{gk}-legs{lg}] block DDR {d} ns vs vector lazy-T {vec4_ns(512,1,'lazy','T')} / lazy-C {vec4_ns(512,1,'lazy','C')} / rowmax-T {vec4_ns(512,1,'rowmax','T')} / rowmax-C {vec4_ns(512,1,'rowmax','C')}: "
+                  + ", ".join(f"{var}-{conv} {'DDR-bound' if vec4_ns(512,1,var,conv) <= d else 'VECTOR-bound'} (slack {d - vec4_ns(512,1,var,conv)} ns)" for var, conv in CORNERS4))
+    # ---- merge as a hypothesis variable: thresholds at legs 2 / 0
+    for gk in ("stream174", "p256k"):
+        G = G4[gk]
+        for lg in (2, 0):
+            d = ddr4_block_ns(G, 1, lg)
+            for var, conv in CORNERS4:
+                base = chain4_100(512, 1, var, conv, 0); lim = (d + 1) * 4320 - 1 - base
+                print(f"[R4-merge-threshold-{var}-{conv}-{gk}-legs{lg}] t = 1 DDR-bound iff merge <= {lim//100} lane-eq (fresh-set merge {merge4_100(512,var,conv)//100}: {'OK' if merge4_100(512,var,conv) <= lim else 'EXCEEDS'})")
+    # ---- t = 16: two passes vs S4, t = 4 / 8 regime at 32k
+    for t in (1, 2, 4, 8, 16):
+        for var, conv in CORNERS4:
+            T, s, b = step4(32768, t, G4["p256k"], var, conv)
+            T0, s0, b0 = step4(32768, t, G4["p256k"], var, conv, legs=0)
+            print(f"[R4-regime-t{t}-{var}-{conv}] rows={rows_of(t)} passes={s['passes']} mt={s['mt']} block={BL_of(s['mt'])}: at 169.2 legs 2 T={usR(T)} us bind={b} vec/ddr={t10(pct(s['vec'], s['ddr']))}% | legs 0 T={usR(T0)} us bind={b0} | round 3 {usR(step3(32768,t,G4['p256k'],var,conv)[0])}")
+    for k in ("32k", "1M"):
+        L = LS[k]
+        for var, conv in (("lazy", "T"), ("rowmax", "T")):
+            T2 = step4(L, 16, R_GEMM, var, conv)[0]; T1 = step4(L, 16, R_GEMM, var, conv, onepass=True)[0]
+            print(f"[R4-t16-{k}-{var}-{conv}] two passes {T2} ({usR(T2)} us) vs S4 one pass {T1} ({usR(T1)} us): S4/two-pass = {t10(pct(T1, T2))}% (two passes win)")
+    for var, conv in (("lazy", "T"), ("rowmax", "T")):
+        lo, hi = 0, 400000
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if step4(32768, 16, R_GEMM, var, conv, merge100=mid * 100, onepass=True)[0] < step4(32768, 16, R_GEMM, var, conv, merge100=mid * 100)[0]: lo = mid
+            else: hi = mid - 1
+        print(f"[R4-s4-threshold-{var}-{conv}] S4 beats two passes at 32k iff merge <= {lo} lane-eq per block-fragment (fresh-set merge {merge4_100(128,var,conv)//100} / {merge4_100(256,var,conv)//100} at 128 / 256: two passes win)")
+    for var, conv in CORNERS4:
+        mt = 1
+        while vec4_ns(BL_of(mt), mt, var, conv) < ddr4_block_ns(R_GEMM, mt, 2) and mt < 8: mt += 1
+        mt0 = 1
+        while vec4_ns(BL_of(mt0), mt0, var, conv) < ddr4_block_ns(R_GEMM, mt0, 0) and mt0 < 8: mt0 += 1
+        print(f"[R4-rows*-{var}-{conv}] smallest mt with vector >= KV per block at 174.6: legs 2 mt={mt} -> rows*={16*mt} (t >= {ceil(16*mt, G_Q)}); legs 0 mt={mt0} -> rows*={16*mt0} (t >= {ceil(16*mt0, G_Q)})")
+    # ---- KV-int8
+    for var in ("rowmax", "lazy"):
+        T, s, b = step4(32768, 1, G4["p256k"], var, "T", i8=True); T1, s1, b1 = step4(1 << 20, 1, G4["p256k"], var, "T", i8=True)
+        print(f"[R4-i8-t1-{var}] KV-int8 at 169.2, legs 2: 32k {T} ({usR(T)} us) bind={b}; 1M {T1} ({usR(T1)} us); " + ("UNREACHABLE as specified: P quantised at the fixed scale 127 assumes p <= 1 but the lazy P reaches e^8 = 2981 (127 x 2981 saturates i8); reachable only at mu = 0 (trip rate UNMEASURED, E35 at mu = 0)" if var == "lazy" else "the rowmax chain's per-block max is what the fixed scale 127 needs"))
+    # ---- lazy economics (section 3.4 closure)
+    saved = vec4_ns(512, 1, "rowmax", "T") - vec4_ns(512, 1, "lazy", "T"); trip = vec4_ns(512, 1, "rowmax", "T") + 32 * C_MMA + drain4_ns(1, R_DRAIN_M[1])
+    print(f"[R4-lazy-trip] per 512-token block the lazy chain saves {saved} ns ({vec4_ns(512,1,'rowmax','T')} - {vec4_ns(512,1,'lazy','T')}); a trip costs ~{trip} ns (the section-3.2 chain + {32*C_MMA} ns of re-issued PV calls + a {drain4_ns(1, R_DRAIN_M[1])} ns re-drain) -> the variant pays iff fewer than one trip per {trip*10//saved/10:.1f} blocks; "
+          f"a needle profile (every block trips) costs +{64*trip} ns = {usR(64*trip)} us at 32k (64 blocks), +{2048*trip//1000} us at 1M; switch policy: after k = 3 trips in one step finish on the rowmax chain (worst case +{3*trip} ns + the rowmax cells)")
+    # ---- causality at t > 1 (review item 6)
+    for t in (1, 2, 4, 8, 16):
+        worst = max(tail4_tok(L, t) for L in range(t, t + 16))
+        print(f"[R4-tail-t{t}] tail tokens = (L - t) mod 16 + t: max {worst} (two 16-token groups: tails of 32 tokens = {32*D*2} B each); vector tail at the max = {worst*D*16*mt_of(rows_of(t))*4} lane-ops x mt {mt_of(rows_of(t))} = {worst*D*16*mt_of(rows_of(t))*4*137*10//43200} ns (T); mask {mask4_lanes(t, mt_of(rows_of(t)))} lanes = {mask4_lanes(t, mt_of(rows_of(t)))*137*10//43200} ns per step")
+    # ---- planted sink (review item 7)
+    for k, L in LS.items():
+        print(f"[R4-sink-{k}] one sink at p = 1 and L - 1 tokens at p = 2^-25 (just under the f16 flush line 2^-24 = 5.96e-8): lost row mass {sink_lost_ppm(L)} ppm = {sink_lost_ppm(L)/10000:.2f} %; the same tokens with the shift offset beta = 3 nats sit at 2^-25 x e^3 (> the line): no loss")
+    print(f"[R4-sink-line] f16 flushes p below 2^-24: s - m < -ln(2^24) = -16.6 nats (host arithmetic: e^16 = 8.89e6 < 2^24 = {2**24} < e^17 = 2.42e7); with the lazy shift m_r - beta the top of the range is e^beta (guard at e^(8+beta) must stay < 65 504: beta <= 3)")
+    # ---- online-chain f32 drift (review item 5 re-aimed)
+    for k, L in LS.items():
+        for bl in (512, 256, 1024):
+            nO, nS = chain_O(L, bl), chain_S(L, bl)
+            print(f"[R4-drift-{k}-{bl}] partials {L//128}; longest f32 add chain O {nO}, S {nS}: deterministic first-order rel. error {rel_ppm(nO)} + {rel_ppm(nS)} = {rel_ppm(nO) + rel_ppm(nS)} ppm (ship line 1000 ppm: {'ships' if rel_ppm(nO) + rel_ppm(nS) < 1000 else 'FAILS'}); "
+                  f"naive single-level O chain {L//128}: {rel_ppm(L//128)} ppm; random-walk sqrt({nO}) x 2^-24 = {isqrt(nO)*60} ppb")
+    print(f"[R4-drift-retired] the region-difference bounds of round 2/3 (T_drift_1M: 683 visits x 32 -> ulp 2^-9 = 1953 ppm; T_drift_blocks: 1366 visits -> ulp 2^-8 = 3906 ppm) exceeded the 1000 ppm ship line deterministically (1M shipped only under the random-walk hypothesis); the mechanism is retired (erratum #19): fresh chunk sets have no region content")
+    # ---- C_o stride math (review item 8) and 256 KiB pages (item 11)
+    print(f"[R4-stride] C_o f32: row r of fragment f = 8 runs of 64 B at stride {co_addr(0,1,0,0) - co_addr(0,0,0,0)} B from f*{co_addr(1,0,0,0)} + r*{co_addr(0,0,1,0)} (dim j at +{co_addr(0,0,0,1)}); f16: 32 B runs at stride {co_addr16(0,1,0,0)} from f*{co_addr16(1,0,0,0)} + r*{co_addr16(0,0,1,0)}; m = 64 calls: stride {co_addr_m64(1,0,0) - co_addr_m64(0,0,0)}, row r at +{co_addr_m64(0,1,0)}; d = 64: 4 runs; out per step = {16*D*4} B x mt")
+    print(f"[R4-page256] 256 KiB page = 4 sub-pages of 64 KiB, sub-page (l mod 1024) div 256: addr_K(300, 5) = {kAddr256(300, 5)} = 65536 + {kAddr64(44, 5)}; addr_V(1023, 127) = {vAddr256(1023, 127)} (max, even, < 262144); window 512 entries x 1024 tokens = {512*1024} tokens per 4 KiB (64 KiB pages: 131072)")
+    # ---- page waste (review item 11)
+    for P in (64 * KiB, 256 * KiB, MiB):
+        w = page_waste(P)
+        print(f"[R4-waste-{P//KiB}k] worst tail waste per (layer, sequence) {w} B = {w/MiB:.2f} MiB; per 15-layer dense die B = 1 / 8 / 16: {15*w/MiB:.0f} / {15*8*w/MiB:.0f} / {15*16*w/MiB:.0f} MiB; per 4-layer MoE die {4*w/MiB:.0f} / {4*8*w/MiB:.0f} / {4*16*w/MiB:.0f} MiB; "
+              f"per 30-layer instance die B = 1: {30*w/MiB:.0f} MiB vs the instance-fit margins 3.3 / 15.0 / 24.5 / 2.7 MB (dense 32k / 128k, MoE 32k / 1M): {'EXCEEDS every margin' if 30*w > 24485516 else 'within some margins'}; dense 1M KV-int8 margin 1 656 740 864 B - 15 x {w} = {1656740864 - 15*w} B (fits)")
+    # ---- fleet: the MoE-128k verdict with the bounce (review item 11: read the realised G)
+    for lg in (2, 1, 0):
+        verd = []
+        for gk in ("p256k", "shuf64k", "k1loop", "stream174"):
+            T = step4(131072, 1, G4[gk], "lazy", "T", legs=lg)[0]
+            verd.append(f"{gk}: {'ATTN-bound' if T >= T_LAYER_MOE else 'weights-bound'} by {t10(pct(abs(T - T_LAYER_MOE), T_LAYER_MOE))}% ({abs(T - T_LAYER_MOE)//1000} us)")
+        fx = step4(512, 1, R_GEMM, "lazy", "T", legs=lg)[1]["fixed"]; nb = nblocks4(131072, 1, 1); k0 = ceil(T_LAYER_MOE - fx, nb); Gs = (BL * CORE_TOK + bounce_bytes(1, lg)) * 8 * 10 // k0
+        print(f"[R4-fleet-moe-128k-legs{lg}] lazy-T, legs {lg}: attention-bound iff G <= {Gs} tenths (fixed {fx}, {nb} blocks): " + "; ".join(verd))
+    # ---- crossover (section 6.3) on the round-4 lazy chain
+    for gk in ("stream174", "p256k", "k1loop"):
+        G = G4[gk]
+        for lg in (2, 0):
+            kk = 1
+            while step4(512 * kk, 1, G, "lazy", "T", legs=lg)[0] < T_GEMV: kk += 1
+            La = 1
+            while step4(La, 1, G, "lazy", "T", legs=lg)[0] < T_GEMV: La += 1
+            Lm = 512 * kk
+            while Lm > 1 and step4(Lm - 1, 1, G, "lazy", "T", legs=lg)[0] >= T_GEMV: Lm -= 1
+            print(f"[R4-crossover-lazy-T-{gk}-legs{lg}] block {ddr4_block_ns(G,1,lg)} ns, fixed {step4(512,1,G,'lazy','T',legs=lg)[1]['fixed']}: smallest 512-multiple with step >= 398 us: k={kk} -> L_eq={512*kk} (step {step4(512*kk,1,G,'lazy','T',legs=lg)[0]}, at k-1 {step4(512*(kk-1),1,G,'lazy','T',legs=lg)[0]}); first L {La}, every L >= {Lm}" + ("" if La == Lm else " (not monotone between)"))
+    # ---- buffers: US and S1 round 4
+    for mt in (1, 2, 3, 4):
+        r = us4_rows(mt); s = sum(r.values())
+        print(f"[R4-us-mt{mt}] US = {s} B = {s//KiB} KiB + {s % KiB} B vs 208 KiB evidenced: {'FITS' if s <= US_EVID else 'OVER by ' + str(s - US_EVID)}; S1 = P ring {2*4*KiB*mt//KiB} KiB (no snapshots); DDR scratch for P {2*p_bytes(mt)//KiB} KiB; rows: " + ", ".join(f"{a} {b}" for a, b in r.items()))
+
+if __name__ == "__main__":
+    main4()
