@@ -1375,3 +1375,51 @@ def main5():
 
 if __name__ == "__main__":
     main5()
+
+
+# =====================================================================================================================================
+# PROMPT-6 (2026-11-08) — the new-errata audit (#18-#31): the cells it moves in DESIGN-4. Labels [PA-*]; every label above keeps printing
+# its value. No new silicon. (1) erratum #19 on the cold tier (section 1.8, V3): fresh chunks + the vector f32 K-sum, + 8 313 ns (T) /
+# 32 614 ns (C) per int4 core-slab on the binding vector unit (ALTERNATIVES [PA-cold-merge]); (2) erratum #29 on the megakernel (V2):
+# one crossing per flag round -> the 20 us branch is the primary reading (the single V2 cell at 20 us already prints in [R3-mega-moe]);
+# (3) erratum #31 on the dense 1M KV-int8 route: the rowmax chain's deterministic per-block crossing is 16 scalar-destination reduces
+# (17 600 ns), not the round-5 lower bound's drain + 16 scalar reads (the racing composition).
+# =====================================================================================================================================
+MERGE6F = (8_313, 32_614)                                         # ns per int4 core-slab: throughput / chained (ALTERNATIVES [PA-cold-merge])
+XDET6 = 16 * 1_100                                                # 17 600 ns: 16 scalar-destination reduce-max calls (erratum #29's 1.1 us each)
+
+def main_pa():
+    D, M = DENSE, MOE
+    print("\n# ---- PROMPT-6 (2026-11-08; the new-errata audit): [PA-*] cells. Every label above is unchanged ----")
+    for s in SHAPES:
+        xs = [min_x(s, p, 32768) for p in range(4)]; T0 = step3(s, 32768)[0]; a3 = attn3_seq(s, 32768, 1, 1692)[0]
+        one = {rd: tps_card(1000, step5f(s, 32768, a5(32768, rd))[0]) for rd in READ5}
+        Tb = inst_step3c(s, 32768, xs=xs)[0]
+        cells = [f"as written {t3(tps_card_inst(1000, Tb))}"]
+        for conv, mg in zip(("T", "C"), MERGE6F):
+            Tc = T_SLAB_W4 + mg; Ti = inst_step3c(s, 32768, xs=xs, cold=Tc)[0]
+            r5 = []
+            for rd in READ5:
+                T = Ti - s["nL"] * a3 + s["nL"] * a5(32768, rd)
+                r5.append(f"{rd} {t3(tps_inst_c(1000, H10_CARD, T))} (needs c >= {t3(c_min(T, one[rd] + 1))})")
+            cells.append(f"{conv}: slab {Tc} ns (dense W8-eq {t10(cold_tier(Tc)[1])}) -> {ms2(Ti)} ms -> {t3(tps_card_inst(1000, Ti))} ({spc(pcs(tps_card_inst(1000, Ti), tps_card(1000, T0)))}); "
+                         f"round-5 readings at c = 1.990: " + ", ".join(r5))
+        print(f"[PA-inst-{s['name']}-32k] V3 with the erratum-#19 merge (x {xs}): " + "; ".join(cells))
+    # ---- the megakernel at the 20 us primary reading: V2 alone (already [R3-mega-*]), V1 + V2, V3 + V2
+    T0 = step3(M, 32768)[0]
+    for cs in (5000, 20000):
+        xs = [min_x(M, p, 32768) for p in range(4)]
+        Tv2 = step3(M, 32768, mega=cs)[0]
+        Tm, _ = inst_step3c(M, 32768, xs=xs, mega=cs)
+        xd = [min_x(D, p, 32768) for p in range(4)]; Tmd, _ = inst_step3c(D, 32768, xs=xd, mega=cs); T0d = step3(D, 32768)[0]
+        print(f"[PA-mega-{cs // 1000}us] c_sync {cs} ns{' (the erratum-#29 primary reading: one batched crossing per flag round)' if cs == 20000 else ' (as written)'}: "
+              f"V2 MoE {t3(tps_card(1000, Tv2))} ({spc(pcs(tps_card(1000, Tv2), tps_card(1000, T0)))}); V3 + V2 MoE {ms2(Tm)} ms -> {t3(tps_card_inst(1000, Tm))} "
+              f"({spc(pcs(tps_card_inst(1000, Tm), tps_card(1000, T0)))}); V3 + V2 dense {t3(tps_card_inst(1000, Tmd))} ({spc(pcs(tps_card_inst(1000, Tmd), tps_card(1000, T0d)))})")
+    # ---- the dense 1M KV-int8 bound with the deterministic crossing (erratum #31)
+    Ti8 = step4f(D, 1048576, i8=True, var="rowmax")[0]; add5 = D["nL"] * 2048 * A.X5_ROWMAX; add6 = D["nL"] * 2048 * XDET6
+    print(f"[PA-dense-1M-kvi8] dense 1M KV-int8 on the rowmax chain: round 5's bound used the cheaper crossing ({A.X5_ROWMAX} ns = a drain + 16 scalar reads of fresh "
+          f"reduce-max results -- the racing composition of erratum #31) -> <= {t3(tps_card(1000, Ti8 + add5))}; the deterministic crossing (16 scalar-destination reduces, {XDET6} ns) "
+          f"adds {ms2(add6)} ms -> <= {t3(tps_card(1000, Ti8 + add6))} tok/s/card (a tighter bound on a route that IS shippable, deterministically; the lazy mu = 0 variant UNMEASURED)")
+
+if __name__ == "__main__":
+    main_pa()

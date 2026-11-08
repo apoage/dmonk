@@ -158,3 +158,21 @@ T_instance_gain survives the measured premise with a 6.9× (time) / 3.3× (corre
 (the ovl branch, +48.5 % / +49.0 %, stands); the two-tier page scheme "dominates" only in the restated sense and
 buys 1.1 % at the measured c_pg; the quantizer rows become a 0.9 % / 3.5 % cost on every cell instead of a
 0.1 % / 0.2 % fusion or a −2.8 % / −13.2 % fallback.
+
+
+## PROMPT-6 audit (2026-11-08) — the cells errata #18–#31 move in ALTERNATIVES.md
+
+`[PA-*]` labels are printed by `python3 -I proof/alt.py` after the `[ALT-P-*]` block (the first 166 output lines are byte-identical);
+theorems `T6a_*` (7) close `proof/alt.lean` (namespace `Audit6A`; 111 theorems in all; standalone and `lake build` clean; 0 axioms /
+sorry / native_decide — `#print axioms`: 5 depend on no axiom, the 2 `_gain` theorems on `propext` + `Classical.choice` + `Quot.sound` via
+T_instance_gain). Cell theorems are generated from alt.py's own values (scratch `gen_alt6.py`). The per-design tables are ERRATA-IMPACT.md.
+
+| # | Claim (ALTERNATIVES PROMPT-6 banner and marks) | Proof | labels | Status |
+|---|---|---|---|---|
+| PA5-1 | erratum #19 on the cold tier: fresh chunks + the vector f32 K-sum add 512 × 512 f32 lanes × 1.37 / 43.2 = 8 313 ns (throughput) / 512 × 63.7 = 32 614 ns (chained) per core-slab; the overlapped slab 197 844 → 206 157 / 230 458 ns; the serial piece 807 → 836 / 883 ns (+ 13 ns drain + 16 / 63 ns add) | T6a_cold_merge_T, T6a_cold_merge_C | [PA-cold-merge] | PROVED (the merge pattern: INPUT #19; the conventions: DESIGN-3's T / C) |
+| PA5-2 | the instance cells with the merge: MoE 32k 3.878 → **3.849** / 3.766 (+106.1 / +101.7 %), Zipf(1.0) 4.190 → 4.184 / 4.166, dense 32k 0.156 → **0.153** / 0.144 (W8-eq 81.3 / 72.7); serial branch MoE 3.239 → 3.202 / 3.145, dense 0.100 → 0.098 / 0.094 (−6.6 / −10.4 %); break-even margin 6.9× → **6.6× / 5.9×** (serial 3.3× → 3.2× / 3.0×); T_instance_gain holds at both merged slabs | T6a_cold_merge_T / _C, T6a_cold_merge_zipf_T / _C, T6a_cold_merge_gain_T / _C (via T_instance_gain, ∀ Tc) | [PA-inst-T] [PA-inst-C] [PA-inst-ser-*] | PROVED; CORRECTION of rows 1, 8–11 and `[ALT-P-ser-*]`'s instantiation (the iff itself is untouched) |
+| PA5-3 | erratum #29 on the megakernel: the primary reading is c_sync = 20 µs (one crossing per flag round) — the single megakernel MoE 2.058 (+10.2 %) / dense 0.107 (+1.9 %) (already T_alt_mega_cells); ALT-3+1 2.415 → **2.367**, ALT-2+3 MoE 4.369 → **4.291**, dense 0.158 unchanged; 108 430 / 109 902 ns are 5.4× above 20 µs | T6a_mega_20us, T_alt_mega_cells | [PA-mega-combos-*] [PA-mega-20us] | PROVED; CORRECTION of rows 16–18's primary branch (the iffs untouched); c_sync: EMPIRICAL — E31 (with vector work in flight) |
+| PA5-4 | the placements without a number: the lazy-rescale cells `[ALT-8-*]` VOID as specified (#19 / #29 / #31); the quantizer's Muls (#22) and A-slot extraction (#20) struck; the megakernel's checksum compare (#31), slice-only norm / absmax (a dataflow gap), q bounce (#20), 16 KiB x staging (#25), bounded polls (#26), nest resets (#30 / #18 / #28); E30's oracle (#19), scales (#22) and patterns (#21); the B-slot US → S1 route (#20's sibling, unproven); corrected #3 (hygiene) | — | — | DEFINITION / VOID status (no cell; ERRATA-IMPACT.md) |
+
+**Coverage, PROMPT-6:** 4 / 4 rows resolved; every `T6a_*` theorem of alt.lean is cited (PA5-1 … PA5-3); **0 orphans**. The proof-round
+rows above are unchanged; rows 1, 8–11 and 16–18 keep their theorems (true of the as-written model) and gain the PROMPT-6 instantiation.

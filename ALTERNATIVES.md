@@ -1,5 +1,27 @@
 # ALTERNATIVES — pattern-matching the known solution families against the measured map (round 5)
 
+> **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this document; `proof/alt.py` `[PA-*]`,
+> `proof/alt.lean` `T6a_*` (7 new theorems, 111 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-5 rows
+> PA5-1 … PA5-4; all five designs in ERRATA-IMPACT.md).** No new silicon; alt.py's first 166 output lines are byte-identical; every
+> correction is marked **audit** in place. **What moves:** (1) **erratum #19 VIOLATES the cold tier of rank 1** (§2.1): the unpacked int4
+> tile is the B operand of the f16 × f16 → f32 tuple and its C chunk accumulated K = 4 096 across the per-piece barriers and the A re-lifts;
+> the fix is DESIGN-3 round 4's — a fresh chunk per call, the partials summed in f32 on the vector unit: + 8 313 ns (throughput) / 32 614 ns
+> (chained) per core-slab on the binding vector unit. **The verdict survives** (T_instance_gain is an iff over every slab time; the merged
+> slab is 6.6× / 5.9× inside its line): MoE 32k **3.878 → 3.849 / 3.766**, Zipf 4.190 → 4.184 / 4.166, dense 32k 0.156 → 0.153 / 0.144;
+> serial branch MoE 3.239 → 3.202 / 3.145, dense −4.7 % → −6.6 % / −10.4 % (T6a_cold_merge_*). (2) **Erratum #29 re-prices the
+> megakernel's rendezvous** (§2.3): every flag round ends in a scalar read after a fence — one crossing, 10–20 µs measured — so the
+> primary reading is the 20 µs branch, not "µs class": MoE **2.101 → 2.058 (+10.2 %)**, dense 0.108 → 0.107 (+1.9 %); ALT-3+1 2.415 →
+> **2.367**, ALT-2+3 MoE 4.369 → **4.291** (T6a_mega_20us; the iff lines 108 430 / 109 902 ns are untouched, 5.4× above 20 µs); polling
+> the 8 flags as 8 crossings would sit at the line — the flag fetch is batched. (3) **Erratum #31 / #22 / #20 / #25 / #26 / #30 on the
+> megakernel protocol:** the checksum compare is a fresh-reduction readback (compare on the vector side, read once per layer, re-run on a
+> mismatch); the "norm and quantizer on its slice" needs full-row statistics that core c does not hold (every core normalizes and
+> quantizes the full x after the broadcast read); q and every vector-built A ride the DDR bounce; the 16 KiB i8 x is staged in 32 KiB legs
+> or 4 KiB offset-0 blocks; polls are bounded nests; every nest resets the B ping-pong. (4) **The lazy-rescale family (rank 9) is VOID as
+> specified** (#19: a resident f16 PV region across barriers; #29 / #31: the per-block row-max check is the guard-scan crossing) — the
+> shipped deferred-guard kernel is its realisable form; the `[ALT-8-*]` cells assumed merge = 0 and no crossings. (5) The quantizing
+> epilogue's `Muls` (#22) and US → S1 A-slot extraction (#20) are struck. The "Must survive" column and every errata-survival paragraph
+> predate #18; the survival rules of #18–#31 are in ERRATA-IMPACT.md.
+
 > **ROUND-2 (PROOF) STATUS — 2026-11-05, PROMPT-5P.** Every ledger row of Appendix A is now a theorem of
 > `proof/alt.lean` (104 theorems, core Lean 4.35, 0 axioms / sorry / native_decide; `PROOF-COVERAGE-5.md` is the
 > ledger). Two inputs were applied by steering before proving: **the f16 → i8 activation pass is MEASURED**
@@ -165,7 +187,11 @@ memory is what pins the fleet to one instance.
   i8 A. *Cold path* (int4 bytes): host-packed i4 nibbles in the f16 fractal order → DDR → US plain copies
   (≤ 64 KiB, the measured 173–177 aggregate path) → the measured 5-pass unpack to f16 with per-group offset/scale →
   US → S1 (250 GB/s/core) → S1 → L0B loader (26.5 strict-serial) → f16×f16→f32 MMA (verified tuple) → the f32
-  region-difference epilogue of DESIGN-3 §3.2. Same core, same column slice, hot experts first, then cold: no
+  region-difference epilogue of DESIGN-3 §3.2 [**audit (#19): VIOLATES — f16 accumulation into one C chunk across the per-piece
+  barriers and the A re-lifts (x f16 = 128 KiB > L0A) corrupts at ≥ 2 accumulations, and the region difference is itself such a chain;
+  every call writes a fresh chunk and the vector unit sums the partials in f32 (+ 8 313 / 32 614 ns per core-slab, `[PA-cold-merge]`);
+  the US → S1 copy into the B slot has a measured rate but no content proof (#20's A-slot sibling): E30 must content-check it, and the
+  fallback (a DDR bounce into the direct B path) puts the slab in the serial-branch class — dense replication then turns negative**]. Same core, same column slice, hot experts first, then cold: no
   cross-core traffic, scheme S's balance theorem (Z2) holds per tier. Both A operands (x_q 64 KiB i8, x 128 KiB f16
   at K = 4096) are S1-resident for the step.
 - *Fleet accounting*: tokens/s per card = 2 instances / (4 cards × T_inst).
@@ -177,7 +203,9 @@ memory is what pins the fleet to one instance.
   mix at x = 0.182 (uniform routing streams the tier in proportion): 24 slabs per layer → 3 × 8 × [(1 − x)·99 374
   + x·197 844]; attention GEMMs 240 223 ns + 2F; per die 7 layers; W = 88.60 ms, KV 21.52, launch 18.01,
   exchange 0.75 ms (8 λ + 28 µs) → **T_inst = 128.89 ms** (today's 8-die step: 133.84).
-- tokens/s/card = 2 × 1000 / (4 × 128.89 ms) = **3.878** vs 1.867 (+107.7 %). Zipf(1.0) popularity with the
+- tokens/s/card = 2 × 1000 / (4 × 128.89 ms) = **3.878** vs 1.867 (+107.7 %) [**audit (#19): with the fresh-chunk merge 3.849 (throughput) /
+  3.766 (chained); Zipf 4.184 / 4.166; dense 32k 0.153 / 0.144; serial branch 3.202 / 3.145 and dense −6.6 % / −10.4 %; break-even margin
+  6.6× / 5.9× — `[PA-inst-*]`, T6a_cold_merge_T / _C**]. Zipf(1.0) popularity with the
   coldest 18 % as int4 (they carry 3.2 % of the traffic, `[ALT-2-zipf-share]`): 119.31 ms → **4.190** (+124.4 %).
   With the serial-chain branch of the unpack (40.8 W8-equivalent GB/s after the proof-round correction of its f16
   legs, `[ALT-P-w4ser]`): 154.36 ms → 3.239 (+73.4 %) (as written, 55.2 / 596 ns: 141.59 ms → 3.531).
@@ -206,13 +234,13 @@ memory is what pins the fleet to one instance.
 
 **Errata survival.** #12: no i4 → f16 hardware path and the i4×i4 tuple is dead — the design uses neither; the
 int4 bytes go through the *measured* 5-pass vector unpack, and nothing is assumed about its rate beyond HW-MAP's
-5.3 (the serial-chain branch is carried). #2: every copy ≤ 64 KiB. #3: unpack reels of ≤ 1 024 lanes. #4/#6: the
+5.3 (the serial-chain branch is carried). #2: every copy ≤ 64 KiB. #3: unpack reels of ≤ 1 024 lanes (**audit:** hygiene, not a cap — corrected #3; the model prices the measured 5.3 GB/s/core, so nothing was paid). #4/#6: the
 unpack's shifts and rounding are inside the measured 5-pass routine — E30 re-verifies its exactness on the
 fractal-ordered nibbles with power-of-two scales (a silent no-op pass shows as unchanged lanes). #8/#9/#14: the
 unpack → US→S1 → loader → MMA chain is a four-engine pipeline with explicit pipe barriers and queue depth =
 count; the loader regime (overlapped vs strict-serial) is the ovl/ser branch, not an assumption. #13: hot experts
 on i8×i8 with i8 A (needs §2.4's quantizer or host A), cold on f16×f16 with f16 A. #11: two independent chains,
-each layer-split inside its own runtime; no P2P, no tensor-split. #5: f32 accumulation everywhere. Thermal: four
+each layer-split inside its own runtime; no P2P, no tensor-split. #5: f32 accumulation everywhere (**audit, #19:** but no f16 accumulate chain may cross a barrier or an A re-lift — fresh chunks + the vector f32 sum; **#28 / #30:** one arm per handshake, and the hot → cold nest boundary resets the L0B ping-pong and preloads its own first piece; **#22 / #23:** the per-group scale is Duplicate + binary Mul and no broadcast is a srcStride-0 copy). Thermal: four
 cards at the measured 141 W sustained (DESIGN-4 T_power).
 
 **Experiments.** **H10** (host-only, the gate): two runtime processes, each given one 2-card model (the stage-2
@@ -220,9 +248,9 @@ model of DESIGN-4 §7 fits), each fed an independent sequence; pass = both seque
 single-instance runs *and* both cards' power sensors sit at the loaded level simultaneously (≥ 100 W each) for
 ≥ 100 steps — a runtime that serialises instances shows one card loaded at a time. Failure: either output
 diverges (cross-talk), or throughput(2) = throughput(1). **E30** (kernel): the cold-expert chain — i4 pattern with
-power-of-two scales and integer offsets through the fractal nibble order → f16 tiles content-compared to the host
+power-of-two scales and integer offsets through the fractal nibble order (**audit, #21 / #22:** distinct non-unit per-group scales — a unary-Muls no-op is invisible at scale 1 — and PRNG nibbles, not short-period patterns) → f16 tiles content-compared to the host
 (exact); differencing (a second i4 pattern through the same US/S1/L0B addresses); then the chain regime: 10⁴
-pieces with an E13-style accumulating oracle (f32-exact small integers), the per-piece time classifies ovl (386 ns)
+pieces with an E13-style accumulating oracle (f32-exact small integers; **audit, #19:** an f16 chain across barriers fails whatever the regime — the oracle is a fresh chunk per piece plus a running f32 sum), the per-piece time classifies ovl (386 ns)
 vs ser (807 ns; 596 as first written — the f16 legs are 8 KiB per 2 KiB of int4); positive control with the US→S1 barrier removed must corrupt. **H11**: per-die fit at the chosen x
 with H8's measured overhead (free memory after load ≥ KV(L) + 64 MiB); failure = the die refuses the allocation or
 H5's KV slope exceeds 7 × 4 KiB per token.
@@ -280,20 +308,23 @@ layer). The alternative is to build the fence: a sequence-numbered flag word in 
 - *Head-aligned QKV packing (free, no sync)*: the fused QKV weight is column-permuted on the host so that core c's
   1/8 column slice is {Q columns of the g query heads of KV head c} ∪ {K, V columns of head c}. Core c then owns
   exactly the q, k, v its attention needs (DESIGN-3 is already one KV head per core): q stays in US in the
-  A-fragment order (the prologue COPY_FRAC of DESIGN-3 §10.3 and the q round trip disappear), k goes into the
+  A-fragment order (the prologue COPY_FRAC of DESIGN-3 §10.3 and the q round trip disappear — **audit, #20:** the COPY_FRAC does, the round trip does not: q is an A operand built in vector SRAM and rides the DDR bounce, as every vector-built A), k goes into the
   fractal K page, v into V_tail — QKV → attention needs no cross-core data and no launch boundary
   (`[ALT-3-headaligned-*]`: dense +0.9 %, MoE +1.9 % on their own).
 - *The two reductions per layer*: attention → O projection is a K-split over the heads (core c multiplies its
   g·d = 1 024 head-output values by W_o rows [1 024 c, 1 024 (c + 1)) × all d_model columns → partial y_c [rows,
   d_model] f32 = 64 KiB at rows = 1, d = 16 384); gate/up → down is a K-split over the FFN columns core c owns.
   Protocol per reduction: every core writes its partial (US → DDR, ≤ 64 KiB copies), issues a full barrier, writes
-  flag[c] = {seq, checksum}; core c polls the 8 flags (64 B DDR → US copies in a scalar loop), reads the 1/8 column
+  flag[c] = {seq, checksum}; core c polls the 8 flags (64 B DDR → US copies in a scalar loop — **audit, #26:** in bounded nests of ≤ 256 inside an outer loop, never an unbounded spin), reads the 1/8 column
   slice of every partial (8 × 8 KiB), reduces in f32, applies residual + norm (+ RoPE where relevant) and the
-  §2.4 quantizer on its slice, writes the f16 and i8 slices, flags again; every core then reads the full x
-  (32 KiB f16 + 16 KiB i8) for the next N-split GEMM. Two sync rounds per reduction → 4 syncs per dense layer;
+  §2.4 quantizer on its slice [**audit (#31 / #22, and a dataflow gap the audit exposes): the norm statistic and the quantizer's absmax
+  are full-row reductions that core c, holding 1/8 of the columns, cannot form on its slice; minimal fix — every core normalizes and
+  quantizes the full x after the broadcast read (redundant vector work, no extra round), the scale through a proven-deterministic
+  composition (never a fresh reduce read at a fence) and Duplicate + binary Mul**], writes the f16 and i8 slices, flags again; every core then reads the full x
+  (32 KiB f16 + 16 KiB i8) for the next N-split GEMM (**audit, #25:** staged as 32 KiB legs at 32-KiB-granular offsets or 4 KiB blocks at offset 0 — a 16 KiB single block zeroes A rows ≥ 2: silent at rows = 1, wrong at B = 16 and in verify batches). Two sync rounds per reduction → 4 syncs per dense layer;
   MoE adds the router: N-split router GEMM (2 MiB / 8 per core), one exchange of 256 logits (1 KiB), redundant
   top-k on every core (DESIGN-2 §4.2's dispatch) → 5 syncs per MoE layer.
-- *Launch structure*: one launch per **layer** (not per die block), so a kernel runs ≤ 18.3 ms (dense layer) /
+- *Launch structure*: one launch per **layer** (not per die block; **audit, #30 / #18 / #28:** several GEMM nests per launch — each resets the B ping-pong and preloads its own first tile, every L0 region is an explicit byte-offset tensor, one arm per handshake, per-region loop bounds for the per-core partial and flag regions), so a kernel runs ≤ 18.3 ms (dense layer) /
   3.3 ms (MoE) — far under the watchdog's "~seconds" class, which E32 measures anyway. Draft: one launch per
   layer (24) or one per token (1).
 
@@ -303,7 +334,7 @@ by 8 cores = 82 · rows · d_model B: dense 1.34 MB = 7.7 µs, two per layer →
 ms. Syncs: 480 (dense) / 140 (MoE) per token at c_sync each. Step: dense 2 362.31 → 2 310.52 ms at c_sync = 2 µs
 (0.108, +2.8 %); MoE 133.84 → **118.94 ms (2.101, +12.5 %)**; at c_sync = 20 µs still +1.9 % / +10.2 %. Break-even
 (T_mega_threshold, an iff): the megakernel pays iff c_sync ≤ (launches saved × 91 µs − reduction traffic) / syncs
-= **109.9 µs (dense) / 108.4 µs (MoE)** — a DDR round trip is µs class, so the margin is ≥ 5×. Draft token
+= **109.9 µs (dense) / 108.4 µs (MoE)** — a DDR round trip is µs class, so the margin is ≥ 5× [**audit (#29): every flag round ends in a scalar read after a fence = one crossing, 10–20 µs measured; the primary reading is the 20 µs branch: MoE 2.058 (+10.2 %), dense 0.107 (+1.9 %), ALT-3+1 2.367, ALT-2+3 MoE 4.291 (`[PA-mega-*]`, T6a_mega_20us) — 5.4× inside the line; eight unbatched flag crossings per round (80–160 µs) would sit at it, so the 8 flags are fetched in one copy and tested once**]. Draft token
 (`[ALT-3-draft-*]`): 18 092 µs → 9 265 (24 launches) / 7 172 (1 launch); verify step 54.27 → 27.79 / 21.51 ms;
 dense spec 32k 0.262 → 0.264 / 0.265. Combined with §2.2: MoE 32k 133.84 → **103.50 ms, 2.415 (+29.3 %)**
 (`[ALT-3+1-moe]`); with §2.1 as well: 4.369 (`[ALT-2+3-moe-32k]`).
@@ -320,7 +351,7 @@ core executes the same static schedule, so the flags form a barrier, not a lock.
 
 **Experiments.** **E31** (the DDR flag): 8 cores run 10³ rounds of {write a 64 KiB pattern P(round, core); full
 barrier; write flag = (round, checksum(P))}, then each core polls the other 7 flags and reads their patterns; pass =
-every read pattern's checksum equals the flagged one for all rounds, 20 reps; the per-round time is c_sync
+every read pattern's checksum equals the flagged one for all rounds, 20 reps (**audit, #31 / #21:** the checksum is formed on the host or on the vector side into a sticky lane read once per layer — a scalar read of a fresh reduction at a fence races and would mimic the visibility gap E31 hunts; patterns of prime period); the per-round time is c_sync
 (expected µs class; the design needs ≤ 108 µs); positive controls: (i) the producer's full barrier removed —
 must produce checksum mismatches (proves the detector sees reordering); (ii) a consumer polling a flag no one
 writes — must hit the watchdog (proves a hang is observable, not silent). **E32** (watchdog): a kernel streaming
@@ -337,7 +368,7 @@ GEMM's A operand must be quantized on the die, in the producing GEMM's epilogue,
 
 **Design sketch.** After the epilogue's f32 row (or after the §2.3 reduction), per token row: absmax (elementwise
 tree max over |x| — DESIGN-3 §3.2's 6-op tree with And(0x7FFF…) for |·| — plus a 16-lane scalar tail), scale
-s = 127 / absmax (scalar), `y = Muls(x, s)`, then one of three extraction mechanisms, settled by E33:
+s = 127 / absmax (scalar), `y = Muls(x, s)` [**audit (#22): VIOLATES — a unary Muls is a silent no-op: Duplicate + binary Mul; (#29 / #31): the tree max → scalar tail at a fence is a crossing per row and a fresh-reduction readback — reuse the measured pass's scale composition; (#20): mechanism (ii)'s extraction into the S1 A slot is a vector-SRAM → A-slot copy — every vector-built A rides DDR → S1 legs → loader**], then one of three extraction mechanisms, settled by E33:
 (i) an unlisted quantizing cast if the toolchain has one (errata #12's wording "the vector cast table has only
 the quantize direction" suggests f16 → i4/i8 casts exist for the dequant instruction's formats);
 (ii) **f16 magic bias**: `y16 = Adds(Cast_f16(y), 1280.0)` — for every q = round(y) ∈ [−127, 127] the value q + 1280
@@ -435,7 +466,7 @@ c_pg(64 KiB) > 0 at the measurement's resolution; at 0.1 µs it is already +3 %)
 
 **Lazy-rescale online softmax (rank 9, `[ALT-8-*]`).** DESIGN-3's merge (7 000 lane-ops per block per fragment,
 plus a C_o drain) exists because L0C cannot be rescaled. But softmax is invariant to the shift: fix m_r per row
-after the first block (plus a margin μ = 8), accumulate every block's P·V **into one resident L0C region** (the
+after the first block (plus a margin μ = 8), accumulate every block's P·V **into one resident L0C region** [**audit (#19 / #29 / #31): VOID as specified — a resident f16 PV region across the per-block barriers and P re-lifts corrupts, and the per-block row-max check is the guard-scan crossing on a fresh reduce-max; the realisable form is the shipped deferred-guard kernel (fresh sets, the vector merge, a vector-only fold); the `[ALT-8-*]` cells assumed merge = 0 and no crossings**] (the
 matrix unit accumulates; no drain, no α, no merge), and only if a later block's row max exceeds m_r + μ drain,
 rescale once and continue (exp(μ) = 2 981 ≪ 65 504 keeps P representable in f16, errata #5 never bites; a
 bounded-score contract is *not* assumed — the exception path exists). It dominates DESIGN-3's S4 variant and the
@@ -486,8 +517,8 @@ prefix-sharing histogram) decides whether any cell moves.
 |---|---|---|---|---|---|
 | L0B ring | 2 × 32 KiB direct tiles | same (B ring in S1 removed) | same (K/V tiles) | 3 × 16 KiB f16 pieces via the loader (DESIGN-2's L0B plan) | — |
 | L0C regions (region-difference reset everywhere; flags ignored) | 1 slab 64 KiB·mt | 6 × 32 KiB (U_max 32) | 3 C_s + 2 C_o (or 3 C_s + 1 O with lazy rescale) | 6 × 32 KiB f32 (DESIGN-3 drift bound) | — |
-| S1 | A ring / resident 128 KiB | x_q 64 KiB resident; shadows 192 KiB | P ring, NegSnap (mt ≥ 2) | + x f16 128 KiB resident | A resident written by the quantizer |
-| US | drain, s[n], y | drain / diff / shadow staging, y_acc 32 KiB | drained C_s, P staging, O, reels (208 KiB + 64 B at mt = 1 — the tightest) | unpack reels (≤ 1 024 lanes), 2 × 4 KiB f16 out | flag words (64 B), partial staging (≤ 64 KiB), quantizer reels |
+| S1 | A ring / resident 128 KiB | x_q 64 KiB resident (**audit, #25:** the measured 2 × 32 KiB legs at 32-KiB-granular offsets); shadows 192 KiB | P ring, NegSnap (mt ≥ 2) | + x f16 128 KiB resident | A resident written by the quantizer |
+| US | drain, s[n], y | drain / diff / shadow staging, y_acc 32 KiB | drained C_s, P staging, O, reels (208 KiB + 64 B at mt = 1 — the tightest) | unpack reels (≤ 1 024 lanes), 2 × 4 KiB f16 out (**audit, consistency:** 8 KiB of f16 per 2 KiB piece since the proof round — two 4 KiB call tiles) | flag words (64 B), partial staging (≤ 64 KiB), quantizer reels |
 | DDR, cross-core | — | — | KV pages / extents, tables | expert arena (int8 hot, int4 cold) | 8 partial slabs + 8 flags per reduction |
 
 ### 3.3 Launches per token (the 91 µs floor, serialised branch)
@@ -543,7 +574,7 @@ integer-valued inputs with exact expectations, ≥ 20 reps bit-identical, timing
 |---|---|---|---|---|
 | **H10** | **two runtime instances on disjoint card pairs stream concurrently** | two processes, each a 2-card layer-split model, independent sequences, ≥ 100 steps; outputs vs single-instance runs; card power sensors at 10 Hz | output mismatch (cross-talk); throughput(2) = throughput(1) or only one card loaded at a time (serialised) | §2.1 on/off: +48.5 % / +107.7 % |
 | E29 | direct-path expert chain: A L0LOAD interleaved with direct-load barriers at 2 KiB per 64 KiB; serialised vs overlapped A lift | DESIGN-2 E11 patterns through the same L0B halves; one-hot A rows through the same L0A slot; 10⁴-tile accumulating oracle; positive control (barrier removed) | stale A row (handshake fault after direct loads); unchanged total (no-op); control passes (blind detector) | §2.2: 167.1 vs 172.8; the fleet's T_slab |
-| E30 | the cold-tier chain: 5-pass unpack exactness on fractal-ordered nibbles with per-group offset/scale, US → S1 → loader → f16×f16 MMA, chain regime (ovl 386 ns vs ser 596 ns per 2 KiB i4) | power-of-two scales, integer offsets → exact f16; differencing on the i4 source; E13-style accumulating oracle over 10⁴ pieces | wrong/unchanged f16 lanes (a no-op pass, errata #4/#6/#1); regime read off the per-piece time; control (US → S1 barrier removed) must corrupt | §2.1's branch (3.878 vs 3.531); any rate ≥ 0.8 GB/s/core keeps the verdict |
+| E30 | the cold-tier chain: 5-pass unpack exactness on fractal-ordered nibbles with per-group offset/scale, US → S1 → loader → f16×f16 MMA, chain regime (ovl 386 ns vs ser 596 ns per 2 KiB i4; **audit, consistency:** ser = 807 ns since the proof round, 836 / 883 with the #19 merge) | power-of-two scales, integer offsets → exact f16; differencing on the i4 source; E13-style accumulating oracle over 10⁴ pieces | wrong/unchanged f16 lanes (a no-op pass, errata #4/#6/#1); regime read off the per-piece time; control (US → S1 barrier removed) must corrupt | §2.1's branch (3.878 vs 3.531); any rate ≥ 0.8 GB/s/core keeps the verdict |
 | H11 | per-die fit at the chosen x | load the 4-die instance, read free memory, allocate KV(L) + 64 MiB | allocation refused; H5 slope > 7 × 4 KiB per token | the x margin (+2.2 % per GB of overhead) |
 | E31 | DDR-flag cross-core sync: visibility, c_sync | 8 cores × 10³ rounds of pattern + full barrier + flag {seq, checksum}; polling consumers; controls: (i) barrier removed, (ii) never-written flag | checksum mismatch after seq seen (visibility gap); control (i) must mismatch; control (ii) must hit the watchdog | §2.3 on/off; c_sync ≤ 108 µs is the threshold |
 | E32 | watchdog limit for long kernels | a tile-streaming kernel of 0.1 / 1 / 10 / 60 s with a 10 ms heartbeat to DDR | heartbeat stops before the programmed end | launch granularity of §2.3 (per layer needs ≥ 20 ms) |

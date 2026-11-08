@@ -1201,3 +1201,57 @@ theorem T_two_tier : (∀ L c, 4096 ≤ L → ((tTier L c < tPages64 L c ↔ 1 �
     (∀ L c, 1 ≤ c → L * (48044 + c) ≤ 4096 * tTier L c ∧ (L * (48044 + c) = 4096 * tTier L c ↔ L % 4096 = 0)) ∧
     gTier 32768 38 = 1744 ∧ gPage 65536 38 = 1724 ∧ gTier 32768 114 = 1741 ∧ gPage 65536 114 = 1682 :=
   ⟨T_alt_tier_dominates, T_alt_tier_below_extent, T_alt_tier_le_1MiB, by decide, by decide, by decide, by decide⟩
+
+/-! # PROMPT-6 (2026-11-08) — the new-errata audit: the cells it moves in ALTERNATIVES (`[PA-*]` in proof/alt.py; PROOF-COVERAGE-5
+    rows PA5-1 … PA5-4). No new silicon. (1) Erratum #19 on the cold tier (§2.1): every f16 call writes a FRESH C chunk and the vector
+    unit sums the partials in f32 — + 8313 ns (throughput) / 32614 ns (chained) per int4 core-slab on the binding vector
+    unit, + 13 ns of drain and 16 / 63 ns of add per serial piece. (2) Erratum #29 on the megakernel (§2.3): one crossing per flag round
+    puts the primary c_sync reading at the 20 µs branch. The instance verdict T_instance_gain is an iff over every Tc and is untouched;
+    only its instantiation moves. -/
+namespace Audit6A
+open Measured Design Fleet2
+def mergeT : Nat := 512 * 512 * 137 * 10 / (100 * rVecCore)
+def mergeC : Nat := 512 * 637 / 10
+def drainPiece : Nat := tn (2 * KiB) rDrainMeas
+def addT : Nat := 512 * 137 * 10 / (100 * rVecCore)
+def addC : Nat := 637 / 10
+/-- the dense int4 path's W8-equivalent die rate at a core-slab time Tc (2 MiB of W8-equivalent bytes per core, 8 cores) -/
+def rW4of (Tc : Nat) : Nat := 8 * 2 * MiB * 10 / Tc
+end Audit6A
+open Audit6A
+
+/-- erratum #19, T convention: the overlapped instance cells (MoE 32k uniform / Zipf(1.0), dense 32k) and the serial branch -/
+theorem T6a_cold_merge_T : mergeT = 8313 ∧ drainPiece = 13 ∧ addT = 16 ∧ tW4 + mergeT = 206157 ∧
+    instMoe32k 206157 = 129882955 ∧ tpsInst 1000 129882955 = 3849 ∧ pcsUp 3849 1867 = 1061 ∧
+    rW4of 206157 = 813 ∧ instDense32k 813 = 3267951143 ∧ tpsInst 1000 3267951143 = 153 ∧ pcsUp 153 105 = 457 ∧
+    pieceSerC + drainPiece + addT = 836 ∧ instMoe32k (slabSer 836) = 156124555 ∧ tpsInst 1000 156124555 = 3202 ∧
+    rW4W8Ser 836 = 392 ∧ instDense32k 392 = 5089603493 ∧ tpsInst 1000 5089603493 = 98 ∧ pcsDown 98 105 = 66 ∧
+    1371124 * 10 / 206157 = 66 ∧ 1371124 * 10 / slabSer 836 = 32 := by decide
+theorem T6a_cold_merge_zipf_T : instStepZ moe 32768 (fun p => ncOf (xsMoe32k p)) hTot hCold chainSer 206157 7 lamMid = 119486359 ∧
+    tpsInst 1000 119486359 = 4184 := by decide +kernel
+/-- the instance verdict survives the merge: both merged slabs are inside T_instance_gain's line (iff over every Tc) -/
+theorem T6a_cold_merge_gain_T : tpsCard 1000 (today moe 32768 1 1) < tpsInst 1000 (instMoe32k 206157) ∧
+    tpsCard 1000 (today moe 32768 1 1) < tpsInst 1000 (instMoe32k (slabSer 836)) :=
+  ⟨(T_instance_gain 206157).mpr (by decide), (T_instance_gain (slabSer 836)).mpr (by decide)⟩
+
+/-- erratum #19, C convention: the overlapped instance cells (MoE 32k uniform / Zipf(1.0), dense 32k) and the serial branch -/
+theorem T6a_cold_merge_C : mergeC = 32614 ∧ drainPiece = 13 ∧ addC = 63 ∧ tW4 + mergeC = 230458 ∧
+    instMoe32k 230458 = 132757071 ∧ tpsInst 1000 132757071 = 3766 ∧ pcsUp 3766 1867 = 1017 ∧
+    rW4of 230458 = 727 ∧ instDense32k 727 = 3468598493 ∧ tpsInst 1000 3468598493 = 144 ∧ pcsUp 144 105 = 371 ∧
+    pieceSerC + drainPiece + addC = 883 ∧ instMoe32k (slabSer 883) = 158970643 ∧ tpsInst 1000 158970643 = 3145 ∧
+    rW4W8Ser 883 = 368 ∧ instDense32k 368 = 5319026723 ∧ tpsInst 1000 5319026723 = 94 ∧ pcsDown 94 105 = 104 ∧
+    1371124 * 10 / 230458 = 59 ∧ 1371124 * 10 / slabSer 883 = 30 := by decide
+theorem T6a_cold_merge_zipf_C : instStepZ moe 32768 (fun p => ncOf (xsMoe32k p)) hTot hCold chainSer 230458 7 lamMid = 119994503 ∧
+    tpsInst 1000 119994503 = 4166 := by decide +kernel
+/-- the instance verdict survives the merge: both merged slabs are inside T_instance_gain's line (iff over every Tc) -/
+theorem T6a_cold_merge_gain_C : tpsCard 1000 (today moe 32768 1 1) < tpsInst 1000 (instMoe32k 230458) ∧
+    tpsCard 1000 (today moe 32768 1 1) < tpsInst 1000 (instMoe32k (slabSer 883)) :=
+  ⟨(T_instance_gain 230458).mpr (by decide), (T_instance_gain (slabSer 883)).mpr (by decide)⟩
+
+/-- erratum #29: the megakernel combos at the 20 µs primary reading (one batched crossing per flag round); the single megakernel's 20 µs
+    cells are T_alt_mega_cells (MoE 2.058, dense 0.107) -/
+theorem T6a_mega_20us : megaDirect 20000 = 105604447 ∧ tpsCard 1000 105604447 = 2367 ∧ pcsUp 2367 1867 = 267 ∧
+    instMega moe xsMoe32k tW4 20000 = 116519437 ∧ tpsInst 1000 116519437 = 4291 ∧ pcsUp 4291 1867 = 1298 ∧
+    instMega dense xsDense32k 0 20000 = 3154790633 ∧ tpsInst 1000 3154790633 = 158 ∧
+    108430 * 10 / 20000 = 54 ∧ 109902 * 10 / 20000 = 54 := by decide +kernel
+

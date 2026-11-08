@@ -486,3 +486,19 @@ the int4 share x and the overhead `ort`, c_sync, the popularity family. **T_min_
 **Coverage, round 5:** 14 / 14 rows resolved — 13 PROVED (6 universally quantified over a, G, X, nb / L, α, c), 1 PROVED bound (F5-14);
 the MoE-128k tie target is proved in its measured form; **0 orphans** — every `T5r_*` theorem of fleet.lean is cited in F5-1 … F5-14, every
 `[R5-*]` label family of fleet.py is cited. The round-2, round-3 and round-3-proof-session ledgers above are unchanged.
+
+
+## PROMPT-6 audit (2026-11-08) — the cells errata #18–#31 move in DESIGN-4.md
+
+`[PA-*]` labels are printed by `python3 -I proof/fleet.py` after the `[R5-*]` block (the first 669 output lines byte-identical; alt.py's
+output unchanged); theorems `T6f_*` (4) close `proof/fleet.lean` (namespace `Audit6F`; 314 theorems in all; standalone and `lake build`
+clean; 0 axioms / sorry / native_decide — all 4 depend on no axiom). Generated from fleet.py's own values (scratch `gen_fleet6.py`).
+
+| # | Claim (DESIGN-4 PROMPT-6 banner and marks) | Proof | labels | Status |
+|---|---|---|---|---|
+| PA4-1 | erratum #19 on the V3 cold tier (+ 8 313 / 32 614 ns per core-slab, dense W8-eq 80.0 / 72.0 in fleet.py's `cold_tier` convention): V3 MoE 32k 3.720 → **3.693** / 3.617; round-5 readings at c = 1.990 guarded 3.230 → 3.209 / 3.151, unguarded 3.581 / 3.508, fused 3.567 / 3.495 (needs c ≥ 0.977–0.998); dense 0.155 → **0.150** / 0.142 (round-5 readings 0.146–0.149 / 0.138–0.141, needs c ≥ 1.389–1.482) | T6f_cold_merge_T, T6f_cold_merge_C | [PA-inst-moe-32k] [PA-inst-dense-32k] | PROVED; CORRECTION of R18–R20 / F5-13's instantiation (T3r_inst_breakeven's iff untouched) |
+| PA4-2 | erratum #29 on V2: the primary reading c_sync = 20 µs — V2 MoE 2.012 → **1.979** (+9.8 %), V3 + V2 MoE 4.170 → **4.098**, dense 0.157 | T6f_mega_20us | [PA-mega-5us] [PA-mega-20us] | PROVED; CORRECTION of R16 / R20 / R21's primary branch; c_sync: EMPIRICAL — E31 |
+| PA4-3 | erratum #31 on the dense 1M KV-int8 route: the deterministic crossing 17 600 ns per block adds 120 × 2 048 × 17 600 = 4 325 376 000 ns → ≤ **0.027** tokens/s/card (T5r_dense1M_bound's ≤ 0.034 used the racing composition, 10 318 ns) | T6f_dense1M_det | [PA-dense-1M-kvi8] | PROVED (a tighter bound); the route: UNMEASURED |
+| PA4-4 | the placements without a number: x_q in 2 × 32 KiB legs for rows ≥ 2 (#25); bounce removal conditional on an unproven US → S1 route (#20); the V2 protocol (#31 / #26 / #30 / #18 / #28 / #22); the router top-k (#31 / #26); E38 at rows > 1 (#29 / #31); the E33 fallback (#22 / #31 / #20); the guarded column and E39 OBSOLESCENT by the measured deferred guard (round 6 folds it) | — | — | DEFINITION (no cell; ERRATA-IMPACT.md) |
+
+**Coverage, PROMPT-6:** 4 / 4 rows resolved; every `T6f_*` theorem is cited; **0 orphans**. The round-2 … round-5 ledgers above are unchanged.

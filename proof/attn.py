@@ -897,3 +897,120 @@ def main5():
 
 if __name__ == "__main__":
     main5()
+
+
+# =====================================================================================================================================
+# PROMPT-6 (2026-11-08) — the new-errata audit (#18-#31) + the E40 stage-overlap pre-design (DESIGN-3, round-6 layer "E40").
+# No new silicon claims. Inputs: the session-3 phases above (ENG5, STREAM5, BOUNCE5, T5, T5_UNG; MEASURED) and the deferred-guard cells
+# of kernel session 5 (HW-MAP, the DEFERRED GUARD row; MEASURED, production flags, trips 0). Labels: [PA-*] = audit cells (errata
+# #22/#25/#29/#31 consequences for this design's DERIVED rows), [E40-*] = the pre-design (structure + the reachable-overlap bound,
+# parameterized on the measured phase deltas). Every label above keeps printing its value.
+#
+# The E40 schedule model (DESIGN-3 "Round 6 (PROMPT-6) — E40"): one macro-step per block = the block's tile intervals (8 at 512-token
+# blocks: 4 K + 4 V tiles of 32 KiB, each closed by the full barrier erratum #14 requires). A full barrier waits for every pipe, so
+# vector work overlaps the stream only INSIDE a tile interval; the block's vector work V is cut into k slices (k vector-carrying
+# intervals). Per macro-step: sum_j max(d_j, w_j) = 8 d + (V - k d)^+ for even slices; plus phi per vector-carrying barrier (the cost of
+# a full barrier issued with vector work in flight — UNMEASURED, E40a; erratum #29 measured 10-20 us for barrier/queue + scalar read).
+#   T_E40 = floor + nb * ((V - k d)^+ + k phi) + tau + nx * cx      (floor = the DDR engine's measured stream + bounce)
+# =====================================================================================================================================
+T6_DFR = {32768: 945_500, 131072: 3_618_800, 1 << 20: 28_694_000}   # deferred guard, trip-free, t = 1 (M, session 5)
+T6_AMORT32 = (946_300, 947_400)                                      # amortized at the real trip rate 0.087-0.22 % of steps, 32k (M, session 5)
+T6_OFF32, T6_LEG32, T6_CANON32 = 902_900, 1_514_900, 1_818_100     # session 5, 32k t = 1: guard-off / legacy scan / canonical adversarial (M)
+FOLD6 = T6_DFR[32768] - T6_OFF32                                    # 42 600 ns per step: the deferred guard over guard-off (D) = fold + end read
+MOE_LAYERS6 = 28                                                    # DESIGN-4 MoE layers (fleet.py LAYERS4: 4 dies x 7)
+TILES6 = 8                                                          # 32 KiB K/V tiles per 512-token block per core, one full barrier each
+CX6 = (0, 10_000, 20_000)                                           # the end-of-step read's serial cost bracket (0 .. the #29 band top)
+S1_SLOT6 = 32 * KiB                                                 # erratum #25: the proven S1 A-slot staging granularity (or offset-0 4 KiB)
+
+def floorF1(L): return stream5(L) + bounce5(L)                      # the round-5 overlapped floor: the K+V stream phase + the measured bounce
+def floorF2(L, g): return nb5(L) * ddr4_block_ns(g, 1, 0) + bounce5(L)   # the E21 basis (per-tile barrier + MMA at 169.2) + the bounce
+def e40_step(floor, nb, V, k, d, phi, tau=0, nx=0, cx=0):
+    return floor + nb * max(0, V - k * d) + nb * k * phi + tau + nx * cx
+def phi_line(Tbase, floor, nb, V, k, d, tau=0, nx=0, cx=0):         # the largest phi (ns) with e40_step < Tbase; None if none >= 0
+    r = Tbase - floor - nb * max(0, V - k * d) - tau - nx * cx
+    return (r - 1) // (nb * k) if r > 0 else None
+def k_min(V, d): return max(1, ceil(V, d))                          # vector-carrying intervals needed for no excess
+def pieces6(mt): return co_sets(BL_of(mt)) * mt                     # 4 KiB P pieces per block per core (one per 128-token group per fragment)
+
+def main6a():
+    g256 = G_SHUF[256 * KiB]; tab = T5[1][1] - T5_UNG
+    # ---------------------------------------------------------------- audit cells (DESIGN-3 rows the new errata touch) -------------
+    det = 16 * C5_SDST                                              # 16 scalar-destination reduce calls: the proven-deterministic crossing
+    print(f"[PA-rowmax-det] erratum #31: the rowmax chain's cheaper crossing (one drain + 16 scalar reads of fresh reduce-max results, {C5_X[0] + 16 * SIGMA_S3 // 10} ns) is the "
+          f"racing composition; the deterministic one is 16 scalar-destination reduces = {det} ns per block: rowmax >= {T5_UNG} + {NB32} x {det} = {T5_UNG + NB32 * det} ns at 32k "
+          f"({t10(rateT(32768 * KV_TOK, T5_UNG + NB32 * det))} GB/s), 1M >= {ung5(1 << 20) + 2048 * det} ns; the round-5 bound ({X5_ROWMAX} ns per block) stays a valid lower bound; the verdict (never switch) strengthens")
+    fm = firstmax4_ns(512, 1, "T"); rm = 16 * call100(T_RM16) * 10 // (R_VEC * 100); fmd = fm - rm + det; fx = step4(32768, 1, g256, "lazy", "T")[1]["fixed"]
+    print(f"[PA-firstmax-det] erratum #29/#31: the lazy chain's first-block max reaches the shift reel's Duplicate operands as 16 scalars once per step; deterministic path = 16 "
+          f"scalar-destination reduces ({det} ns) instead of 16 vector-destination calls read back at a fence ({rm} ns, the racing composition): first-block max {fm} -> {fmd} ns, "
+          f"round-4 fixed cost {fx} -> {fx - fm + fmd} ns (+{fmd - fm}) -- DERIVED; the MEASURED cells (6.0) carry whatever the shipped kernel does")
+    for mt in (1, 2, 3, 4):
+        print(f"[PA-s1-pring-mt{mt}] erratum #25: the round-4 S1 P ring (2 x 4 KiB x mt = {2 * 4 * mt} KiB, slot offsets 4 KiB apart) violates the offset rule; "
+              f"32-KiB-granular slots: 2 x {mt} x 32 KiB = {2 * mt * S1_SLOT6 // KiB} KiB of S1 (~1 MB PRIOR: fits); or one 4 KiB piece at offset 0 per lift")
+    tail16 = 16; dups = 2 * tail16 * D; dns = dups * T_F16 // 10
+    print(f"[PA-tail-dup] erratum #22: the vector tail of 2.2 / 10.8 (16-row Muls + Adds over K_tail / V_tail) multiplies by a K or V scalar per (token, dim) -- unary Muls is a silent no-op; "
+          f"the Duplicate + Mul repair needs {dups} Duplicate calls per step at a {tail16}-token tail = {dns} ns at A3 (46.4 ns per small call) vs the round-4 tail term "
+          f"{tail4_ops(32768, 1, 1) * UNIT['T'][1] * 10 // (R_VEC * 100)} ns -- not viable; the padded matrix-path tail (the open group's K call tile masked, V_tail COPY_FRAC'd "
+          f"into a scratch B tile: {tn(16 * D * 2, R_FRAC)} ns + 9 calls x 15 = {tn(16 * D * 2, R_FRAC) + 9 * 15} ns, UNMEASURED) is the fix")
+    # ---------------------------------------------------------------- E40: inputs, per-tile, per-block vector work ------------------
+    soft = (ENG5[1] - tab) // NB32; fold = FOLD6 // NB32; mrg = merge4_100(512, "lazy", "T") * 10 // (R_VEC * 100)
+    d1 = STREAM5 // (NB32 * TILES6); d2 = ddr4_block_ns(g256, 1, 0) // TILES6
+    Vlo, Vhi = soft + (FOLD6 - CX6[2]) // NB32, soft + fold + mrg     # V in [soft + fold at a 20 us end read, soft + all the fold + merge]
+    print(f"[E40-inputs] MEASURED phases at 32k t = 1 (session 3): stream {STREAM5}, scores {ENG5[0]}, softmax+guard {ENG5[1]}, PV-merge-bounce {ENG5[2]}, bounce {BOUNCE5} ns; "
+          f"serial sum {sum(ENG5)} (legacy) / {ENG5[0] + ENG5[1] - tab + ENG5[2]} (unguarded); session 5: deferred {T6_DFR[32768]}, guard-off {T6_OFF32}, legacy {T6_LEG32}, "
+          f"canonical {T6_CANON32}, amortized {T6_AMORT32[0]}-{T6_AMORT32[1]} ns; fold + end read = {FOLD6} ns per step (split UNMEASURED)")
+    print(f"[E40-tile] per-tile DDR time: F1 (stream phase) {STREAM5} / ({NB32} x {TILES6}) = {d1} ns; F2 (E21 basis, per-tile barrier + MMA) {ddr4_block_ns(g256, 1, 0)} / {TILES6} = {d2} ns; "
+          f"per block {TILES6} full barriers (4 K + 4 V tiles; 4 at 256-token blocks) -- E40 adds none")
+    print(f"[E40-vec] vector work per block: softmax (unguarded, MEASURED) {ENG5[1] - tab} / {NB32} = {soft} ns + fold (353-665: the fold + end-read split of {FOLD6} is UNMEASURED, the end read <= 20 us) + merge (round-4 model, lazy-T, 0-{mrg}) "
+          f"-> V in [{Vlo}, {Vhi}] ns; k_min = {k_min(Vlo, d1)} .. {k_min(Vhi, d1)} (F1) / {k_min(Vlo, d2)} .. {k_min(Vhi, d2)} (F2) vector-carrying intervals of {TILES6}; "
+          f"excess at k = 1: {max(0, Vhi - d1)} ns (F1)")
+    # ---------------------------------------------------------------- E40: floors, prizes, fractions -------------------------------
+    for L in (32768, 131072, 1 << 20):
+        nb = nb5(L); f1, f2 = floorF1(L), floorF2(L, g256); Tb = T6_DFR[L]; lk = LK5[LS5.index(L)]
+        print(f"[E40-floor-{lk}] nb {nb}: F1 = stream {stream5(L)} + bounce {bounce5(L)} = {f1} ns ({t10(rateT(L * KV_TOK, f1))} GB/s); F2 = {nb} x {ddr4_block_ns(g256, 1, 0)} + {bounce5(L)} = {f2} ns "
+              f"({t10(rateT(L * KV_TOK, f2))} GB/s); deferred (M) {Tb} ns ({t10(rateT(L * KV_TOK, Tb))} GB/s)")
+        cells = []
+        for cx in CX6:
+            p1, p2 = Tb - f1 - cx, Tb - f2 - cx
+            cells.append(f"end read {cx // 1000} us: F1 {p1} ({t10(pct(p1, Tb))}%) / F2 {p2} ({t10(pct(p2, Tb))}%)")
+        print(f"[E40-prize-{lk}] the reachable-overlap bound on the deferred kernel (phi = 0, tau = 0, V <= k d): gain <= deferred - floor - end read: " + "; ".join(cells))
+        print(f"[E40-prize-{lk}-moe] x {MOE_LAYERS6} MoE layers per token (DESIGN-4 cell; round 5 at the unguarded reading: {MOE_LAYERS6} x {overlap5(L)} = {MOE_LAYERS6 * overlap5(L)} ns): "
+              f"F1 {MOE_LAYERS6 * (Tb - f1)} / F2 {MOE_LAYERS6 * (Tb - f2)} ns at a free end read, {MOE_LAYERS6 * (Tb - f1 - CX6[2])} / {MOE_LAYERS6 * (Tb - f2 - CX6[2])} at 20 us")
+    # ---------------------------------------------------------------- E40: the phi lines (the gate) --------------------------------
+    # the session-5 difference fixes fold + end read = FOLD6 per step; a crossing costs <= 20 us (#29), so the fold carries >= the rest:
+    # consistent splits (end read cx, fold per block): (0, 665), (10 us, 509), (20 us, 353); the merge (inside the PV phase) in [0, 357]
+    splits = [(cx, (FOLD6 - cx) // NB32) for cx in CX6]
+    gate = []
+    for (lab, fl, d) in (("F1", floorF1(32768), d1), ("F2", floorF2(32768, g256), d2)):
+        rows = []
+        for (cx, fb) in splits:
+            for m in (0, mrg):
+                V = soft + fb + m
+                for k in (1, 2, 8):
+                    ph = phi_line(T6_DFR[32768], fl, NB32, V, k, d, 0, 1, cx); rows.append(f"cx {cx // 1000} V {V} k {k}: {ph}")
+                    gate.append((ph, lab, cx, V, k))
+        print(f"[E40-phi-32k-{lab}] E40 beats the deferred kernel ({T6_DFR[32768]} ns) iff nb (V - k d)^+ + nb k phi + end read < deferred - floor (phi <= the cell, ns): " + "; ".join(rows))
+    best = max(gate); worst = min(g for g in gate if g[4] <= 2)
+    print(f"[E40-phi-gate] the most tolerant consistent cell ({best[1]}, end read {best[2] // 1000} us, V {best[3]}, k {best[4]}) needs phi <= {best[0]} ns per vector-carrying barrier; "
+          f"the least tolerant k <= 2 cell ({worst[1]}, end read {worst[2] // 1000} us, V {worst[3]}, k {worst[4]}) {worst[0]} ns; the erratum-#29 band ({C5_X[0]}-{C5_X[1]} ns per crossing) "
+          f"is {t10(x10r(C5_X[0], best[0]))}-{t10(x10r(C5_X[1], best[0]))}x above the most tolerant line -- if a barrier with vector work in flight costs what a barrier + scalar "
+          f"read costs, E40 is dead; E40a decides it")
+    # ---------------------------------------------------------------- E40: the phase-delta form (session 3) --------------------------
+    ser_leg, ser_ung = sum(ENG5), ENG5[0] + ENG5[1] - tab + ENG5[2]; f1 = floorF1(32768)
+    print(f"[E40-phases] parameterized form: gain <= (c + v + p) - (s + b) - (serial crossings) - tau; session 3: legacy {ser_leg} - {f1} - {tab} (per-block guard, serial) = "
+          f"{ser_leg - f1 - tab} ns; unguarded {ser_ung} - {f1} = {ser_ung - f1} ns ({t10(pct(ser_ung - f1, ser_ung))}% of the serial sum); the deferred kernel's phases are UNMEASURED "
+          f"(the next kernel session re-instantiates c, v, p, s, b)")
+    print(f"[E40-legacy] on the legacy scan E40 cannot beat floor + nb x guard = {f1} + {tab} = {f1 + tab} ns at 32k ({t10(rateT(32768 * KV_TOK, f1 + tab))} GB/s) -- "
+          f"{t10(pct(f1 + tab - T6_DFR[32768], T6_DFR[32768]))}% slower than the deferred kernel serial: E40 composes only with a zero-crossing guard")
+    # ---------------------------------------------------------------- E40: buffers per mt (what the budgets force) ------------------
+    for mt in (1, 2, 3, 4):
+        us = sum(us4_rows(mt).values()); cs = BL_of(mt) * 16 * 4 * mt; co = co_sets(BL_of(mt)) * 16 * D * 4 * mt
+        l0c1, l0c2 = l0c4(mt), l0c4(mt) + co; us2 = us + cs; s1 = 2 * pieces6(mt) * S1_SLOT6
+        print(f"[E40-buf-mt{mt}] L0C single C_o {l0c1 // KiB} KiB / double {l0c2 // KiB} KiB ({'fits' if l0c2 <= L0C else 'OVER: single-buffered C_o -> merge before the next PV'}); "
+              f"US {us // KiB} KiB + {us % KiB} B / + a second drained C_s {us2 // KiB} KiB + {us2 % KiB} B ({'fits' if us2 <= US_EVID else 'OVER: drain C_s after the last softmax slice'}); "
+              f"S1 P slots for 2 blocks in flight at 32 KiB granularity {2 * pieces6(mt)} x 32 = {s1 // KiB} KiB ({'fits' if s1 <= S1_P else 'OVER'} the ~1 MB PRIOR); "
+              f"vector-fit at the deferred fragment chain: mt x V <= ({BL_of(mt) // 64} - 1) x d needs V <= {(BL_of(mt) // 64 - 1) * d1 // mt} ns per fragment")
+    print(f"[E40-trip] a trip re-runs the whole step (serial): at the 0.087-0.22 % trip rate <= 0.22 % of a step; measured amortized {T6_AMORT32[0]}-{T6_AMORT32[1]} vs trip-free "
+          f"{T6_DFR[32768]} ns (+{T6_AMORT32[0] - T6_DFR[32768]}-{T6_AMORT32[1] - T6_DFR[32768]})")
+
+if __name__ == "__main__":
+    main6a()

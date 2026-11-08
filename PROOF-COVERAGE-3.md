@@ -1,4 +1,4 @@
-# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07; round 5, 2026-11-07 — the measured production kernel)
+# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07; round 5, 2026-11-07 — the measured production kernel; PROMPT-6, 2026-11-08 — the errata #18–#31 audit and the E40 pre-design)
 
 How to read a row: **Claim** quotes or paraphrases the DESIGN-3.md statement (section numbers refer to the
 corrected document); **Proof** names the theorem(s) in `proof/attn.lean` that fix the number; **attn.py** names
@@ -21,6 +21,66 @@ flat m = 1..16) as the pure-read roof class — the KV stream is read-only (the 
 ≤ 8 KiB K/V append and the output), so the 173.8 read+write figure does not apply; the raw direct-load 181.3 is
 recorded as the ceiling the kernel's choreography sits under (`Measured.rGemm`, `rDirect`, `rDdrRW`;
 T1_stream_roof gives the 3.8 % what-if).
+
+## PROMPT-6 (2026-11-08) — the errata #18–#31 audit cells and the E40 stage-overlap pre-design
+
+PROMPT-6 audits DESIGN-3 against errata #18–#31 (with the corrected #3 and the widened #25) and pre-designs E40. No new silicon claims.
+Labels `[PA-*]` (the audit cells) and `[E40-*]` (the pre-design) are printed by `python3 -I proof/attn.py` after the `[R5-*]` block (the
+first 913 output lines — every round-2 … round-5 line — are byte-identical: `diff` of the two outputs is exactly the new block); theorems
+`T6a_*` and `T40_*` are the last section of `proof/attn.lean` (namespace `Audit6`). Inputs: the session-3 phases (`Measured5`) and the
+session-5 deferred-guard cells of HW-MAP (MEASURED: 945.5 / 3 618.8 / 28 694.0 µs trip-free at 32k / 128k / 1M; guard-off 902.9, legacy
+1 514.9, amortized 946.3–947.4 µs at 32k). The per-design tables of the audit are ERRATA-IMPACT.md.
+
+### Build status, PROMPT-6
+
+| Item | Result |
+|---|---|
+| `lean proof/attn.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 20 s |
+| `cd proof && lake build` | **succeeds** (all six targets; the one linter warning is smoke.lean's, pre-existing) |
+| Theorems in attn.lean | **350** = 292 (rounds 2–5, kept byte-identical) + **58** PROMPT-6 (`T6a_*` 4, `T40_*` 54) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0; `#print axioms` over the 58: 12 depend on no axiom, 4 on `propext` + `Quot.sound`, 42 on `propext` + `Classical.choice` + `Quot.sound` (the `omega` / `simp` standard set) |
+| New namespace | `Audit6` (the deferred cells, `ivl` / `sumD` / `sumW` — the barrier-interval schedule — `e40`, `floorF1`, `floorF2`, `xDet`) |
+| `python3 -I proof/attn.py` | 913 lines unchanged + 29 lines (`[PA-*]` 7, `[E40-*]` 22) |
+| Cell theorems | generated from attn.py's own values (scratch `gen_lean6.py`) — no hand-typed cell; the 36 φ-line theorems are ∀ φ iffs |
+
+### Cells the audit moves (DERIVED rows of rounds 4–5; no MEASURED cell moves)
+
+| Row | Was | Now | Why | Theorem |
+|---|---|---|---|---|
+| R4-4 (S1 P ring) | 2 × 4 KiB·mt = 8 / 16 / 24 / 32 KiB, slots 4 KiB apart | **64 / 128 / 192 / 256 KiB** at 32-KiB-granular slots (or one 4 KiB piece at offset 0 per lift) | #25: plain-copy dst offsets ≥ 4 KiB corrupt; only offset-0 4-KiB blocks and 32-KiB-granular offsets are proven | T6a_s1_pring |
+| R4-10 (first-block max, fixed cost) | 5 200 ns; fixed 19 328 ns | **19 890 ns; fixed 34 018 ns** (DERIVED — superseded at the cell level by the measured sweep) | #29 / #31: the 16 maxima reach the Duplicate operands as scalars; the deterministic path is 16 scalar-destination reduces (17 600 ns) | T6a_firstmax_det |
+| R5-10 (rowmax crossing) | ≥ 10 318 ns per block → ≥ 1 599 152 ns at 32k | the bound stands; **the deterministic crossing is 17 600 ns → ≥ 2 065 200 ns at 32k (65.0 GB/s), ≥ 63 964 800 at 1M** | #31: the cheaper composition (a drain + 16 scalar reads of fresh maxima) races | T6a_rowmax_det |
+| R4-22 (vector tail) | 4 156 ns at t = 1 (16-row Muls + Adds) | the form **VIOLATES #22** (a unary Muls); its Duplicate repair = 4 096 small calls = 190 054 ns at A3; the fix is the padded matrix-path tail (≈ 720 ns, UNMEASURED) | #22 | T6a_tail_dup |
+| R5-8 / R5-9 (the batched guard, E39) | fused = unguarded + one crossing (958.8 µs) | E39 as specified is **killed** (#31, session 4); the shipped deferred guard is MEASURED (945.5 µs) — round 6 (PROMPT-3R6) folds it | #31 | — (INPUT) |
+
+### The PROMPT-6 ledger (every `[PA-*]` / `[E40-*]` label and every PROMPT-6 claim of DESIGN-3.md)
+
+| # | Claim (PROMPT-6 text: banner, §3.2, §3.4, §4, §5.1, §8, §9, §10, App. A) | Proof | labels | Status |
+|---|---|---|---|---|
+| PA-1 | the rowmax chain's deterministic crossing: 16 × 1 100 = 17 600 ns per block > the round-5 bound 10 318; rowmax ≥ 938 800 + 64 × 17 600 = 2 065 200 ns (65.0 GB/s) at 32k, ≥ 27 920 000 + 2 048 × 17 600 = 63 964 800 at 1M; both above the guarded cells | T6a_rowmax_det | [PA-rowmax-det] | PROVED (the 1.1 µs call: INPUT #29; the racing verdict: INPUT #31) |
+| PA-2 | first-block max on the deterministic path 5 200 − 2 910 + 17 600 = 19 890 ns; the round-4 fixed cost 19 328 → 34 018 ns | T6a_firstmax_det | [PA-firstmax-det] | PROVED; CORRECTION of R4-10's derived cell |
+| PA-3 | the S1 P ring at 32-KiB granularity: 2 × mt × 32 KiB = 64 / 128 / 192 / 256 KiB ≤ 1 MB; every slot offset j·32 768 ≡ 0 (mod 32 768) (∀ j); the round-4 ring's second slot sat at 4 096·mt | T6a_s1_pring | [PA-s1-pring-mt*] | PROVED (S1 size: PRIOR); CORRECTION of R4-4 |
+| PA-4 | the vector tail's Duplicate repair: 2 × 16 × 128 = 4 096 calls × 46.4 ns = 190 054 ns per step vs the 4 156 ns tail term; the matrix-path tail 585 + 9 × 15 = 720 ns | T6a_tail_dup | [PA-tail-dup] | PROVED (arithmetic); the matrix-path tail's cost: EMPIRICAL — E25 / E40b |
+| PA-5 | E39 as specified (per-block flag lanes from fresh reduce calls, read at a crossing) is the racing composition; the deferred guard (a vector-only fold, ONE end-of-step read, a whole-step re-run) replaces it | — | — | INPUT (#31; HW-MAP session-4 / -5 rows) |
+| PA-6 | the placements without a number: #18 on every L0 operand; #20 / #25 on the q staging and on the P staging form (§10.11); #21 in the harness and E23's period 15; #22 on out = O/S; #23 the K-append strides as gaps; #24 the tail / q / out copies; #26 the page-table nests; #27 the drain form; #28 the arm discipline; #30 the passes, the trip re-run and the H_kv = 1 split; corrected #3 (R_vec, E22, the §9 compliance row) | — | — | DEFINITION (design rules; ERRATA-IMPACT.md) |
+| E40-1 | the barrier-interval schedule, ∀ interval lists: Σ d ≤ Σ max(d, w) and Σ w ≤ Σ max(d, w); Σ max(d, w) ≤ Σ d + Σ w; Σ d + (Σ w − Σ d) ≤ Σ max(d, w); Σ max(d, w) = Σ d **iff** every w ≤ d | T40_ivl_lower, T40_ivl_upper, T40_ivl_excess, T40_ivl_floor_iff | (structure) | PROVED (∀ l); the interval model (a full barrier waits for every pipe): INPUT #14 + DEFINITION |
+| E40-2 | T_E40 = floor + nb·((V − k·d)⁺ + k·φ) + τ + nx·cx ≥ floor + nx·cx (∀); = floor + τ + nx·cx **iff** V ≤ k·d ∧ φ = 0 (nb, k > 0); < T_b **iff** nb·k·φ < T_b − (floor + nb·(V − k·d)⁺ + τ + nx·cx); monotone in φ; a per-block crossing X adds nb·X | T40_gain_le, T40_reach_iff, T40_pays_iff, T40_mono_phi, T40_crossing_serial | (structure) | PROVED (∀ inputs) |
+| E40-3 | inputs: serial sums 1 513 100 / 938 300 ns; fold + end read = 945 500 − 902 900 = 42 600 ns per step; per tile 770 800 / 512 = 1 505 (F1), 12 394 / 8 = 1 549 (F2); softmax 69 500 / 64 = 1 085; fold 665 / 509 / 353 at an end read of 0 / 10 / 20 µs; merge 357 (round-4 lazy-T model); V ∈ [1 438, 2 107] ≤ 2 d; V > d at the full fold | T40_inputs | [E40-inputs] [E40-tile] [E40-vec] | INPUT (sessions 3 and 5) + PROVED; the split: UNMEASURED |
+| E40-4 | floors F1 = 821 800 / 3 287 200 / 26 297 600 ns (163.3 GB/s), F2 = 844 216 / 3 376 864 / 27 014 912 (159.0); the deferred cells 142.0 / 148.4 / 149.7 GB/s | T40_floor | [E40-floor-*] | PROVED (a mixed-session reading: the floors from session 3's stream phase) |
+| E40-5 | the reachable-overlap bound on the deferred kernel (φ = 0, τ = 0, V ≤ k·d): 32k 123 700 / 113 700 / 103 700 ns (F1; 13.1 / 12.0 / 11.0 %) and 101 284 / 91 284 / 81 284 (F2; 10.7 / 9.7 / 8.6 %); 128k 331 600 … 221 936 (9.2 … 6.1 %); 1M 2 396 400 … 1 659 088 (8.4 … 5.8 %); × 28 MoE layers: 3 463 600 / 2 835 952 (32k), 9 284 800 / 6 774 208 (128k; round 5's 7 462 000 at the unguarded reading), 67 099 200 / 47 014 464 ns (1M) | T40_prize_32k, T40_prize_128k, T40_prize_1M | [E40-prize-*] | PROVED; reaching it: EMPIRICAL — E40a, E40b |
+| E40-6 | the φ lines, ∀ φ: E40 beats 945 500 ns iff φ ≤ 966 / 888 / 810 (F1, k = 2, end read 0 / 10 / 20 µs), 791 / 713 / 635 (F2); k = 1: 1 330 … 1 687 (F1), 1 024 … 1 381 (F2); k = 8: 158 … 241 — at every consistent (fold, read) split and merge 0 / 357 | T40_phi_* (36 theorems) | [E40-phi-32k-F1] [E40-phi-32k-F2] | PROVED (∀ φ); φ: UNMEASURED — E40a |
+| E40-7 | the gate: the most tolerant consistent cell needs φ ≤ 1 687 ns; erratum #29's crossing (10 000–20 000 ns) is 5.9–11.9× above it | T40_phi_gate | [E40-phi-gate] | PROVED; whether φ is crossing-class: EMPIRICAL — E40a |
+| E40-8 | the phase-delta form: (c + v + p) − (s + b) − serial crossings = 1 513 100 − 821 800 − 574 800 = 116 500 (legacy) and 938 300 − 821 800 = 116 500 (unguarded) = 12.4 % of 938 300 | T40_phases | [E40-phases] | PROVED (re-instantiated by the next session's phase deltas) |
+| E40-9 | on the legacy scan: floor + nb × guard = 821 800 + 574 800 = 1 396 600 ns (96.1 GB/s), 47.7 % slower than the deferred kernel run serially | T40_phases | [E40-legacy] | PROVED |
+| E40-10 | the budgets: L0C with double-buffered C_o 160 / 320 / 240 / 320 KiB (fits at mt = 1, 3); US + a second drained C_s 157 760 / 254 016 / 243 776 / 266 304 B vs the 212 992 B evidence (fits at mt = 1); S1 P slots for two blocks at 32-KiB granularity 256 / 512 / 384 / 512 KiB ≤ 1 MB; vector fit 10 535 / 5 267 / 1 505 / 1 128 ns per fragment | T40_buf | [E40-buf-mt*] | PROVED (S1: PRIOR; US: the ≥ 208 KiB evidence) |
+| E40-11 | the trip re-run: amortized +800 … +1 900 ns at 32k, ≤ 0.22 % of the cell | T40_trip | [E40-trip] | INPUT (session 5) + PROVED |
+| E40-12 | the schedule (§5.1 (c)) and the barrier plan (§5.1 (d)): every edge ≥ one interval after its producer → zero added full barriers; one B ping-pong state; one arm per handshake; zero per-block scalar reads; the deferred guard's single end-of-step read; bit-identity with the serial kernel's output | — | — | DEFINITION (structure); EMPIRICAL — E40b |
+
+**Hypothesis variables, PROMPT-6:** φ (per vector-carrying barrier, UNMEASURED — E40a), k (vector-carrying intervals per block), the
+(fold, end read) split of the session-5 42.6 µs (end read ≤ 20 µs by #29's band), τ (the exposed prologue / epilogue), the merge
+(0–357 ns per block). **Coverage, PROMPT-6:** 18 / 18 rows resolved — 13 with theorems (9 of them universally quantified), 1 INPUT,
+4 DEFINITION / EMPIRICAL; **0 orphans** — every `T6a_*` / `T40_*` theorem is cited above and every `[PA-*]` / `[E40-*]` label family is
+cited. The round-2 … round-5 ledgers below are unchanged.
 
 ## Round 5 (2026-11-07) — the measured production kernel folded in (attention session 3, HW-MAP 62e8137, errata #29–#30)
 

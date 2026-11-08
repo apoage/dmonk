@@ -249,3 +249,13 @@ model.py labels are grep-able; EMPIRICAL rows name the experiment whose observab
 is specified in DESIGN.md §8. Claims that DESIGN.md does **not** make are not in this ledger, and
 the model.lean theorem that did not correspond to a DESIGN.md claim (a monotonicity lemma for the
 MMA-issue cap) was removed during round 2 rather than kept as an orphan proof.
+
+
+## PROMPT-6 audit (2026-11-08) — errata #18–#31 against DESIGN.md
+
+No new label and no new theorem: model.py's output is byte-identical. One cell is re-designated — **m = 32 quotes 154.5 (T5_m32_restream,
+proved)** instead of 163.6 (T5_m32, A resident) until a #25 probe certifies 32 KiB-leg A residency with live rows ≥ 2 (HW-MAP also measures
+m ≥ 24 at 81 / 59 / 43 GB/s on the realised kernel, so both are pre-measurement cells). The remaining findings are placements without a
+number (#25 the A ring, #18 the operand addressing, #30 the nest-local parities and the slab bound, #22 / #29 the R3 dequant, #23 / #24 / #27
+the drain and copy forms, #28 the queue edges, #21 E1's pattern, #19 the record-only f16 routes, corrected #3) — ERRATA-IMPACT.md. The
+ledger rows above are unchanged (the m = 32 row keeps both theorems; its headline reading moves).

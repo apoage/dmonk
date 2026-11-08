@@ -1,5 +1,23 @@
 # DESIGN-3 — decode attention over the KV cache (gather → softmax → reduce), one die, 8 cores
 
+> **PROMPT-6 AUDIT + E40 PRE-DESIGN (2026-11-08 — the errata #18–#31 audit against HW-MAP 3928d0e; `proof/attn.py` `[PA-*]` `[E40-*]`,
+> `proof/attn.lean` `T6a_*` / `T40_*` (58 new theorems, 350 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-3
+> rows PA-1 … PA-6 and E40-1 … E40-12; the tables for all five designs are ERRATA-IMPACT.md).** No new silicon claims; no prior model line
+> moves (attn.py's first 913 output lines are byte-identical). Every correction is marked **audit** in place. **(1) Erratum #31 kills E39 as
+> specified:** a per-block flag lane built from fresh reduce calls and read at a crossing is the racing composition (session 4 measured it);
+> the shipped deferred guard (a vector-only fold, ONE end-of-step read, a whole-step re-run) is its proven replacement — its MEASURED cells
+> are round 6's (PROMPT-3R6) to fold. **(2) #31 on the rowmax crossing and on the lazy chain's first-block max:** the deterministic crossing
+> is 16 scalar-destination reduces (17 600 ns) — rowmax ≥ 2 065.2 µs at 32k (the 10 318 ns bound stays a valid lower bound; never-switch
+> strengthens); the round-4 DERIVED fixed cost 19 328 → 34 018 ns (superseded at the cell level by the measured sweep). **(3) #25:** the
+> round-4 S1 P ring (2 × 4 KiB·mt, slots 4 KiB apart) violates the offset rule — 32-KiB-granular slots, 64·mt KiB; P staged per 4 KiB piece.
+> **(4) #22:** the vector tail's 16-row Muls + Adds multiply by a K or V scalar — a silent no-op; the Duplicate repair costs 4 096 small calls
+> per step (190 µs at A3), so the padded matrix-path tail is the fix. **(5)** #18 extended to every L0 operand; #21 to the harness;
+> #20 / #23 / #24 / #26 / #27 / #28 / #30 placements marked; corrected #3: the ≤ 1 024-lane rule is hygiene — no measured cell paid for it.
+> **E40 (§5.1, the stage-overlap pre-design):** one macro-step per block, the vector window inside the tile intervals (each tile's full
+> barrier drains every pipe), every edge on a tile barrier, zero per-block crossings; **E40 can recover 8.6–13.1 % of the shipped 32k cell
+> (6.1–9.2 % at 128k, 5.8–8.4 % at 1M), gated on φ — the cost of a full barrier issued with vector work in flight — ≤ 0.6–1.7 µs; erratum
+> #29's crossing is 5.9–11.9× above the most tolerant line, so E40a (the φ probe) runs before any restructuring.**
+
 > **ROUND-5 STATUS (2026-11-07 — the production kernel measured end-to-end, attention session 3; HW-MAP 62e8137, errata #29–#30;
 > `proof/attn.py` `[R5-*]`, `proof/attn.lean` `T5r_*` (27 new theorems, 292 total, 0 axioms / sorry / native_decide), `proof/fleet.py`
 > `[R5-*]`, PROOF-COVERAGE-3.md round-5 section).** The model's assumed inputs are replaced by measured ones; every number below is
@@ -151,7 +169,7 @@ KV bytes per layer: 16.8 MB / 134.2 MB / 536.9 MB / **4.295 GB** (`[A0-kv-*]`).
 | R_gemm | **174.6 GB/s** per die: full W8 decode kernel, DDR→L0B direct loads, one full barrier per tile, two 32 KiB parity halves, flat m = 1..16 — the exact choreography this design streams K and V through; 21.825 GB/s per core when all 8 stream | M (data-movement) |
 | R_ddr / R_read | 173.8 r+w stream roof / ~181 pure read (181.3 direct stream) | M |
 | c_mma | **15 ns** per (16,16,128) MMA call; n ≤ 16 per call; k ∈ {32, 128} correct, **k = 64 wrong**; m = 64 across the full L0C works; init/align flags **ignored** | M |
-| R_vec | 40 f16 lanes/cycle × 1.08 GHz = **43.2 G lane-ops/s/core**, count-mode Mul/Add/Cast, ≤ 1024 lanes per call | M |
+| R_vec | 40 f16 lanes/cycle × 1.08 GHz = **43.2 G lane-ops/s/core**, count-mode Mul/Add/Cast, ≤ 1024 lanes per call (**audit, corrected #3:** hygiene, not a cap — Sub 4096 / Duplicate 2048 measured; wider calls per op after an isolated probe) | M |
 | ρ32 | f32 lane-rate penalty vs the f16 figure: **1.37 measured** (chained Mul 63.5 / Add 63.7 ns vs f16 46.4 ns per 1 024-lane call); rounds 1–2 bracketed 1 / 2 | **M** (round 3) — E22 |
 | E | vector exp **EXISTS** (f16 and f32, bitwise-exact on x ≤ 0): 272.8 ns per 1 024-lane call = **c_exp = 11.5** lane-equivalents per element (chained, conservative); the 22-op polynomial of §3.2 is retired (it would bind only above c_exp = 21) | **M** (round 3) — E22 |
 | R | cross-lane reduce-max **EXISTS**: f16 181.9 ns / f32 251.4 ns per call (one value per call, lane 0); And<int32> is ABSENT (the f32 6-op tree is closed, the f16 tree via And<int16> at 45.9 ns is open); the per-row block max of §3.2 costs 16 calls per fragment = 2.9 µs — the largest item of the chain | **M** (round 3) — E22 |
@@ -262,7 +280,7 @@ Everything attention reads is die-local to the layer (errata #11) and owned by t
 | V pages | same count × 64 KiB | fractal B-operand tiles, §1.3 | per completed 16-token group: one COPY_FRAC of 4 KiB from V_tail |
 | K_tail, V_tail | 16 × d × 2 B = 4 KiB each, row-major [16][d] | plain rows | per token: one 256 B copy each |
 | page tables | one 8 B DDR address per page, per (h, K\|V): 2·⌈L/256⌉·8 B — 16 KiB at 32k, **512 KiB at 1M** for all 8 heads (`[A0-kv-*]`) | flat arrays | runtime allocator (§10) |
-| q fragments | mt × 4 KiB f16 A fragments of q/√d for the g query heads of h (rows r = query head, padded to 16·mt) | DESIGN.md §3.2 A pack: byte (c·16 + r)·32 + j'·2 ↔ q[r][16c + j'] | QKV epilogue scatter, or this kernel's prologue by COPY_FRAC (4 KiB·mt at 7 GB/s = 0.6 µs·mt) |
+| q fragments | mt × 4 KiB f16 A fragments of q/√d for the g query heads of h (rows r = query head, padded to 16·mt) | DESIGN.md §3.2 A pack: byte (c·16 + r)·32 + j'·2 ↔ q[r][16c + j'] | QKV epilogue scatter, or this kernel's prologue by COPY_FRAC (4 KiB·mt at 7 GB/s = 0.6 µs·mt) — **audit (#20 / #25):** a q built in US cannot reach the S1 A slot by a plain or COPY_FRAC copy (#20's class, unprobed); the QKV epilogue writes q in A-fragment order to DDR and the prologue stages it per 4 KiB fragment at offset 0 or at 32-KiB-granular offsets (#25) |
 | out | 16·mt × d × 2 B | C-slab order (DESIGN.md §3.3) or row-major via the epilogue | this kernel |
 
 O(L) exists only here, in DDR: KV (4 096 B/token/layer) and the page tables (128 B per 256 tokens per die, 0.012 % of KV — T0_page_table_share; round 1 said 0.4 %). Tokens 0..16⌊L/16⌋−1 are served from pages by the matrix unit; the ≤ 15 newest tokens are served from
@@ -289,7 +307,7 @@ addr_K(l, j) = page(l div 256)                     # 64 KiB page from the K page
 ```
 Append of token l = 8 runs of 32 B at stride 512 B inside call tile (l' div 16): **8 plain COPYs of 32 B**
 (ISA-legal, ≤ 64 KB each; c_copy per call is U, budget ≤ 1 µs → ≤ 8 µs per layer-step on the writer core;
-one 2D COPY if E25 proves the US→DDR 2D position pair). The i8 variant (route 1b) uses the settled
+one 2D COPY if E25 proves the US→DDR 2D position pair; **audit (#23):** blocked-copy strides are gaps — srcStride 0 is the contiguous 256 B source, correct here; the destination gap is 480 B, not the 512 B pitch; a source-repeat is never a srcStride-0 copy). The i8 variant (route 1b) uses the settled
 [16 n × 32 k] fragment: 4 runs of 32 B per token, 32 KiB pages of 256 tokens.
 
 **Round 4 — the k-shape verdict (session 1, M; `[R4-kshape-*]`, T4r_kshape).** The round-2/3 sentence above ("k = 64 is the illegal
@@ -432,7 +450,7 @@ across cores; ±1 block imbalance = ±12 µs) and the per-core (m, S, O) partial
 
 Per step, fixed (`fixed=` in `[R3-t1-*]`, T3r_fixed): the first block's softmax latency before the first PV plus the last
 block's softmax + drain + merge after the stream ends = 2 vector blocks + 1 drain (**18.8 µs** on the chain as specified,
-23.9 µs chained, 11.3 µs fixed-shift; round 2: 7.1 µs best corner, 29.8 worst), the vector tail of the ≤ 15 newest tokens (scores and PV as 16-row Muls+Adds over K_tail/V_tail:
+23.9 µs chained, 11.3 µs fixed-shift; round 2: 7.1 µs best corner, 29.8 worst), the vector tail of the ≤ 15 newest tokens (scores and PV as 16-row Muls+Adds over K_tail/V_tail [**audit (#22): VIOLATES — the multiply is by a K or V scalar per (token, dim), a unary Muls, which is a silent no-op; the Duplicate + Mul repair needs 4 096 small calls per step at a 16-token tail (190 µs at A3, `[PA-tail-dup]`, T6a_tail_dup), so the fix is the padded matrix-path tail: the open group's K call tile with the validity mask, the zero-padded V_tail COPY_FRAC'd into a scratch B tile, ≈ 0.7 µs, UNMEASURED — the measured kernel's 'padded tail' guard test fits this form**]:
 ≤ 122 880·mt lane-ops = ≤ 5.7 µs·mt at ρ32 = 2, 0 when 16 | L, `[A6-kvwrite]`), and the launch floor (91 µs,
 reported separately as wall). The in-kernel ceiling of the design is the KV stream itself: effective KV rate at
 1M = 166.9 GB/s on the design's page (169.1 at 256 KiB), at 32k 163.2 (the fixed 19 µs), at 4k 140.7 (`[R3-t1-*]`; round 2:
@@ -443,13 +461,13 @@ T4r_bounce, T4r_drain, T4r_lift; per 512-token block, mt fragments, per core):
 
 | Engine | Round-4 work per block | Time | Status |
 |---|---|---|---|
-| **direct-load (copy-in)** | 4 K + 4 V tiles of 32 KiB as before, **plus the DDR → S1 staging leg of the P bounce** (erratum #20: the P fragments cast in US cannot be copied US → S1; they go US → DDR scratch → DDR → S1 → loader): 16 KiB·mt per block | K/V 256 KiB per core at G, + `legs` × 16 KiB·mt on the same DDR roof: **13 512·mt-independent K/V + 1 501·mt ns at 174.6** per leg — 12 011 / 12 761 / **13 512** ns at legs 0 / 1 / 2 (mt = 1); 13 943 (169.2) / 14 127 (167.0) / **17 059 (138.3, the session-1 loop)** at legs 2 | **UNMEASURED** (the bounce's cost on the shared roof; legs = 2 is the headline, the conservative reading; a proven direct US → S1 route is legs 0 = the round-3 cell) |
+| **direct-load (copy-in)** | 4 K + 4 V tiles of 32 KiB as before, **plus the DDR → S1 staging leg of the P bounce** (**audit, #25:** per 4 KiB piece at offset 0 of its own 32-KiB-granular S1 slot — never a 16 KiB single block, which zeroes A rows ≥ 2) (erratum #20: the P fragments cast in US cannot be copied US → S1; they go US → DDR scratch → DDR → S1 → loader): 16 KiB·mt per block | K/V 256 KiB per core at G, + `legs` × 16 KiB·mt on the same DDR roof: **13 512·mt-independent K/V + 1 501·mt ns at 174.6** per leg — 12 011 / 12 761 / **13 512** ns at legs 0 / 1 / 2 (mt = 1); 13 943 (169.2) / 14 127 (167.0) / **17 059 (138.3, the session-1 loop)** at legs 2 | **UNMEASURED** (the bounce's cost on the shared roof; legs = 2 is the headline, the conservative reading; a proven direct US → S1 route is legs 0 = the round-3 cell) |
 | **copy-out (US → DDR)** | the write leg of the P bounce: 16 KiB·mt per block in 4 KiB pieces | counted in `legs` above; rate UNMEASURED | UNMEASURED |
 | **loader** | L0LOAD P: 4 × 4 KiB·mt S1 → L0A, between direct-load barriers — **the S1-resident exposure the review named**: 16 KiB per 256 KiB of direct loads at mt = 1 (1/16), 32 KiB per 128 KiB at mt = 4 (1/4) = **2× / 8×** the expert kernel's 2 KiB per 64 KiB lift density | 618·mt ns (serial) | E24 at the real P cadence (mt = 1 and 4) |
 | **matrix** | unchanged at d = 128: 32·mt scores + 32·mt PV calls, every C chunk written by exactly one call (no accumulate); d = 64: 48 calls per block (§1.2) | 960·mt ns | M (k-shapes), erratum #18: every C destination addressed by explicit byte-offset tensor construction, never by view slicing |
 | **L0C drain** | C_s 32 KiB·mt + **every fresh C_o set of the block: 4 × 8 KiB·mt = 32 KiB·mt** (round 3: one 8 KiB·mt C_o region) = **64 KiB·mt** (32 KiB·mt at 256-token blocks) | hidden iff R_drain ≥ **5.5 / 11.0 / 16.4 / 21.9 GB/s/core** at mt = 1..4 (iff, T4r_drain; round 3: 3.41 … 16.37); measured 152.8 … 285.5: **428 / 589 / 377 / 459 ns** per block, 27.7× … 13.0× under the line | M (rates) / PROVED (threshold) |
 | **vector** | the round-4 chain (§3.2): no Z difference, the fresh-set merge, the lazy guard | lazy-T **4 772·mt ns** (35.3 % of the legs-2 block at 174.6, 39.7 % at legs 0), lazy-C 5 867, rowmax-T 9 791 (72.5 / 81.5 %), rowmax-C 12 265 (90.8 / **102.1 %** — vector-bound at legs 0) | **OPEN** (the softmax-reel anomaly) |
-| **scalar** | 4 page-table lookups, barrier issue, the lazy guard's 8 reduce results read through the queue fence (erratum #15), the per-trip branch | < 1 µs; a trip ≈ 10.7 µs (§3.4) | — |
+| **scalar** | 4 page-table lookups, barrier issue, the lazy guard's 8 reduce results read through the queue fence (erratum #15), the per-trip branch (**audit, #31:** a scalar read of freshly reduce-max'd data at a fence races — record; the shipped deferred guard reads once per step) | < 1 µs; a trip ≈ 10.7 µs (§3.4) | — |
 
 Per step, fixed (`[R4-fixed-*]`, T4r_fixed): **19 328 ns on the lazy chain at t = 1** = 2 vector blocks (9 544) + the 428 ns drain + the
 16-token vector tail (4 156 — under append-then-attend the step's own token is always in the tail, so every 512-multiple carries a full
@@ -550,7 +568,7 @@ chain). What the fresh sets cost on the drain: 32 KiB·mt of C_o per block inste
 
 ### 3.2 The per-block vector chain (every op is in ISA.md's list; nothing else is assumed)
 Drained C_s block = [32 token-groups][16 rows][16 tokens] f32 = 8 reels of 1 024 lanes (mt = 1).
-1. **Difference (Z branch):** `S = D_b + NegSnap[region]` (1 Add) and `NegSnap ← Muls(D_b, −1)` (1 Muls) —
+1. **Difference (Z branch):** `S = D_b + NegSnap[region]` (1 Add) and `NegSnap ← Muls(D_b, −1)` (1 Muls; **audit, #22:** a unary Muls is a silent no-op — record only, the Z branch is retired) —
    the region-difference epilogue of DESIGN-2 §3.2 in f32; with ±Q alternation per region visit the region
    content is a signed sum whose magnitude stays within ~√(blocks/3)·|s|_max (random-walk HYPOTHESIS measured by E26 — T_drift_1M: 683 visits per region, √683 × 32 = 832 ≈ 840 → f32 ulp
 2⁻¹⁴ = 6·10⁻⁵ on a score, 10⁻⁴ class on p; the deterministic worst case over every sign pattern is 683 × 32 = 21 856
@@ -653,7 +671,7 @@ results through a queue fence, the rowmax chain's 16 row maxima into the shift r
 | as shipped: 8 reduce-max calls with a scalar destination + one queue fence | **8 981 ns** (574 800 / 64; the quoted +572 000 gives 8 937) — 8 × 1 100 = 8 800 ns = 98.0 % of it: the scalar-destination reduce *is* the crossing | **1 513 600** = 88.7 | MEASURED |
 | f16 tree + one queue round trip | 19 531 — one drain per block, inside the 10–20 µs band | 2 188 800 (+1 250 000) | MEASURED |
 | f16 tree + one full barrier | 21 875 (1 875 above the band) | 2 338 800 (+1 400 000) | MEASURED |
-| **batched guard**: the decision as a vector side-product (the 8 vector-destination reduce calls already in the chain, 1 455 ns, into a per-block flag lane), crossed once per K blocks | ⌈nb/K⌉·cx / nb | K = nb (once per step): **958 800 (140.0)** at cx = 20 µs, 948 800 (141.5) at 10 µs; K = 8: 1 098 800 / 1 018 800; K = 1: 2 218 800 / 1 578 800 | DERIVED; the kernel is UNMEASURED (E39) |
+| **batched guard**: the decision as a vector side-product (the 8 vector-destination reduce calls already in the chain, 1 455 ns, into a per-block flag lane), crossed once per K blocks | ⌈nb/K⌉·cx / nb | K = nb (once per step): **958 800 (140.0)** at cx = 20 µs, 948 800 (141.5) at 10 µs; K = 8: 1 098 800 / 1 018 800; K = 1: 2 218 800 / 1 578 800 | DERIVED; the kernel is UNMEASURED (E39) — **audit (#31): as specified (per-block flag lanes from fresh reduce calls, read at a crossing) this is the racing composition — killed on silicon in session 4; the shipped deferred guard (a vector-only fold + ONE end-of-step read + a whole-step re-run) replaces it, its cells MEASURED in session 5 (HW-MAP; round 6 folds them)** |
 
 The algebra (∀ nb, K, cx): one crossing per step leaves exactly one crossing (T5r_xing_once: ⌈nb/K⌉ = 1 for 0 < nb ≤ K), one per block
 leaves nb of them (T5r_xing_every); at 32k, for every K ≥ 64 and every cx ≤ 574 800, the fused cell is 938 800 + cx and guard fusion is
@@ -673,13 +691,16 @@ chain as specified crosses at least once per block: ≥ min(16 scalar-destinatio
 = 10 000 + 318 ns) = **10 318 ns per block** (UNMEASURED structure; a lower bound — the extra lane work comes on top). At 32k that is
 ≥ 938 800 + 64 × 10 318 = **1 599 152 ns** (83.9 GB/s) > the shipped guarded lazy chain's 1 513 600; at 1M ≥ 49 051 264 > 46 313 600.
 Every rowmax cell of the round-3 / round-4 tables (917 µs at 32k, 7 756 µs at t = 16, …) assumed free crossings and is superseded by this
-bound.
+bound. **audit (PROMPT-6, #31):** the cheaper crossing above (one drain + 16 scalar reads of the freshly reduced maxima) is erratum #31's
+racing composition; the deterministic one is 16 scalar-destination reduces = 17 600 ns per block (`[PA-rowmax-det]`, T6a_rowmax_det):
+rowmax ≥ 2 065 200 ns at 32k (65.0 GB/s) and ≥ 63 964 800 ns at 1M. The 10 318 ns figure stays a valid lower bound; every verdict
+above (never switch, KV-int8 on rowmax) only strengthens.
 
 
 ### 3.3 Numerics
 Scores are f32 (exact products of f16 inputs, f32 sums over d ≤ 128); the shift makes every exp argument ≤ 0 so
 no overflow is possible; P ≤ 1 in f16 (no saturation); O and S accumulate in f32 over ≤ 2²⁰ terms (relative
-2⁻²⁴·√L class); out = O/S in f32 then one cast to f16 (E9's rounding-mode check applies). The i8 variant adds
+2⁻²⁴·√L class); out = O/S in f32 then one cast to f16 (**audit, #22 / #31:** the per-row 1/S_r multiply is Duplicate + binary Mul, never a unary Muls, and S_r reaches the scalar unit at most once per step through a proven composition) (E9's rounding-mode check applies). The i8 variant adds
 per-token K scales (a reel per block, +1 Mul per score) and quantises P to i8 with the fixed scale 127 (p ≤ 1,
 no max needed) — its accuracy is the open item of E27, not its rate.
 
@@ -740,7 +761,10 @@ out wrong** (HW-MAP, session 1). The closure:
   the block), computed once per step with the full machinery (cast S → f16, the f16 tree, 16 reduce-max calls, the reel: **5 200 ns at
   the throughput convention, 6 508 chained; 4 501 / 5 138 at 256-token blocks** — in the fixed cost, T4r_fixed). The measured trip rate
   (0.087–0.22 % of steps, HW-MAP) transfers only to this definition; a prefill-calibrated m_r is a different variant with an unmeasured
-  rate. The shift is m_r − β, β = 3 (§3.3 (iii)).
+  rate. The shift is m_r − β, β = 3 (§3.3 (iii)). **audit (#29 / #31):** the 16 maxima reach the reel's Duplicate operands as scalars once
+  per step; the deterministic path is 16 scalar-destination reduces (17 600 ns), never vector-destination calls read back at a fence (#31):
+  first-block max 5 200 → 19 890 ns, the round-4 fixed cost 19 328 → 34 018 ns (`[PA-firstmax-det]`, T6a_firstmax_det; DERIVED — the
+  measured cells carry whatever the shipped kernel does).
 - **(b) The guard's result path.** The 8 reduce-max results per fragment (one per P reel; value in lane 0, index-class in lane 1) cross to
   the scalar unit **through the queue fence** (erratum #15: a raw read issued right after async vector math ships pre-fold values) —
   one fence per block, cost UNMEASURED (A5, under 1 µs by the σ_s class; E35 times it).
@@ -837,7 +861,7 @@ every size a function of (mt, d, block) only — T_buffers_no_OL still holds, th
 | **mask reel** | US | 512·mt × 4 B = 2 / 4 / 6 / 8 KiB | the per-row causal mask (t > 1) |
 | q row-major, page-table window | US | 4 KiB·mt (aliased onto the idle drained-C_s buffer at mt = 4) + 4 KiB | the round-2 remedy, applied at mt = 4 |
 | **US total** | | **122 / 184 / 190 / 196 KiB + 64 B** | every mt under the 208 KiB evidence (round 3: 208 KiB + 64 B at mt = 1 and snapshots forced into S1 above) |
-| P ring | S1 | 2 × 4 KiB·mt (the DDR → S1 staging target) | no snapshots: 8 / 16 / 24 / 32 KiB |
+| P ring | S1 | 2 × 4 KiB·mt (the DDR → S1 staging target) | no snapshots: 8 / 16 / 24 / 32 KiB — **audit (#25): VIOLATES as laid out (slot offsets 4 KiB apart); 32-KiB-granular slots: 64 / 128 / 192 / 256 KiB of S1 (`[PA-s1-pring-*]`, T6a_s1_pring), or one 4 KiB piece at offset 0 per lift** |
 | **P scratch** | **DDR** | 2 × 16 KiB·mt (double-buffered) | new: the bounce's scratch, O(1) |
 
 The 1 024-token block at mt = 1 (review item 5's lever) is listed as a variant: L0C exactly full (256 KiB), drained C_s 64 KiB in US
@@ -891,9 +915,162 @@ cadence with differencing on A (E29's fault class). **A10′ vector → matrix (
 (L0C exactly full), so the drain of block b's sets must retire before block b + 1's first PV call — one block of slack (12 µs) against a
 459 ns drain; at mt = 1 the sets are double-buffered and the edge is two blocks apart as before. **Every L0C destination is an explicit
 byte-offset tensor (erratum #18: a chunk-offset view lands in chunk 0)**: the C_s ring's 3 × (block/16) chunks and the C_o sets' 8 chunks
-per group are addressed by byte offset — E23(v)'s differencing (two patterns through one chunk address, out changes) is the check. The
+per group are addressed by byte offset — E23(v)'s differencing (two patterns through one chunk address, out changes) is the check (**audit, #18:** the rule covers every L0
+operand — the L0A Q and P slots, whose view offsets are ignored, and the L0B ring halves are byte-offset tensors too). The
 determinism criterion of E27 is unchanged (fixed order: blocks, groups, partials, the two-level merge), and its host patterns use **prime
 periods > L** (erratum #21: mod-N patterns alias tokens and hid a call-tile transposition as a clean one-token shift).
+
+
+### 5.1 Round 6 (PROMPT-6) — E40: the stage-overlap pre-design (`[E40-*]`, T40_*)
+
+Status: a pre-design — the STRUCTURE is DERIVED and machine-checked (T40_*: 9 structural theorems ∀ inputs + cells); every cost cell
+is a function of the measured phase deltas and is re-instantiated when the next kernel session times the deferred kernel's phases;
+the gate quantity φ is UNMEASURED (E40a). No new silicon claims. Inputs: the session-3 phases (§6.0, T5r_engines) and the session-5
+deferred-guard cells (HW-MAP, the DEFERRED GUARD row: MEASURED, production flags).
+
+**(a) What the shipped kernel does.** Per 512-token block the stages run serially (T5r_engines): scores (K stream, 32 calls, the C_s
+drain) → softmax (+ guard) → PV-merge-bounce (V stream, the P bounce, 32 calls, the C_o drains, the merge). At 32k, t = 1 (session 3):
+**c = 523.9, v = 644.3 (69.5 without the guard), p = 344.9 µs; the K+V stream phase s = 770.8 µs** (HW-MAP and T5r_engines carry
+770.8; the brief's 770.9 is the same phase), **the bounce b ≈ 51 µs**; serial sum c + v + p = 1 513.1 µs (938.3 unguarded). The shipped
+deferred guard (session 4/5) removes the per-block scalar scan: 945.5 µs trip-free (MEASURED), guard-off 902.9 on the same kernel —
+fold + end-of-step read = 42.6 µs per step (their split is UNMEASURED; the read is ≤ 20 µs by erratum #29's band, so the fold carries
+353–665 ns per block). E40 overlaps the three serial stages across blocks; the round-5 bound (T5r_overlap: ≤ 117 µs at 32k on the
+unguarded reading) is the ceiling this section turns into a design.
+
+**(b) Which stages can physically overlap.** The engines are distinct — copy-in (DDR → L0B direct loads, the bounce's DDR → S1 leg),
+matrix, vector, copy-out (L0C drains, the bounce's US → DDR leg), loader (S1 → L0A lifts), scalar (issue) — but one constraint
+dominates: **erratum #14 makes the full barrier the only fence for a direct load, and a full barrier waits for every pipe.** Every
+32 KiB K/V tile is closed by one (8 per 512-token block, 4 per 256-token block). So vector work overlaps the stream only *inside* a
+tile interval: whatever is issued before a tile's barrier must finish before the next tile can be issued. The softmax cannot run
+"beside" the stream as one long chain; it must be cut into slices that each fit under a tile's load (T40_ivl_floor_iff).
+
+| pair | overlap? | the binding reason |
+|---|---|---|
+| DDR stream ‖ matrix (scores, PV) | **yes — already** inside the stream phase | the 2 × 32 KiB L0B parity halves: tile i + 1 loads while tile i multiplies (E21's per-tile barrier + MMA: 169.2 vs the 174.1 stream) |
+| DDR stream ‖ vector (softmax, fold, merge) | **yes, inside a tile interval only** | #14: each tile's full barrier drains the vector pipe; slices ≤ the tile's load are hidden; the cost of a barrier issued with vector work in flight, **φ, is UNMEASURED** (the gate, E40a) |
+| DDR stream ‖ copy-out (C_s / C_o drains, the P write leg) | yes | distinct engines; the write leg shares the DDR roof — it is inside the floor (the bounce) |
+| DDR stream ‖ loader (the P lifts) | yes | distinct engines (618 ns per block at mt = 1) |
+| the bounce's read leg ‖ the K/V tiles | no | one copy-in engine — the read leg is inside the floor |
+| scores MMA ‖ PV MMA | no | one matrix unit: 960·mt ns per block (8 %), interleaved per interval |
+| softmax ‖ fold ‖ merge | no | one vector unit: their sum is the block's vector work V |
+| C_s drain ‖ C_o drains ‖ P write leg | no | one copy-out engine (≈ 1 µs per block at mt = 1) |
+| anything ‖ a per-block scalar crossing | **no** | erratum #29: a crossing drains every pipe — the legacy scan's 8 981 ns per block is serial (T40_crossing_serial): on the legacy scan E40 cannot beat floor + nb × guard = 1 396.6 µs at 32k, 47.7 % slower than the deferred kernel run serially (`[E40-legacy]`) — **E40 composes only with the zero-crossing deferred guard** |
+| anything ‖ the trip re-run | no | the whole-step re-run is serial: ≤ 0.22 % of steps (MEASURED amortized +0.8–1.9 µs at 32k, `[E40-trip]`) |
+
+**What the budgets force** (`[E40-buf-mt*]`, T40_buf; sizes of §4's round-4 table, plus E40's would-be double buffers):
+
+| mt (t at g = 8) | L0C with double-buffered C_o | US with a second drained C_s | S1: P slots for two blocks in flight at 32-KiB granularity (#25) | ordering forced (not a stall) |
+|---|---|---|---|---|
+| 1 (t ≤ 2) | 160 KiB — fits | 154 KiB + 64 B — fits | 8 × 32 = 256 KiB — fits the ~1 MB PRIOR | none: every edge can be double-buffered |
+| 2 (t = 4) | 320 KiB — **over** (C_o single-buffered) | 248 KiB + 64 B — **over** | 512 KiB | **merge-before-reuse** (A10′): block b's C_o sets drain in the interval after their PV and are summed through the queue-fenced 2-slot partial ring before block b + 1's first PV call; **drain-after-softmax**: C_s(b + 1) drains only after the last softmax(b) slice — the vector window early in the macro-step, the drain in its last interval |
+| 3 (t = 6) | 240 KiB — fits | 238 KiB + 64 B — **over** | 384 KiB | drain-after-softmax only |
+| 4 (t = 8) | 320 KiB — **over** | 260 KiB + 64 B — **over** | 512 KiB | both, + the single P staging buffer: P(b + 1)'s cast trails P(b)'s write leg by one 4 KiB piece |
+
+None of these is a stall while the block's vector work fits the intervals left after the drain: mt·V_frag ≤ (tiles − 1)·d, i.e. ≤ 10.5 /
+5.3 / 1.5 / 1.1 µs per fragment at mt = 1..4 (d = 1 505 ns, the per-tile stream time). The three C_s regions are what the two-block V
+lag needs, and at mt = 2 and 4 L0C is exactly full — the lag cannot deepen there.
+
+**(c) The structure — one macro-step per block.** Macro-step j streams K_j and V_{j−2} (the two-block V lag of §5, which the three C_s
+regions were sized for), alternating tiles so that every interval carries a load. Steady state at mt = 1 (I1 … I8 are the tile
+intervals; each ends at that tile's full barrier):
+
+| interval | tile (its barrier closes the interval) | copy-in (next tile + bounce read leg) | matrix | vector (k = 2 window) | copy-out | loader |
+|---|---|---|---|---|---|---|
+| I1 | K_j⁰ | V_{j−2}⁰ | scores K_j⁰ → C_s[j mod 3] (8 calls, fresh chunks) | softmax(j − 1) + fold, slice 1 | the last C_o set of block j − 3 (if not yet) | lift P(j − 2) piece 0 → L0A |
+| I2 | V_{j−2}⁰ | K_j¹ | PV(j − 2) group 0 → C_o set 0 (8 calls, fresh) | slice 2 (the cast of P(j − 1) ends here); the merge of block j − 3 | P(j − 1) write leg, pieces 0–1 | — |
+| I3 | K_j¹ | V_{j−2}¹ | scores K_j¹ | — | drain C_o(j − 2) set 0; P(j − 1) pieces 2–3 | lift P(j − 2) piece 1 |
+| I4 | V_{j−2}¹ | K_j²; P(j − 1) pieces 0–1 DDR → S1 | PV(j − 2) group 1 | — | — | — |
+| I5 | K_j² | V_{j−2}²; P(j − 1) pieces 2–3 DDR → S1 | scores K_j² | — | drain C_o(j − 2) set 1 | lift P(j − 2) piece 2 |
+| I6 | V_{j−2}² | K_j³ | PV(j − 2) group 2 | — | — | — |
+| I7 | K_j³ | V_{j−2}³ | scores K_j³ | — | drain C_o(j − 2) set 2 | lift P(j − 2) piece 3 |
+| I8 | V_{j−2}³ | K_{j+1}⁰ | PV(j − 2) group 3 | — | **drain C_s(j)** (32 KiB in 1 KiB chunks) | — |
+
+Every dependency is at least one interval long, so **a tile barrier the stream already pays for orders it** (scores(j) in I7 → the C_s
+drain in I8 → softmax(j) in macro-step j + 1 → the write leg → the DDR → S1 staging ≥ one barrier later (A6′) → the lift in macro-step
+j + 2 (A6″) → PV(j) (A7) → the C_o drains one interval later (A9) → the merge in the next window). The merges are applied to O in block
+order and S accumulates in block order exactly as in the serial kernel — **E40's output must be bit-identical to the shipped kernel's**
+(fresh sets, one fixed f32 order), which makes equality, not just a tolerance, E40b's pass criterion. Pipeline fill: the first two
+macro-steps stream K tiles only (no V is ready), so the DDR engine stays busy; the exposed tail is the last block's merge, the end-of-step
+read and the output cast — carried as τ (and the read as nx·cx, nx = 1).
+
+**(d) The barrier plan — one rule per erratum.**
+1. **#14 — the tile barriers are the only full barriers.** 8 per 512-token block (4 per 256-token block), exactly as in the measured
+   stream; **E40 adds none** (`[E40-tile]`): every other edge of §5 (A3–A12, round 4's A5′/A6′/A6″/A10′) is scheduled at least one
+   interval after its producer and rides a tile barrier. Queue-fenced edges stay queue-fenced — the L0C drains in 1 KiB chunks (the
+   measured form; never a full 32 KiB queue → vector-buffer staging, #27), the partial ring at depth = count (#9).
+2. **#19 — no f16 accumulation across a barrier, unchanged.** Every C chunk is written by exactly one call per visit: one scores call per
+   16-token chunk; one fresh C_o set per 128-token group, whose 8 PV calls sit inside one interval. E40 must not save drains by summing
+   C_o sets in L0C — that would cross the tile barriers.
+3. **#29 — zero scalar reads on the per-block path.** The guard is the deferred one (a vector-only fold); the page tables are fetched
+   once per step in the prologue (≤ 16 KiB at 1M with 256 KiB pages; indexed in ≤ 256-deep nests, #26), so no mid-stream window refill
+   crosses; the lazy chain's first-block m_r is the step's one prologue crossing, taken before any vector work is in flight (16
+   scalar-destination reduces — `[PA-firstmax-det]`).
+4. **#31 — no fresh-reduction readback at a fence.** The trip decision stays the deferred guard's single end-of-step read (the
+   proven-deterministic composition), after the epilogue's last barrier. E40 adds no reduce → scalar path: no adaptive schedule, no early
+   exit, no per-block flag.
+5. **#28 — one arm per handshake.** Each ring slot's "free" event is pre-armed exactly once in the prologue and consumed exactly once in
+   the epilogue; nothing arms conditionally inside the loop (the trip path is a whole-step re-run, never an in-loop branch).
+6. **#30 — one ping-pong state.** The interleaved K/V tile sequence is ONE B-slot state machine (not one per K nest and one per V nest);
+   the second pass at t = 16, the trip re-run and the H_kv = 1 per-core L-range each re-establish "tile 0 preloaded" themselves; loop
+   bounds are the per-core block count, never a strips multiple.
+7. **#18 — explicit byte offsets.** The rotating C_s region ((j mod 3) · 32 KiB · mt), the C_o set addresses, the L0A P slots and the
+   L0B halves are byte-offset tensors (A-side view offsets are ignored; C-side ones land in chunk 0).
+8. **#20 / #25 — the bounce and its staging.** P rides US → DDR → S1 → loader; each 4 KiB piece is staged at offset 0 of its own
+   32-KiB-granular S1 slot (two blocks in flight: 256 / 512 / 384 / 512 KiB at mt = 1..4) — or at offset 0 with stage → lift one interval
+   apart per piece. Never a 16 KiB single block (it zeroes A rows ≥ 2).
+9. **#22 / #23 / #24 — the op and copy forms.** No unary Muls in any slice (the shift and the fold use binary ops on Duplicate-built
+   reels, built once per step); element-form copies ≤ 4 KiB per block, else the blocked or plain form; blocked strides are gaps.
+
+**(e) The reachable-overlap bound** (T40_ivl_*, T40_gain_le, T40_reach_iff, T40_pays_iff, T40_mono_phi, T40_crossing_serial; cells
+T40_floor, T40_prize_*, T40_phases, T40_phi_*).
+- *Structure, ∀ interval lists:* a macro-step costs Σ_j max(d_j, w_j) — never below the DDR sum or the other engines' sum, never above
+  the serial sum; it equals the DDR sum **iff** every interval's other-engine work fits under that interval's load (T40_ivl_*).
+- *The step, ∀ inputs:* **T_E40 = floor + nb·((V − k·d)⁺ + k·φ) + τ + nx·cx** (V the block's vector work in k vector-carrying
+  intervals, d the per-tile load, φ per vector-carrying barrier). Every schedule is ≥ floor + nx·cx; it reaches floor + τ + nx·cx **iff**
+  V ≤ k·d and φ = 0; it beats a serial base T_b **iff** nb·k·φ < T_b − (floor + nb·(V − k·d)⁺ + τ + nx·cx); it is monotone in φ; a
+  per-block crossing X is serial (it adds nb·X to every schedule).
+- *Parameterized on the phase deltas:* **gain ≤ (c + v + p) − (s + b) − (serial crossings) − τ.** At the session-3 deltas: 116.5 µs on
+  the legacy scan (after its 574.8 µs of serial crossings) and 116.5 µs on the unguarded kernel = 12.4 % of its serial sum (T40_phases).
+  The deferred kernel's phases are UNMEASURED; the next kernel session re-instantiates c, v, p, s, b.
+- *On the shipped kernel* (the deferred totals MEASURED; the floors from session 3's stream phase — a mixed-session reading until the
+  deferred kernel's phases are timed). F1 = the K+V stream phase + the bounce (round 5's floor, 163.3 GB/s); F2 = the E21 basis with the
+  per-tile barrier + MMA (169.2) + the bounce (159.0 GB/s):
+
+| L | deferred, trip-free (M) | F1 / F2 floor | gain bound, end read 0 / 10 / 20 µs — F1 | — F2 | per MoE token (× 28 layers), free read, F1 / F2 |
+|---|---|---|---|---|---|
+| 32k | 945.5 µs (142.0 GB/s) | 821.8 / 844.2 µs | 123.7 / 113.7 / 103.7 µs = **13.1 / 12.0 / 11.0 %** | 101.3 / 91.3 / 81.3 µs = 10.7 / 9.7 / **8.6 %** | 3.46 / 2.84 ms |
+| 128k | 3 618.8 (148.4) | 3 287.2 / 3 376.9 | 331.6 / 321.6 / 311.6 = 9.2 / 8.9 / 8.6 % | 241.9 / 231.9 / 221.9 = 6.7 / 6.4 / 6.1 % | 9.28 / 6.77 ms (round 5: 7.46 at the unguarded reading) |
+| 1M | 28 694.0 (149.7) | 26 297.6 / 27 014.9 | 2 396.4 / 2 386.4 / 2 376.4 = 8.4 / 8.3 / 8.3 % | 1 679.1 / 1 669.1 / 1 659.1 = 5.9 / 5.8 / 5.8 % | 67.10 / 47.01 ms |
+
+  **The reachable fraction of the shipped cell is 8.6–13.1 % at 32k, 6.1–9.2 % at 128k, 5.8–8.4 % at 1M — if φ is small.** Its
+  per-block vector work, V = 1 438–2 107 ns over every consistent (fold, read) split and a merge of 0–357 ns (`[E40-vec]`), fits two tile
+  intervals (2 d = 3 010 ns) at every split and one interval (d = 1 505) only at the low end: k = 2 is always enough.
+- *The gate φ* (T40_phi_*, ∀ φ iffs at every consistent split): E40 beats the deferred kernel iff φ ≤ **966 / 888 / 810 ns at k = 2**
+  (F1, end read 0 / 10 / 20 µs; **791 / 713 / 635** on F2); at k = 1 (the whole window in one interval, the excess V − d exposed) ≤ 1 330
+  – 1 687 (F1) / 1 024 – 1 381 (F2); at k = 8 (one slice per tile) ≤ 158 – 241 ns. **The most tolerant consistent cell needs φ ≤ 1 687
+  ns; erratum #29's measured crossing (10–20 µs, a barrier or queue round trip + a scalar read with vector work in flight) is 5.9–11.9×
+  above it** (T40_phi_gate). If a full barrier issued with vector work in flight costs what a crossing costs, E40 is dead on arrival; if
+  it costs what a barrier with MMAs in flight costs in the measured stream (≈ 48 ns per tile of barrier + MMA against the 174.6 base,
+  E21), E40 reaches within τ + cx of the floor. Design rule from the lines: concentrate the vector window (k = 1 or 2), never one slice
+  per tile.
+- *t ≥ 4:* the vector work grows with mt while the stream does not; the deferred kernel's per-fragment cost at t ≥ 4 is UNMEASURED.
+  E40 reaches the stream there iff mt·V_frag ≤ (tiles − 1)·d; beyond it the vector unit binds and the gain is bounded by the serial sum
+  minus the vector busy time.
+
+**(f) Ladder rows (round 6, PROMPT-6) and the risk.**
+
+| # | Settles | Setup | Observable failure | Decides |
+|---|---|---|---|---|
+| **E40a — the gate** | φ: the cost of a full barrier issued with vector work in flight (no scalar read after it) | the stream rung (K + V tiles, per-tile full barrier, the production page-table reads) with one 1 024-lane binary vector op on a dummy US reel (consumed at the end so it is not deleted, #17) issued before k ∈ {0, 1, 2, 8} of the 8 tile barriers per block; the per-block time against k gives φ; control: the same with a scalar read of the op's output after the barrier must reproduce erratum #29's 10–20 µs; 20 reps, reps-scaling check | φ above the k-line of (e) → E40 is unreachable at that k; a control that does not reproduce #29 = the probe is not exercising the crossing | φ ≤ 0.6–1.7 µs → E40b; φ ≥ 2 µs → E40 dead (record) |
+| **E40b — the pipelined kernel** | the macro-step schedule of (c) at 32k / 128k / 1M, t = 1 | the deferred kernel restructured per (c)–(d); timed against F1 / F2 + τ + cx and against the deferred cell (945.5 µs at 32k) | no gain = a hidden crossing (#29) or φ; any rep-to-rep difference or any bit difference from the serial kernel's output = a race (#8 / #31) or a broken merge order (positive control: one tile barrier removed); a hang = a surplus arm (#28); stale P rows = a #25 staging or a #30 ping-pong state after the trip re-run (a planted trip must re-run exactly) | the attention-side lever after fusion (PROMPT-3R6 ranks it); the planner's per-layer attention |
+
+Order: E40a first (an afternoon on the existing stream rung; it can kill E40 before any restructuring), then E40b.
+
+| Risk | Trigger | Impact | Fallback |
+|---|---|---|---|
+| **φ — a full barrier with vector work in flight drains like a crossing** | E40a | above 1.7 µs per vector-carrying barrier E40 is unreachable at every k: the 8.6–13.1 % prize at 32k is lost | stay serial on the deferred kernel; the DDR-side lever left is bounce removal, which needs a proven US → S1 route that does not exist (#20) |
+| The deferred kernel's own phases differ from session 3's | the next kernel session | the bound's floor and V move (the cells above are a mixed-session reading) | re-instantiate T40_* (every cell is a function of c, v, p, s, b) |
+| A per-block scalar read reappears (a new guard, a per-block scale) | design review | E40's gain vanishes (T40_crossing_serial) | batch it into the end-of-step read with a re-run |
 
 
 ---
@@ -952,7 +1129,7 @@ measured softmax without the guard is 1 085 ns against the round-4 throughput co
 
 **The readings the planner uses (`[R5-ung-*]`, T5r_readings).** The unguarded kernel is MEASURED at 32k only; off 32k it is read as the
 guarded cell minus the per-block guard (574 800 ns over 64 blocks, scaled per block — structurally per block, UNMEASURED off 32k); the fused
-kernel as the unguarded one plus one 20 µs crossing per step (the band's top; UNMEASURED — E39); the constant-rate reading (143.0 / 140.0
+kernel as the unguarded one plus one 20 µs crossing per step (the band's top; UNMEASURED — E39; **audit, #31:** E39's composition is killed — the shipped deferred guard's MEASURED cells replace this reading in round 6); the constant-rate reading (143.0 / 140.0
 GB/s at every L) is carried beside them as the bracket:
 
 | L | guarded (M) | unguarded | fused (the target) | constant-rate bracket 143.0 / 140.0 | round 4 (legs 2, 169.2) | unguarded ÷ round 4 |
@@ -1210,15 +1387,16 @@ with two different sources through the same destination address (differencing); 
 expected value is exact (q, k, v ∈ [−7, 7] → scores |s| ≤ 7·7·128 = 6 272; with the identity-exp harness the
 PV sums over one 512-token block are ≤ 512·6 272·7 = 2.25·10⁷ — above 2²⁴, so the dataflow tests use
 |q| ≤ 1: |s| ≤ 896 and block PV sums ≤ 3.2·10⁶, f32-exact; i32-exact on the i8 build); pass = ≥ 20 reps bit-identical **and**
-equal to the host reference; timing is recorded, never a pass criterion. The transcendental is removed from
+equal to the host reference; timing is recorded, never a pass criterion (**audit, #21:** every token-indexed pattern uses a prime period
+> L; a sum oracle is order-blind — pair it with a position-sensitive check). The transcendental is removed from
 every dataflow test by the **identity-exp harness**: `exp` replaced by the identity and the shift by 0, so
 `out = (Q·Kᵀ)·V` is an exact integer GEMM-GEMM chain and the whole pipeline is checkable before E22 exists.
 
 | # | Settles | Setup | Observable failure | Decides |
 |---|---|---|---|---|
 | **E21 — MEASURED (season v1, round 3)** | **G(P): the gather rate at page granularity** — result: 153.8 / 167.0 / 169.2 GB/s shuffled at 16 / 64 / 256 KiB, sequential 165.2 / 169.0 / 169.2, c_pg = 59 / 39 / 3 ns (a lower bound); verdict in §1.4, `[R3-E21-*]` | 8 cores, each 2 048 pages of P bytes at pseudo-random 64 KiB-aligned addresses in a 4 GiB arena (the visit order is a fixed LCG seed, so host and device agree), P ∈ {4, 16, 64, 256, 1024 KiB} plus a sequential control; the kernel's own path: DDR→L0B direct 32 KiB tiles (or P-sized when P < 32 KiB), full barrier per tile, one (16,16,128) MMA per call tile into one C region; page content = a per-page integer pattern (column sums distinct per page index); the drained C is compared with the host's sum over the visited pages; 20 reps | a skipped, repeated, stale or mis-sized page changes the total (differencing by construction); c_pg = slope of time-per-page vs page size (T1_gather_cells fits it); a rate above the sequential control is itself a failure (a load that did nothing) | every §6 cell (×G); the runtime's page size (§10); whether the "3× slower" risk is real |
-| **E22 — MEASURED (season v1, round 3)** | the vector op set behind the softmax — result: exp f16 / f32 EXIST (272.8 ns per 1 024-lane call = 11.5 lane-equivalents, bitwise-exact on x ≤ 0), reduce-max EXISTS (181.9 / 251.4 ns per call), And<int32> ABSENT and And<int16> 45.9 ns, ρ32 = 1.37, σ_s = 19.9 ns; still open: the Duplicate / small-call latency (A3) and whether independent reels pipeline at the 40-lane/cycle wall (throughput vs chained convention, §3.2) | (a) exp of an integer-valued lane set {0, ±1, …, ±20} with the result compared to the host at 10⁻⁶ (a no-op returns the input bits, a half-rate unit shows in the count-mode timing); (b) reduce-max on a reel with one planted maximum per row, moved between reps; (c) And(x, 0x7FFFFFFF) on negative f32 bit patterns — the result must equal |x| exactly; (d) count-mode f32 Mul/Add over 1024 lanes, 10⁴ calls, vs the measured f16 figure; (e) the polynomial of §3.2 on the same lane set vs the host, relative error must be ≤ 1.6·10⁻⁴; (f) 256-iteration scalar max over a US reel with a planted maximum, timed | unchanged bits = no-op (errata #1); wrong planted-max position = a reduction that is not a reduction; a 1025-lane call keeping the sentinel beyond lane 1024 (errata #3 margin check); poly error above the bound = a rounding-mode no-op (errata #6) in one of the ops | c_V (the §3.2 table row), ρ32, the t ≥ 2 regime map, the 776-vs-851 µs headline corner |
-| **E23** | the f16 B-fragment geometry H-F16 (K and V tiles) and the drained-C → A-fragment identity | DESIGN.md E1's pack probe with f16 tiles: K tile with k[l][j] = ((7l + 13j) mod 15) − 7, A = all-ones row → C[0, l] = Σ_j k[l][j] exactly; variants: (i) a second pattern through the same L0B address; (ii) one-hot A rows e_j → C[0, l] = k[l][j] for every j (settles the A-fragment order for q and P); (iii) the 2 × (16,16,32) sequence at d = 64; (iv) V tile probe: P = one-hot in token l → out = v_l exactly; (v) the chain: drain C_s, cast, copy to S1, L0LOAD, PV call — with the identity-exp harness the result is (Q·Kᵀ)·V, exact | column (token) permutation → the fragment is not [16 n × 16 k]; e_j on the wrong k → the A pack differs from §3.2; (v) wrong → the drained C nesting is not the A nesting (then a 2D re-layout copy is needed, costed in §9) | the page layouts §1.2–1.3 (host packer change only, free) and the zero-copy P path |
+| **E22 — MEASURED (season v1, round 3)** | the vector op set behind the softmax — result: exp f16 / f32 EXIST (272.8 ns per 1 024-lane call = 11.5 lane-equivalents, bitwise-exact on x ≤ 0), reduce-max EXISTS (181.9 / 251.4 ns per call), And<int32> ABSENT and And<int16> 45.9 ns, ρ32 = 1.37, σ_s = 19.9 ns; still open: the Duplicate / small-call latency (A3) and whether independent reels pipeline at the 40-lane/cycle wall (throughput vs chained convention, §3.2) | (a) exp of an integer-valued lane set {0, ±1, …, ±20} with the result compared to the host at 10⁻⁶ (a no-op returns the input bits, a half-rate unit shows in the count-mode timing); (b) reduce-max on a reel with one planted maximum per row, moved between reps; (c) And(x, 0x7FFFFFFF) on negative f32 bit patterns — the result must equal |x| exactly; (d) count-mode f32 Mul/Add over 1024 lanes, 10⁴ calls, vs the measured f16 figure; (e) the polynomial of §3.2 on the same lane set vs the host, relative error must be ≤ 1.6·10⁻⁴; (f) 256-iteration scalar max over a US reel with a planted maximum, timed | unchanged bits = no-op (errata #1); wrong planted-max position = a reduction that is not a reduction; a 1025-lane call keeping the sentinel beyond lane 1024 (errata #3 margin check; **audit:** OBSOLESCENT — corrected #3, count-mode ops do not truncate at 1 024; probe per op); poly error above the bound = a rounding-mode no-op (errata #6) in one of the ops | c_V (the §3.2 table row), ρ32, the t ≥ 2 regime map, the 776-vs-851 µs headline corner |
+| **E23** | the f16 B-fragment geometry H-F16 (K and V tiles) and the drained-C → A-fragment identity | DESIGN.md E1's pack probe with f16 tiles: K tile with k[l][j] = ((7l + 13j) mod 15) − 7 (**audit, #21:** period 15 < L aliases tokens l and l + 15 — the open E23(iv) uses prime periods > L), A = all-ones row → C[0, l] = Σ_j k[l][j] exactly; variants: (i) a second pattern through the same L0B address; (ii) one-hot A rows e_j → C[0, l] = k[l][j] for every j (settles the A-fragment order for q and P); (iii) the 2 × (16,16,32) sequence at d = 64; (iv) V tile probe: P = one-hot in token l → out = v_l exactly; (v) the chain: drain C_s, cast, copy to S1, L0LOAD, PV call — with the identity-exp harness the result is (Q·Kᵀ)·V, exact | column (token) permutation → the fragment is not [16 n × 16 k]; e_j on the wrong k → the A pack differs from §3.2; (v) wrong → the drained C nesting is not the A nesting (then a 2D re-layout copy is needed, costed in §9) | the page layouts §1.2–1.3 (host packer change only, free) and the zero-copy P path |
 | **E24** | the direct-load choreography at this kernel's tile mix (K and V tiles interleaved, 2-block V lag) and the two exactly-full cases (L0A at mt = 4 / S4, L0C at mt = 4) | E13(a)-style accumulating oracle with alternating K/V tile patterns X/Y through the same L0B half, 10⁴ tiles, expected total exact; then the same with L0A filled to exactly 64 KiB (Q 32 + P 32) and L0C to exactly 256 KiB, content-checked; positive control: one full barrier removed | any stale/skipped tile changes the total; exactly-full aliasing shows X's sum where Y's is expected; a watchdog hang on the exactly-full L0A kills S4; a passing positive control means the detector is blind | the 174.6 rate assumption for the attention tile mix (E21's control row measures it); S4 (§2.4); mt = 4 in one L0C pass |
 | **E25** | the KV append path: 8 × 32 B K copies (c_copy), the US→DDR 2D variant, COPY_FRAC of the 4 KiB V_tail block into 8 fragments, V_tail/K_tail plain appends | write token l's k and v (two different value sets through the same page slot), run the identity-exp kernel over a 17-token L (one full group + a 1-token tail) → out must change with the appended values and equal the host; time 10⁴ appends | unchanged out = a silent no-op append (errata #1); a wrong fragment landing shows as a permuted v; c_copy > 1 µs blows the 8 µs per layer-step budget (§1.2) → use the 2D copy or batch K like V | the per-step write cost (§10), whether K also goes through a 16-token tail |
 | **E26** | the Z branch: three-region rotation with the f32 region-difference, drift under ±Q alternation, and the S1→US snapshot copy (R_drain is MEASURED in round 3: 152.8–285.5 GB/s/core, hidden at every mt — T3r_drain_hidden) | 2 048 blocks of integer scores through 3 regions with ±Q, the difference of each block compared to the host exactly (f32-exact while |region| < 2²⁴, which the test keeps — then a second run with real-valued q, k to measure the drift against f64); drain 10⁴ × 32 KiB regions, timed, content-checked (DESIGN-2 E12 reused); snapshot round-trip US→S1→US compared | difference ≠ expected → the drain or the Sub path is broken; drift above 10⁻⁴ relative → smaller blocks or the i8 variant; R_drain < 3.4 GB/s/core → exposed-drain rows of §6; a drain that runs on the vector engine shows as vector-time additivity in E28 | the Z branch, the drain rows, whether mt ≥ 2 can use S1 for snapshots |
@@ -1262,7 +1440,8 @@ the headline's largest unmeasured term), E35 (trip rate at β = 3 and μ = 0), E
 | E25 | unchanged | | | |
 
 Order (round 5): **E39 first** (554.8–564.8 µs per layer at 32k; it decides the 32k lever rank), then E40, E35's model half, E27′'s sink
-test, E25.
+test, E25. **audit (PROMPT-6):** E39 is resolved by the shipped deferred guard (its batched fence + flag design is killed by erratum #31);
+E40 is pre-designed in §5.1 and refined there into E40a (the φ gate, first) and E40b (the pipelined kernel).
 
 
 ---
@@ -1287,7 +1466,7 @@ test, E25.
 | K append cost (8 small copies per token per head) | E25 | ≤ 8·c_copy per layer-step on the writer core (8 µs at c_copy = 1 µs; 2 % of a 398 µs GEMV step) | one 2D copy, or a 16-token K_tail with COPY_FRAC like V (then the tail path covers K too — it already does) |
 | d = 64 shapes | shape | 2 × (16,16,32) calls per 16 tokens (k = 64 illegal): 80 MMA calls per block, 20.0 %·mt instead of 8 % (T2_d64); KV bytes halve so every DDR cell halves and the vector share per byte doubles (c_V ≤ 30 / 14 at ρ32 = 1 / 2 for t = 1 DDR-bound) | accept; the i8/poly corners become vector-bound at t = 1 |
 | Launch floor | DESIGN.md E0 | +91 µs per layer-step unless launches pipeline (88 % of the 4k step, 12 % at 32k) | fuse the attention launch with the QKV epilogue / O-projection prologue where the runtime allows |
-| Errata compliance | — | #2: every transfer ≤ 32 KiB (tiles), ≤ 4 KiB (P pieces), ≤ 64 KiB (COPY_FRAC source); #3: all vector calls ≤ 1 024 lanes (the reels are exactly 1 024); #5: no f16 accumulation anywhere; #6: casts verified by E9/E22; #7: out leaves through US; #8/#14: full barriers on direct loads, pipe barriers A1–A13, no queue staging; #9: depths = counts; #12/#13: no i4 anywhere, i8×i8→i32 only in the variant; k = 64 never issued; n ≤ 16 per call; init flags not relied on | — |
+| Errata compliance | — | #2: every transfer ≤ 32 KiB (tiles), ≤ 4 KiB (P pieces), ≤ 64 KiB (COPY_FRAC source); #3: all vector calls ≤ 1 024 lanes (the reels are exactly 1 024; **audit:** hygiene, not a cap — corrected #3); **audit (#18–#31):** byte-offset L0 operands (#18), fresh chunks (#19), the P bounce (#20), prime periods (#21), no unary Muls (#22), gap strides (#23), ≤ 4 KiB element blocks (#24), offset-0 / 32-KiB-granular A staging (#25), scalar nests ≤ 256 (#26), drained-queue reads (#27), one arm per handshake (#28), no per-block crossing (#29), per-consumer ping-pong reset and per-region bounds (#30), no fresh-reduction readback at a fence (#31); #5: no f16 accumulation anywhere; #6: casts verified by E9/E22; #7: out leaves through US; #8/#14: full barriers on direct loads, pipe barriers A1–A13, no queue staging; #9: depths = counts; #12/#13: no i4 anywhere, i8×i8→i32 only in the variant; k = 64 never issued; n ≤ 16 per call; init flags not relied on | — |
 
 
 **Round 4 — the risk rows the review and session 1 added or re-aimed:**
@@ -1318,6 +1497,7 @@ test, E25.
 | Verify batches (t ≥ 4) scale with the fragment count | measured | t = 4 / 16 at 32k: 2 695.6 / 10 741.7 µs (2.6× / 4.2× the round-4 cells) | the batched guard, then E40, at mt ≥ 2; the unguarded t ≥ 4 kernel is UNMEASURED |
 | The validation is a net of terms | T5r_validate_terms | the 2.9–3.0 % match hides −97.7 / +48.1 / +22.4 µs term errors; a change that moves one term alone loses the match | re-validate per term (stream phase, bounce, exposed chain) |
 | Erratum #30 (B-slot ping-pong state carries across loop nests; per-region loop bounds) | spec | a consumer expecting "tile 0 preloaded" reads stale K/V; a strips·2 bound writes into a neighbour core | every consumer resets the ping-pong state; per-region bounds |
+| **E40's gate φ** (PROMPT-6: a full barrier issued with vector work in flight) | E40a | above 1.7 µs per vector-carrying barrier the stage overlap is unreachable at every k (§5.1) | stay serial on the deferred kernel |
 
 
 ---
@@ -1337,7 +1517,7 @@ test, E25.
    die that runs the layer; nothing attention-related crosses a die boundary (DESIGN-4 §1.3 placement). The
    runtime allocates 64 KiB pages per (layer, head, K|V) from a die-local pool and maintains the flat page
    tables (one 8 B entry per page); the kernel reads the table window (4 KiB = 512 pages = 128k tokens) from
-   DDR into US and indexes it with the scalar unit. Page size, round 3 (E21 measured, `[R3-page-*]`): **256 KiB pages by default** (169.2 GB/s; 4 MiB of tail waste per
+   DDR into US and indexes it with the scalar unit (**audit, #26 / #29:** in ≤ 256-deep nests; E40 fetches the step's tables once in the prologue so no refill crosses mid-stream). Page size, round 3 (E21 measured, `[R3-page-*]`): **256 KiB pages by default** (169.2 GB/s; 4 MiB of tail waste per
    layer-sequence), 64 KiB where the allocator's granule forces it (167.0, −1.3 %; 1 MiB of waste) — and for the DESIGN-4
    MoE-128k layers 256 KiB is a constraint, not a preference (§1.4: 64 KiB puts that cell on the attention-bound side by 0.8 %);
    never 16 KiB (153.8, −9.1 %); the two-tier extents of ALTERNATIVES §2.5 only if a real scattered cache measures c_pg ≥ 160 ns
@@ -1383,7 +1563,8 @@ test, E25.
     against a 1.3 % rate gain that 256 KiB pages already capture — dominated unless the instance fit is the binding constraint, where the
     64 KiB page (1 MiB of waste, −1.3 % of G) is the cheaper lever.
 11. **The P scratch.** 2 × 16 KiB·mt of DDR per core (O(1)) for the bounce, allocated with the page tables; the DDR → S1 staging of P
-    rides the same bulk A-staging route the expert kernel measured ("one pack per launch" there, one pack per block here).
+    rides the same bulk A-staging route the expert kernel measured ("one pack per launch" there, one pack per block here). **audit (#25):** not the same form — the expert kernel's legs are 32 KiB at
+    32-KiB-granular offsets, and a 16 KiB single block zeroes A rows ≥ 2: P is staged per 4 KiB piece at offset 0 of its own 32-KiB-granular slot.
 12. **Verification data.** Host patterns for any token-mapped check use prime periods > L (erratum #21); every L0C destination the
     kernel addresses is a byte-offset tensor (erratum #18).
 13. **The planner reads the measured per-layer attention, not G (round 5).** The t × L sweep is the attention term (DESIGN-4 round 5):
@@ -1393,7 +1574,8 @@ test, E25.
     measured t = 16 cell, MoE t = 4 = the measured t = 1 cell — DERIVED readings, not measurements).
 14. **No per-block scalar crossing in a production kernel (erratum #29).** Scalar decisions are computed as vector side-products and
     crossed in batches; a kernel interface that exposes a per-block scalar decision (the guard verdict, a per-block scale) is batched per
-    step, with a re-run path for the rare positive.
+    step, with a re-run path for the rare positive. **audit (#31):** batching a fresh reduction's readback at a fence races; the proven form
+    is a vector-only fold + ONE end-of-step read + a whole-step re-run (the shipped deferred guard).
 
 
 ---
@@ -1461,3 +1643,9 @@ factor K (erratum #29; `xing`, ∀ nb, K, cx), the batched guard's residual X pe
 of the unguarded / fused readings; the constant-rate reading is carried beside it as the bracket). The t ≥ 4 transfers by fragment count and
 the chord crossover are DERIVED readings of measured cells, not measurements; the rowmax crossing (≥ 10 318 ns per block) is a lower bound on
 an UNMEASURED structure.
+
+
+PROMPT-6 (2026-11-08): the audit cells `T6a_*` (4: the deterministic rowmax crossing, the deterministic first-block max, the S1 P slots at
+32-KiB granularity, the vector tail's Duplicate count) and the E40 pre-design `T40_*` (54: the interval schedule ∀ lists, the step model
+∀ inputs, the floors, the prizes, 36 φ lines, the budgets, the trip) — PROOF-COVERAGE-3 rows PA-1 … PA-6 and E40-1 … E40-12. New
+hypothesis variables: φ (E40a), the vector-carrying interval count k, the (fold, end read) split of the session-5 42.6 µs, τ.

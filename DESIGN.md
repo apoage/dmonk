@@ -1,5 +1,24 @@
 # DESIGN — execution layer for quantized-LLM decode matmul (one die, 8 cores)
 
+> **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; all five designs in
+> ERRATA-IMPACT.md).** No new silicon, no new theorem: model.py's output is unchanged (byte-identical), and the one cell this audit
+> re-designates is already proved. Every correction is marked **audit** in place. The live structure is the R3 route (i8 × i8 → i32 —
+> **erratum #19 does not touch it**: i8 chains across barriers are measured exact to depth 8 192); the f16 routes (R1, R1b, the W4 dequant
+> chain) are record-only and their f16 accumulate chains would VIOLATE #19. **Live findings:** (1) **#25 VIOLATES the A ring** — slots of
+> 2 KiB·mt put A copies at 2 / 4 / 6 KiB (mt = 1) up to 24 KiB offsets in the S1 A slot; only offset-0 4-KiB blocks and 32-KiB-granular
+> offsets are proven — the production route is the whole A pack in 32 KiB legs at 32-KiB-granular offsets with loader-only lifts (or per-tile
+> 4 KiB blocks at offset 0); (2) **#18:** `C[f][t]`, `A[f]` and the L0A/L0B slots are explicit byte-offset tensors — a view-sliced C lands
+> in chunk 0, A view offsets are ignored; (3) **#30:** the `t mod 2` / `j mod 2` parities are nest-local — one global counter, reset by each
+> consumer nest (at one tile per chunk the prefetch would land in the slot in use); per-region slab bounds (the fused-QKV example breaks the
+> divisibility the bound assumes); (4) **#22 / #29:** the R3 dequant's per-row sx multiply is Duplicate + binary Mul (a unary Muls is a
+> silent no-op — invisible at sx = 1), with sx read once under B7, not per row; (5) **#23 / #24 / #27:** the drain's stride encoding is
+> unpinned (#23: strides are gaps) — adopt the production drain (1 KiB chunks + the measured US → US strided row extraction); 32 KiB drain
+> slices as element copies land partially (#24) and as queue → vector-buffer stages hang (#27); (6) **#28:** one sync mechanism per edge,
+> distinct event IDs for B3's two releases; (7) **#21:** E1's period-31 pattern aliases (b[k + 64, n] = b[k, n + 13]). **Re-designated
+> cell:** m = 32 quotes **154.5** (T5_m32_restream) instead of 163.6 (A resident) until a #25 probe certifies 32 KiB-leg residency with live
+> rows ≥ 2 — and HW-MAP already measures m ≥ 24 at 81 / 59 / 43 GB/s on the realised kernel, so both are pre-measurement cells.
+> Corrected #3: the "errata-3 limit" citations are hygiene — no cell paid for them.
+
 > **SILICON UPDATE (post-round-2, measured)**: three of this document's
 > hypotheses are now SETTLED by measurement, and they change the ranking:
 > (1) **f16×i8 does not exist at the raw matrix level** (errata #13) — the
@@ -112,15 +131,21 @@ in SRAM, which they never are here.
 
 ### 1.2 Loop nest (per core)
 ```
-load s[c·N_c .. +N_c) → US                           (4 KiB, once)
+load s[c·N_c .. +N_c) → US                           (4 KiB, once; audit #24: plain form or ≤ 4 KiB element blocks — 12 KiB at fused QKV)
 for slab s in 0 .. N_c/N_slab-1:                      # n-outer
   for k-chunk j in 0 .. K/64-1:                        # k-inner (64 rows)
     copy-in : B tiles (j, t) for all t in slab s → S1 B-ring[j mod 4]   (16 KiB each, 64 KiB per COPY)
               A blocks (j, f) for f in 0..mt-1       → S1 A-ring[j mod 4]   (2 KiB·mt, one COPY)
+              # audit (#25): VIOLATES — slot offsets 2·mt·(j mod 4) KiB are neither offset 0 nor 32-KiB-granular;
+              # stage the whole A pack once in 32 KiB legs at 32-KiB-granular offsets (loader-only lifts), or 4 KiB blocks at offset 0
     loader  : A blocks → L0A[j mod 2]; B tile t → L0B[t mod 2] (double-buffered, one tile ahead)
+              # audit (#30): nest-local parities — use one global counter for loader and MMA, reset by each consumer nest
+              # (at one tile per chunk the prefetch would land in the slot still in use)
     for tile t in slab s:                              # N_slab/256 tiles
       for f in 0 .. mt-1:
         MMA(C[f][t], A[f], B[t], {m=16, n=256, k=64, initVal = (j == 0 ? ZERO : ACC)})
+        # audit (#18): C[f][t], A[f] and every L0 slot are explicit byte-offset tensors — a view-sliced C lands in chunk 0,
+        # A view offsets are ignored (and the init flags are ignored on this part: HW-MAP)
   vector  : drain rows r < m of C slab → US (2D staged read); y = C·s[n]; f32→f16
   copy-out: y rows → DDR
 ```
@@ -174,13 +199,13 @@ lane-ops = 4.6 µs vector + 2 MiB of US↔S1 copies at 250 GB/s = 8.4 µs (round
 | Buffer | Memory | Size | Depth / queue | Why this size and depth |
 |---|---|---|---|---|
 | B ring | S1 | 4 × 64 KiB = 256 KiB | 4 buffers, queue depth 4 (errata 9) | 64 KiB is the largest legal single COPY (errata 2) and the measured 180 GB/s granule. One chunk (66 KiB incl. A) = 3.0–3.1 µs of DDR; depth 4 keeps copy-in ≥ 2 chunks (≥ 6.2 µs) ahead of the loader, hiding per-call copy issue latency (U) and DDR jitter |
-| A ring | S1 | 4 × 2 KiB·mt ≤ 32 KiB | 4 / 4 | same cadence as B; separate queue so a B slot never waits on an A copy |
-| A resident (option, m ≤ 32) | S1 | 16·mt·K·2 B = 256 KiB (mt=1), 512 KiB (mt=2) | 1 | replaces per-slab DDR re-stream; requires S1 ≥ 768 KiB (P ~1 MB = 976 KiB, E7-S1 confirms); the 1 MiB needed at mt=3 does not fit |
+| A ring | S1 | 4 × 2 KiB·mt ≤ 32 KiB | 4 / 4 | same cadence as B; separate queue so a B slot never waits on an A copy — **audit (#25): VIOLATES (slot offsets ≥ 4 KiB, not 32-KiB-granular); the production route stages the whole A pack in 32 KiB legs** |
+| A resident (option, m ≤ 32) | S1 | 16·mt·K·2 B = 256 KiB (mt=1), 512 KiB (mt=2) (**audit, #25:** UNSAFE until a probe certifies 32 KiB legs with live rows ≥ 2 — m = 32 quotes 154.5, T5_m32_restream) | 1 | replaces per-slab DDR re-stream; requires S1 ≥ 768 KiB (P ~1 MB = 976 KiB, E7-S1 confirms); the 1 MiB needed at mt=3 does not fit |
 | L0A | L0A | 2 × 2 KiB·mt ≤ 16 KiB | 2 / 2 | A block for chunk j+1 loads while chunk j runs; fits the 32 KiB P lower bound at mt=4 |
 | L0B | L0B | 2 × 16 KiB = 32 KiB | 2 / 2 | equals the P lower bound; tile t+1 loads during the 237·mt ns of tile t. If E4 shows L0B ≥ 64 KiB → 2 × 32 KiB tiles (n=512,k=64 or n=256,k=128), halving call count |
 | L0C | L0C | 16·mt·N_slab·4 B = 64 KiB | 1 | equals the P lower bound by construction (N_slab derived from it) |
 | s[n] | US | N_c × 4 B = 4 KiB | 1 | loaded once per matmul via DDR→US (M path) |
-| drain staging | US | 4 KiB (m=1, row 0) … 64 KiB (m=16, N_slab=1024) | 2 × 32 KiB | staged L0C reads sliced at ≤32 KiB (errata 2 margin) |
+| drain staging | US | 4 KiB (m=1, row 0) … 64 KiB (m=16, N_slab=1024) | 2 × 32 KiB (**audit, #24 / #27:** drain in 1 KiB chunks read from the drained queue tensor — 32 KiB element copies land partially, 32 KiB queue → vector stages hang) | staged L0C reads sliced at ≤32 KiB (errata 2 margin) |
 | y staging | US | 16·mt·N_slab·2 B ≤ 32 KiB | 1 | f16 result for copy-out |
 | **S1 total** | | **288 KiB** streamed-A / **800 KiB** A-resident (mt=2) | | 288 fits even a 512 KiB S1; 800 needs the P ~1 MB |
 | **US total** | | ≤ 100 KiB (W8) | | within the 208 KiB evidenced |
@@ -236,17 +261,19 @@ Per k-chunk j and fragment f, the 2 KiB block:
 ```
 A_pack[j][f] : byte (g·16 + mr)·32 + kl·2  ↔  x[16f + mr, 64j + 16g + kl],  g ∈ 0..3, zero if 16f+mr ≥ m
 ```
-Blocks (j, 0..mt−1) are contiguous, so one COPY of 2 KiB·mt per chunk. Benchmark: host-packed.
+Blocks (j, 0..mt−1) are contiguous, so one COPY of 2 KiB·mt per chunk (**audit, #25:** into the A ring's offsets this violates the staging rule — see §2). Benchmark: host-packed.
 Integration: the producing layer's epilogue writes y in this order (§3.3). If E1 shows the
 A fractal is different, only this host routine and the epilogue scatter change.
 
 ### 3.3 C layout and drain path — geometry **P**, verified by E1 (row 0) and E6
 C slab in L0C: `[N_slab/16][16 m][16 n] f32`; row r of column-group i at byte (i·16 + r)·64.
-Drain row r = 2D staged read of N_slab/16 runs × 64 B at stride 1024 B → contiguous [N_slab] f32
+Drain row r = 2D staged read of N_slab/16 runs × 64 B at stride 1024 B → contiguous [N_slab] f32 (**audit, #23:** blocked strides are
+gaps, so this needs 960 B, not the 1 024 B pitch — the production drain sidesteps it: whole 1 KiB chunks, then the measured US → US strided
+row extraction)
 in US (m=1: one read, 4 KiB — matches HW-MAP's "row 0 only ≈ 4 KB/core"). Then per row:
-`Mul(row, s, 1024 lanes)` (= errata-3 limit, one call per row) → `Cast f32→f16` (1024 lanes) →
+`Mul(row, s, 1024 lanes)` (= errata-3 limit, one call per row — audit: hygiene, corrected #3; the per-row s operand forces one call per row anyway) → `Cast f32→f16` (1024 lanes) →
 COPY US→DDR 2 KiB (benchmark: row-major y at byte (r·N + c·N_c + n')·2; rows batched to one
-32 KiB copy at m=16).
+32 KiB copy at m=16 — audit #23 / #24: a blocked copy, 16 × 2 KiB with a destination gap of (N − N_c)·2 B, never an element copy > 4 KiB).
 Integration scatter into the next layer's A pack: 16-element runs of 32 B at stride 512 B.
 Use a 2D COPY if E5 proves US→DDR 2D is a real position pair; else COPY_FRAC is acceptable
 *here only* because the volume is tiny: ≤32 KiB/core (m=16) at 7 GB/s = 4.7 µs = 1.2% of a
@@ -289,7 +316,8 @@ lanes (32 768 lane-ops / 43.2 G = 0.76 µs at mt=1) + copy-out ≤32 KiB. Pipeli
 | B8 | vector → copy-out | Cast of the y rows retired | copy-out never ships a half-written y |
 | B9 | copy-out → vector | COPY of y retired | y staging reused only after it left US |
 All nine are explicit pipe barriers (ISA: "explicit pipe barriers between engines"). Within a
-single queue (B ring, A ring, L0A, L0B) ordering comes from the queue's own buffer mechanics
+single queue (B ring, A ring, L0A, L0B) ordering comes from the queue's own buffer mechanics (**audit, #28:** one mechanism per edge —
+no explicit flag layered on a queue's own arm; B3's two releases take distinct event IDs, legal per #14)
 with declared count = depth (errata 9: 4/4, 4/4, 2/2, 2/2). Nothing relies on timing.
 
 ### 4.3 Where errata 8 could enter, and how it is suppressed
@@ -343,7 +371,9 @@ the roof (dequant and loader both non-binding) only when D ≥ 43.5 and L ≥ 86
 - Identical work per core → no imbalance; the 180 GB/s staging number was itself measured as
   8 concurrent per-core slabs, so DDR fairness is inside the measured figure.
 - Aggregate = 8 × per-core = `min(173.8–180, 8·L·64/66, 8·16 KiB/(237·mt ns + c_mma))`.
-- N must make N_c a multiple of 256 (pad N otherwise; QKV-fused N = 3·N_model is fine).
+- N must make N_c a multiple of 256 (pad N otherwise; QKV-fused N = 3·N_model is fine). **audit (#30):** the slab loop bound N_c/N_slab
+  assumes N_slab | N_c, which "a multiple of 256" does not give (fused QKV at N_model = 4096: N_c = 1536 against N_slab = 1024) — bound the
+  loop per region, the last slab N_c − s·N_slab wide.
 
 Alternatives, with arithmetic:
 - **K-split** (core = K/8 rows × all N): A per core shrinks to 128 KiB at m=64 (fits S1), but
@@ -428,7 +458,8 @@ sustains ≥ 18.5 GB/s/core → ≥ 143.5 GB/s on this design **if that path is 
 2. **Route 2 (W4 dequant):** 2× the token rate of Route 1 iff D ≥ 43.5 and L ≥ 86.9 (then
    163.6 W4-GB/s); equals Route 1's token rate at D = 21.8 or L = 43.5; below it otherwise (§5).
 3. **Route 3 (i8×i8):** same bytes, same fragments, same 168; exact i32 accumulation
-   (127²·8192 = 1.3e8 < 2³¹), dequant y = sx[m]·s[n]·C in the same 1024-lane epilogue plus one
+   (127²·8192 = 1.3e8 < 2³¹), dequant y = sx[m]·s[n]·C in the same 1024-lane epilogue plus one (**audit, #22 / #29:** Duplicate(sx[r]) + binary Mul, or v_r = sx[r]·s[n]
+   built once per launch — a unary Muls is a silent no-op, invisible at sx = 1; sx[0..m) read once under B7, never per row)
    per-row scalar. Only differences: unverified dtype combo swapped, and no f16→i8 vector
    cast in ISA.md for on-device per-token quantization (benchmark may host-pack; integration
    needs a cast to be found, else Route 1b). Ranked #2 because its integration gap is a
@@ -451,7 +482,7 @@ Timing is recorded but never used as a pass criterion.
 | # | Settles | Setup | Observable failure | Decides |
 |---|---|---|---|---|
 | **E0** | T_launch: does the 91 µs floor serialize back-to-back launches? | kernel k writes its index k to DDR slot k; launch 1, 10, 100 queued | missing/duplicated slot indices = launches dropped; T(100) ≈ 100×91 µs = serialized, ≈ 91 + 100×small = pipelined | whether wall-clock ≈ in-kernel; fusion requirements (§6) |
-| **E1** | the whole Route-1 chain: DDR→S1 copy, S1→L0 loader, f16×i8 MMA numerics, initVal polarity, B fractal geometry, A fractal (P), row-0 drain | A = all-ones f16 [16, 128] (2 k-chunks), B = i8 tile pair with b[k,n] = ((7k+13n) mod 31) − 15 packed per §3.1; expect C[0,n] = Σ_k b[k,n] exactly. Variants: (i) swap B for a second pattern at the same addresses (differencing), (ii) A row 0 = one-hot e_j → C[0,n] must equal b[j,n] (A-pack probe for every j in 0..127), (iii) rows 1..15 of C must be 0, (iv) repeat with i8×i8 and f16×f16, (v) pack probe: the same logical tile packed under G1c, G1a, G1b and G2 (§3.1) through the same S1 address — exactly one packing reproduces the column sums (the four give pairwise different sums for this b; under G2 only the 32 KiB packing can) | all-zero → a no-op somewhere (bisect with E5/E3); only chunk-1 sums → initVal inverted; column permutation → B geometry wrong; e_j lands on the wrong k → A geometry wrong; wrong magnitudes → dtype combo broken | go/no-go for f16×i8 vs Route 3 vs 1b; the tile geometry and with it Route 1 vs 1b; the A pack; E1-sweep below |
+| **E1** | the whole Route-1 chain: DDR→S1 copy, S1→L0 loader, f16×i8 MMA numerics, initVal polarity, B fractal geometry, A fractal (P), row-0 drain | A = all-ones f16 [16, 128] (2 k-chunks), B = i8 tile pair with b[k,n] = ((7k+13n) mod 31) − 15 (**audit, #21:** period 31 < 128 rows and 256 columns, and b[k + 64, n] = b[k, n + 13] — an A-pack chunk transposition reads as a B column permutation; use seeded pseudo-random integers) packed per §3.1; expect C[0,n] = Σ_k b[k,n] exactly. Variants: (i) swap B for a second pattern at the same addresses (differencing), (ii) A row 0 = one-hot e_j → C[0,n] must equal b[j,n] (A-pack probe for every j in 0..127), (iii) rows 1..15 of C must be 0, (iv) repeat with i8×i8 and f16×f16 (**audit, #19:** the f16 two-chunk variant fails by #19 — one k = 128 call, or a fresh C per chunk + a host sum), (v) pack probe: the same logical tile packed under G1c, G1a, G1b and G2 (§3.1) through the same S1 address — exactly one packing reproduces the column sums (the four give pairwise different sums for this b; under G2 only the 32 KiB packing can) | all-zero → a no-op somewhere (bisect with E5/E3); only chunk-1 sums → initVal inverted; column permutation → B geometry wrong; e_j lands on the wrong k → A geometry wrong; wrong magnitudes → dtype combo broken | go/no-go for f16×i8 vs Route 3 vs 1b; the tile geometry and with it Route 1 vs 1b; the A pack; E1-sweep below |
 | **E1-sweep** | legal MMA call shapes and c_mma | same oracle, n ∈ {16,64,256,512,1024}, k ∈ {16,64,128,256}; 10k calls per shape, each content-checked | wrong sums at a shape = illegal shape (never "fast"); c_mma = intercept of time vs fragment count across passing shapes | tile size (§2), issue-slack budget (§1.3) |
 | **E2** | **L — the loader rate** | S1 holds tiles X and Y (ΣX ≠ ΣY per column) at the same slot alternately; 10k L0LOADs of 16 KiB into alternating L0B slots, each followed by MMA(ones, tile, k=64) accumulating into one C; expected C[0,n] = n_X·ΣX[n] + n_Y·ΣY[n] (≤ 9.6e6, exact in f32) | any skipped or stale load changes the total → caught; MMA at 236.8 ns/tile cannot mask L below 69.2 GB/s, and L ≥ 69 is all we need to know above that | the branch in §7.3; ranking in §0 |
 | **E3** | DDR→L0 direct (L0LOAD_GM) | E2 with the source in DDR; also one 65 KiB load | silent no-op → total unchanged from sentinel; 65 KiB faulting or not is observable by watchdog | removes S1 staging if it works at ≥ 21.7 GB/s/core |
@@ -460,7 +491,7 @@ Timing is recorded but never used as a pass criterion.
 | **E6** | L0C drain rate and the row-0 2D read | drain 64 KiB slabs with known content 1000× | content mismatch; islands across reps | scheme P viability (≥ 10 GB/s/core), Route 5(d) viability (≥ 50) |
 | **E7** | barrier sufficiency (errata 8) and S1 size | full pipeline on random x, W at 8192², 20 reps per config; ≥ 20 reps bit-identical and relerr ≤ 1e-3 vs host f32; positive control with B5 removed; S1 size by E4-style aliasing with 64 KiB copies at high offsets | any rep-to-rep bit difference = missing barrier; the positive control must show islands or the detector is blind | ship/no-ship; A-residency option |
 | **E8** | dequant instruction: numerics, group semantics (V1 vector scale / V2 scalar + loader transpose), rate D | i4 pattern with power-of-two scales and integer offsets → exact f16 expected values; 8 Mi elements, output content-compared on host | wrong/unchanged outputs; V1 or V2 producing the wrong column mapping in a follow-on E1-style MMA oracle | W4 go/no-go and the decision rule in §5 |
-| **E9** | epilogue vector ops: Mul 1024 lanes, Cast f32→f16 rounding (errata 6), 1025-lane truncation (errata 3) | Mul with known s; cast of 1 + 2⁻¹¹ (a round-to-nearest-even tie) and of 65505 (saturation); a 1025-lane call | truncated lanes keep the sentinel; a no-op rounding mode returns the input bits | epilogue correctness |
+| **E9** | epilogue vector ops: Mul 1024 lanes, Cast f32→f16 rounding (errata 6), 1025-lane truncation (errata 3; **audit:** OBSOLESCENT — corrected #3; probe f32 Mul and Cast widths in isolation instead) | Mul with known s; cast of 1 + 2⁻¹¹ (a round-to-nearest-even tie) and of 65505 (saturation); a 1025-lane call | truncated lanes keep the sentinel; a no-op rounding mode returns the input bits | epilogue correctness |
 | **E10** | the 40% number | 100 queued launches of 8192² at m ∈ {1,16,32,64}, random x per launch (so outputs differ per launch — a stuck kernel is visible), every output checked vs host f32 (relerr ≤ 1e-3), bit-identical across 20 reps of the same x | any failed check voids the timing | reported m=1 GB/s, both in-kernel-equivalent (floor from E0) and wall |
 
 Order: E0, E1 (+sweep), E2, E3, E5, E4, E6, E7, E9, E10, then E8 for W4. E1 is first because
