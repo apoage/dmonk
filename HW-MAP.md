@@ -113,6 +113,7 @@ inherit this — erratum #19).
 | **US → US strided copy (post-PV row extraction, plain strided bytes)** | **works — measured REAL** (production expert-GEMM kernel epilogue, differencing-verified) | no layout transform (the ~7 GB/s transform-copy path is a different route); stride math must follow the fragment-order L0C → US drain below |
 | **Gather at the attention kernel's own choreography (fresh-path tile-mix loop)** | **~138 GB/s aggregate, page-size-insensitive** (138.3 / 138.7 / 138.0 at 256 / 128 / 64 KiB) | 18 % under the E21 169 basis — barrier density of the 2-kind diagnostic loop; c_pg ≈ 0 at ≥ 64 KiB confirmed |
 | **PRODUCTION attention kernel (causal flags incl. guard, session 3)** | **t=1 effective KV: 78.6 / 88.7 / 91.7 / 92.7 GB/s at L=4k/32k/128k/1M; t≥4: 99.6-103.4 (per-16-row-fragment normalisation, quoted for L ≥ 32k only)** (32k t=1 = 1513.6 µs) | **UNGUARDED at 32k t=1 = 938.8 µs = 143.0 GB/s — within 2.9 % of the round-4 legs-2 cell (912 µs): the choreography model is VALIDATED; the guard's per-block scalar scan is the entire remaining gap (+572 µs — erratum #29).** Realised bounce legs = 2 (~51 µs; 2 MB vs 134 MB KV). Per-engine at 32k: stream 770.8 of 1513.1 µs (K+V stream phase ≈ 174-176 GB/s, at the 169.2 basis) — DDR ~47 % idle, the chain binds. (An earlier "4k = 390-422 GB/s" is VOID — its rung gates skipped PV+softmax.) |
+| **PRODUCTION attention kernel, DEFERRED GUARD (session 4)** | **common path = ZERO scalar ops/block** (vector-only excess fold, cap 3072 = f16-exact ≥ e⁸, never binds untripped lanes); one end-of-step read; trip = whole-step re-run at the observed per-row global max (final-m semantics) | trip-free steps ≈ 1059 µs phase (legacy scan 1168); at the real trip-rate premise amortized ≈ **950 µs (G ≈ 135)** at 32k t=1; the ADVERSARIAL canonical profile pays 1841 µs (retries ~100 % of steps — upper bound, NOT the fleet cell); exact+deterministic end-to-end (12/12 matrix incl. the 2-strip path, 30-launch stress); the batched fence+delta design was killed by erratum #31; the legacy scan is retained as the byte-identical A/B control |
 | **i32 accumulator overflow semantics** | **SILENT SATURATION at 2³¹−1** (not wrap) | measured: 127² chains exact to 2,147,092,480 (99.98 % of 2³¹); −128² chains hitting 2³¹ exactly clamp at 2,147,483,647 — **the [−127,127] quantizer clamp is REQUIRED; U_max = 32 MoE-shape chains are exact (bound HOLDS)**; L0C has no zero-init (pre-accumulation reads are nondeterministic → drain-before-accumulate required) |
 | **Host bounce λ (die→host→die, 4 KiB sync legs)** | **12.2 / 12.1 µs per direction; bounce 23.8–24.6 µs; unchanged under die-0 saturating D2D load** | measured — 7.6× below the 91 µs launch-floor-class anchor, inside the 10/500 bracket; **bounce share of any step ≈ 0.1 % — negligible for the planner** |
 
@@ -252,6 +253,13 @@ inherit this — erratum #19).
     and loop bounds over per-core regions must be per-region, not
     strips-multiples (a strips*2 bound wrote past the region into a
     neighbor core).
+31. **Fresh-reduction readback races at fences**: a scalar read of freshly
+    reduce-max'd data at a post-merge fence is NONDETERMINISTIC run-to-run
+    — under the queue fence AND under buffer + full barrier + scalar read
+    (both measured); the reduce alone and the crossing alone are each
+    deterministic, the combination races. Ship only compositions of
+    proven-deterministic components (the production answer: a vector-only
+    fold + ONE end-of-step read + whole-step re-run on trip).
 
 ## Concurrency & runtime behavior (all measured, season h)
 
@@ -290,7 +298,11 @@ inherit this — erratum #19).
   (fresh-f64-within-block: 1.5e-8 / 7.7e-8).** **Session 3: CAUSAL-EXACT
   end-to-end — 12/12 causal-matrix cells at 32k (t 2-16 × tail residues)
   bad 0, relerr 9.8e-11; real-exp rung-0 bad-0 at 4k/32k/128k/1M; with
-  rescale-at-every-raise the output IS the true final-m softmax.**
+  rescale-at-every-raise the output IS the true final-m softmax.** **Session
+  4: the guard's per-block scalar crossing is ELIMINATED on the common path
+  (deferred guard — zero scalar ops/block, one end-of-step read, whole-step
+  re-run on trip at the observed global max); the lazy switch is retired on
+  this path (needle profile now trips 3/re-switches 0).**
 - **Same-dst MMA chains: SPACING is the binding variable, not depth** —
   interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
   bidirectionally at depth >= 256 (filler results leak into chain chunks).
