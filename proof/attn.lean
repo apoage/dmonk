@@ -3058,3 +3058,232 @@ theorem T6a_tail_dup : 2 * 16 * dH = 4096 ∧ 4096 * tF16 / 10 = 190054 ∧
     tail4Ops 32768 1 1 * unitF32 .T * 10 / (rVecCore * 100) = 4156 ∧
     tn (16 * dH * 2) rFrac + 9 * 15 = 720 := by decide
 
+
+/-! # ROUND 6 (PROMPT-3R6, 2026-11-08) — the MEASURED deferred-guard cells folded in (kernel session 5; HW-MAP 3928d0e, the DEFERRED
+    GUARD row). `[R6-*]` in proof/attn.py; DESIGN-3's round-6 layer; PROOF-COVERAGE-3 rows R6-1 … R6-20. `Audit6` already carries the
+    session-5 cells (trip-free 945 500 / 3 618 800 / 28 694 000 ns, guard-off 902 900, legacy 1 514 900, amortized 946 300–947 400);
+    `Measured6` adds the canonical adversarial cells, the trip-rate premise, the quoted differences, the fold's cap and the numerics counts.
+    Cell theorems are generated from the model (scratchpad gen_attn6.py); the trip-breakeven theorem holds for every trip rate p. -/
+namespace Measured6
+/-- the canonical adversarial cells (they retry ~100 % of steps): 32k (63 trips), 1M (quoted 56.0 ms); the 1M legacy as quoted (46.3 ms) -/
+def canon32k : Nat := 1818100
+def canon1M : Nat := 56000000
+def leg1M : Nat := 46300000
+/-- the real trip-rate premise, per 100 000 steps (0.087–0.22 % of steps) -/
+def pLo : Nat := 87
+def pHi : Nat := 220
+/-- quoted differences, carried as given (no cell uses them): PROMPT-3R6 "the fold costs −59 µs vs the scan (one pass)"; HW-MAP "−558 µs
+    vs the legacy scan at real rates" -/
+def foldQ : Nat := 59000
+def winQ : Nat := 558000
+/-- the fold's cap (f16-exact, ≥ e⁸) -/
+def cap6 : Nat := 3072
+/-- numerics: the 1M canonical bad count; the random-profile out-verify bad counts at 32k / 1M (identical for deferred / legacy / guard-off) -/
+def badCanon1M : Nat := 2
+def badRand32k : Nat := 324
+def badRand1M : Nat := 65
+/-- DESIGN-4's MoE layer on the direct-path expert kernel (fleet.lean `tw3 moe .directSer`; D4 input) -/
+def tLayerMoeDirect : Nat := 2641199
+end Measured6
+
+namespace Design6
+open Measured Measured3 Measured4 Measured5 Design Design3 Design4 Design5 Audit6 Measured6
+/-- the trip model: the trip-free cell + p (per 10⁵ steps) × the whole-step re-run cost R -/
+def amort (T0 R p : Nat) : Nat := T0 + p * R / 100000
+/-- the re-run cost per tripped step: canonical (retries ~100 % of steps) − trip-free -/
+def reRun32k : Nat := canon32k - dfr32k
+def reRun1M : Nat := canon1M - dfr1M
+/-- hundredths of a percent, round-half-up (attn.py `pctH6`) -/
+def pctH6 (n d : Nat) : Nat := (2 * n * 10000 + d) / (2 * d)
+end Design6
+
+open Measured6 Design6
+
+/-! ## T6r_cells — the MEASURED deferred cells: rates, blocks, per block, × GEMV (`[R6-cells-*]`) -/
+theorem T6r_cells : effRate 32768 8 128 1 dfr32k = 1420 ∧
+    effRate 131072 8 128 1 dfr128k = 1484 ∧
+    effRate 1048576 8 128 1 dfr1M = 1497 ∧
+    effRate 32768 8 128 1 amortLo = 1418 ∧
+    effRate 32768 8 128 1 amortHi = 1417 ∧
+    nb5 32768 = 64 ∧
+    nb5 131072 = 256 ∧
+    nb5 1048576 = 2048 ∧
+    dfr32k / 64 = 14773 ∧
+    dfr128k / 256 = 14135 ∧
+    dfr1M / 2048 = 14010 ∧
+    pct dfr32k tGemvUnit = 2376 ∧
+    pct dfr128k tGemvUnit = 9092 ∧
+    pct dfr1M tGemvUnit = 72095 := by decide
+/-! ## T6r_vs_round5 — the measured cells against the round-5 readings (`[R6-cells-*]`, `[R6-moved]`): fused −1.4 / +1.3 / +2.7 %, unguarded
+    +0.7 / +1.8 / +2.8 %, the 140.0 constant-rate bracket −1.4 / −5.6 / −6.5 %, the legacy guarded −37.5 / −38.2 / −38.0 % -/
+theorem T6r_vs_round5 : fused5 t1L32k 32768 64 cxHi = 958800 ∧
+    fused5 t1L128k 131072 256 cxHi = 3573700 ∧
+    fused5 t1L1M 1048576 2048 cxHi = 27940000 ∧
+    ung5 t1L128k 131072 = 3553700 ∧
+    ung5 t1L1M 1048576 = 27920000 ∧
+    958800 - dfr32k = 13300 ∧
+    pct 13300 958800 = 14 ∧
+    dfr128k - 3573700 = 45100 ∧
+    pct 45100 3573700 = 13 ∧
+    dfr1M - 27940000 = 754000 ∧
+    pct 754000 27940000 = 27 ∧
+    dfr32k - tUng32k = 6700 ∧
+    pct 6700 tUng32k = 7 ∧
+    dfr128k - 3553700 = 65100 ∧
+    pct 65100 3553700 = 18 ∧
+    dfr1M - 27920000 = 774000 ∧
+    pct 774000 27920000 = 28 ∧
+    kvBytes 32768 8 128 * 10 / 1400 = 958698 ∧
+    pct (958698 - 945500) 958698 = 14 ∧
+    kvBytes 131072 8 128 * 10 / 1400 = 3834792 ∧
+    pct (3834792 - 3618800) 3834792 = 56 ∧
+    kvBytes 1048576 8 128 * 10 / 1400 = 30678337 ∧
+    pct (30678337 - 28694000) 30678337 = 65 ∧
+    t1L32k - 945500 = 568100 ∧
+    pct 568100 t1L32k = 375 ∧
+    t1L128k - 3618800 = 2234100 ∧
+    pct 2234100 t1L128k = 382 ∧
+    t1L1M - 28694000 = 17619600 ∧
+    pct 17619600 t1L1M = 380 := by decide
+/-! ## T6r_amort — the trip model T(p) = T0 + p·R reproduces the quoted amortized band (`[R6-amort]`, `[R6-amort-1M]`): R = 872 600 ns per
+    tripped step (canonical − trip-free; 30 300 under one guard-off step); p = 0.087 / 0.22 % → 946 259 / 947 419 ns = 946.3 / 947.4 µs at the
+    displayed 0.1 µs; at 1M (premise transferred, UNMEASURED) 28 717 756 – 28 754 073 ns = 149.6 – 149.4 GB/s -/
+theorem T6r_amort : reRun32k = 872600 ∧
+    off32k - reRun32k = 30300 ∧
+    reRun32k / 100 = 8726 ∧
+    pctH6 (reRun32k / 100) dfr32k = 92 ∧
+    amort dfr32k reRun32k pLo = 946259 ∧
+    amort dfr32k reRun32k pHi = 947419 ∧
+    (946259 + 50) / 100 = 9463 ∧
+    (947419 + 50) / 100 = 9474 ∧
+    (amortLo + 50) / 100 = 9463 ∧
+    (amortHi + 50) / 100 = 9474 ∧
+    amortLo - dfr32k = 800 ∧
+    amortHi - dfr32k = 1900 ∧
+    pctH6 (amortLo - dfr32k) dfr32k = 8 ∧
+    pctH6 (amortHi - dfr32k) dfr32k = 20 ∧
+    reRun1M = 27306000 ∧
+    amort dfr1M reRun1M pLo = 28717756 ∧
+    amort dfr1M reRun1M pHi = 28754073 ∧
+    effRate 1048576 8 128 1 28717756 = 1496 ∧
+    effRate 1048576 8 128 1 28754073 = 1494 := by decide
+/-! ## T6r_trip_breakeven — for every trip rate p (per 10⁵ steps) the deferred guard beats the legacy scan iff p ≤ 65253 at 32k (65.25 %)
+    and p ≤ 64476 at 1M (64.47 %, against the quoted 46.3 ms); the premise (≤ 220) is ≥ 296× inside (`[R6-trip-breakeven]`) -/
+theorem T6r_trip_breakeven (p : Nat) : (100000 * dfr32k + p * reRun32k < 100000 * leg32k ↔ p ≤ 65253) ∧
+    (100000 * dfr1M + p * reRun1M < 100000 * leg1M ↔ p ≤ 64476) := by
+  have h1 : reRun32k = 872600 := by decide
+  have h2 : reRun1M = 27306000 := by decide
+  rw [h1, h2]; unfold dfr32k leg32k dfr1M leg1M
+  constructor <;> constructor <;> intro h <;> omega
+theorem T6r_trip_premise : pHi * 296 ≤ 65253 ∧ 65253 < pHi * 297 ∧ pHi ≤ 64476 := by decide
+/-! ## T6r_adversarial — the canonical adversarial profile (an upper bound, never the fleet cell): 73.8 / 76.7 GB/s, +20.0 / +21.0 % over the
+    legacy scan; the gap grows with L (303.2 µs → 9.7 ms) (`[R6-adversarial]`) -/
+theorem T6r_adversarial : effRate 32768 8 128 1 canon32k = 738 ∧
+    effRate 1048576 8 128 1 canon1M = 767 ∧
+    canon32k - leg32k = 303200 ∧
+    pct (canon32k - leg32k) leg32k = 200 ∧
+    canon1M - leg1M = 9700000 ∧
+    pct (canon1M - leg1M) leg1M = 210 ∧
+    leg32k < canon32k ∧
+    leg1M < canon1M ∧
+    canon32k - leg32k < canon1M - leg1M := by decide
+/-! ## T6r_base — the session-5 base: guard-off 35 900 ns (−3.8 %) under session 3's unguarded; the legacy A/B control +1 300 (+0.1 %); against
+    the round-4 legs-2 cell guard-off is −1.0 % (session 3: +3.0 %), inside the 5 % line (`[R6-base]`) -/
+theorem T6r_base : tUng32k - off32k = 35900 ∧
+    pct (tUng32k - off32k) tUng32k = 38 ∧
+    effRate 32768 8 128 1 off32k = 1487 ∧
+    effRate 32768 8 128 1 leg32k = 886 ∧
+    leg32k - t1L32k = 1300 ∧
+    pct (leg32k - t1L32k) t1L32k = 1 ∧
+    step4H 32768 1 g256 .lazy .T 2 = 911680 ∧
+    911680 - off32k = 8780 ∧
+    pct 8780 911680 = 10 ∧
+    pct 8780 911680 ≤ matchLine ∧
+    tUng32k - 911680 = 27120 ∧
+    pct 27120 911680 = 30 := by decide
+/-! ## T6r_fold — the session-5 decomposition at 32k (`[R6-fold]`): the scan costs 612 000 ns on its base, the fold + end read 42 600 (4.7 %);
+    the deferred guard removes 569 400 ns = 93.0 % trip-free (567 500 – 568 600 amortized); the quoted −558 µs sits 9 500 – 10 600 ns under the
+    cell differences and the quoted −59 µs is 1/9.7 of the one-pass cell difference — neither reproduces; carried as given -/
+theorem T6r_fold : leg32k - off32k = 612000 ∧
+    guardTab = 574800 ∧
+    dfr32k - off32k = 42600 ∧
+    pct (dfr32k - off32k) off32k = 47 ∧
+    leg32k - dfr32k = 569400 ∧
+    pct (leg32k - dfr32k) (leg32k - off32k) = 930 ∧
+    leg32k - amortLo = 568600 ∧
+    leg32k - amortHi = 567500 ∧
+    leg32k - amortHi - winQ = 9500 ∧
+    leg32k - amortLo - winQ = 10600 ∧
+    x10r (leg32k - dfr32k) foldQ = 97 ∧
+    foldQ ≠ leg32k - dfr32k ∧
+    foldQ ≠ dfr32k - off32k := by decide
+/-! ## T6r_e39 — E39 resolved by measurement (`[R6-e39]`): the deferred cell beats the round-5 target 958 800 ns by 13 300 (1.4 %) trip-free and
+    by ≥ 11 400 amortized; round 5's residual X (against 938 800) = 6 700 / 7 500 / 8 600 — straddling DESIGN-4's 8 279 line; against its own
+    base the residual is 42 600 = 2.1× the 20 µs band top, between the crossing-only 20 000 and crossing + side-product 51 040 -/
+theorem T6r_e39 : fused5 t1L32k 32768 64 cxHi = 958800 ∧
+    dfr32k < 958800 ∧
+    amortHi < 958800 ∧
+    958800 - amortHi = 11400 ∧
+    pct (958800 - amortHi) 958800 = 12 ∧
+    amortLo - tUng32k = 7500 ∧
+    amortHi - tUng32k = 8600 ∧
+    dfr32k - tUng32k ≤ 8279 ∧
+    amortLo - tUng32k ≤ 8279 ∧
+    8279 < amortHi - tUng32k ∧
+    x10r (dfr32k - off32k) cxHi = 21 ∧
+    64 * 1455 = 93120 ∧
+    cxHi + 64 * 1455 / 3 = 51040 ∧
+    cxHi < dfr32k - off32k ∧
+    dfr32k - off32k < cxHi + 64 * 1455 / 3 ∧
+    dfr32k - off32k - cxHi = 22600 := by decide
+/-! ## T6r_perblock — round 5's off-32k scaling rule tested (`[R6-perblock]`): legacy − deferred per block 8 876 / 8 726 / 8 603 ns (mixed
+    sessions) against the rule's 8 981 at every L; the deferred kernel is affine in nb within 0.4 % (slopes 13 923 / 13 992 ns per block,
+    intercept 54 428 ns per step) -/
+theorem T6r_perblock : (t1L32k - dfr32k) / 64 = 8876 ∧
+    (t1L128k - dfr128k) / 256 = 8726 ∧
+    (t1L1M - dfr1M) / 2048 = 8603 ∧
+    guardTab / 64 = 8981 ∧
+    (dfr128k - dfr32k) / 192 = 13923 ∧
+    (dfr1M - dfr128k) / 1792 = 13992 ∧
+    dfr32k - 64 * 13923 = 54428 ∧
+    dfr1M - (54428 + 2048 * 13923) = 125268 ∧
+    pct 125268 (54428 + 2048 * 13923) = 4 := by decide
+/-! ## T6r_layer_fractions — per DESIGN-4 layer: MoE 29.5 / 112.8 / 894.5 %, dense 5.2 / 19.8 %; the measured cells +3.7 / +0.8 / +0.4 % over the
+    round-4 legs-2 cells (`[R6-gemv]`) -/
+theorem T6r_layer_fractions : pct dfr32k tLayerMoe = 295 ∧
+    pct dfr128k tLayerMoe = 1128 ∧
+    pct dfr1M tLayerMoe = 8945 ∧
+    pct dfr32k tLayerDense = 52 ∧
+    pct dfr128k tLayerDense = 198 ∧
+    step4H 32768 1 g256 .lazy .T 2 = 911680 ∧
+    step4H 131072 1 g256 .lazy .T 2 = 3588736 ∧
+    step4H 1048576 1 g256 .lazy .T 2 = 28574592 ∧
+    pct (dfr32k - 911680) 911680 = 37 ∧
+    pct (dfr128k - 3588736) 3588736 = 8 ∧
+    pct (dfr1M - 28574592) 28574592 = 4 := by decide
+/-! ## T6r_fleet_moe_128k — DESIGN-4's MoE-128k layer on the measured cell (`[R6-fleet-moe-128k]`): attention-bound by 12.8 % (anchored) /
+    37.0 % (direct); 148.4 GB/s is under both effective-rate lines (167.3 / 203.2); even the E40 floor F1 is 2.5 % over the layer -/
+theorem T6r_fleet_moe_128k : dfr128k - tLayerMoe = 411081 ∧
+    pct (dfr128k - tLayerMoe) tLayerMoe = 128 ∧
+    dfr128k - tLayerMoeDirect = 977601 ∧
+    pct (dfr128k - tLayerMoeDirect) tLayerMoeDirect = 370 ∧
+    kvBytes 131072 8 128 * 10 / tLayerMoeDirect = 2032 ∧
+    effRate 131072 8 128 1 dfr128k ≤ 1673 ∧
+    floorF1 131072 - tLayerMoe = 79481 := by decide
+theorem T6r_fleet_moe_128k_eff : tLayerMoe ≤ kvBytes 131072 8 128 * 10 / 1484 :=
+  (T5r_fleet_moe_128k_eff 1484 (by decide)).mpr (by decide)
+/-! ## T6r_fold_bound — the fold at the +8 bound (`[R6-fold-bound]`): given e < 2.7183 and e^x ≤ 1/(1 − x) (x = 0.02), e⁸ < 2.7183⁸ < 3 072 and
+    e^8.02 < 2.7183⁸ · 50/49 < 3 072 — untripped lanes never clamp and the planted 8.02 trips with the cap not yet binding; the cap is f16-exact -/
+theorem T6r_fold_bound : 27183 ^ 8 < cap6 * 10 ^ 32 ∧ 27183 ^ 8 * 50 < cap6 * 10 ^ 32 * 49 ∧ cap6 = 3 * 2 ^ 10 ∧ 3 < 2 ^ 11 ∧
+    29811 * 10 ^ 31 < 27183 ^ 8 ∧ 27183 ^ 8 < 29812 * 10 ^ 31 ∧ 30419 * 10 ^ 31 * 49 < 27183 ^ 8 * 50 ∧ 27183 ^ 8 * 50 < 30420 * 10 ^ 31 * 49 := by decide
+/-! ## T6r_numerics — the two numerics classes' constants (`[R6-numerics-*]`): f16 normals end at 2⁻¹⁴, the subnormal spacing is 2⁻²⁴, 1 %
+    granularity at P ≤ 100·2⁻²⁴ = 1/167 772; the exact P path at 1M = 8 388 608 lanes; the random-profile floor 324 / 65 is kernel-independent -/
+theorem T6r_numerics : 2 ^ 14 = 16384 ∧ 2 ^ 24 = 16777216 ∧ 2 ^ 24 / 100 = 167772 ∧ 1048576 * 8 = 8388608 ∧ badCanon1M = 2 ∧ badRand1M < badRand32k := by decide
+/-! ## T6r_e40_amort — E40's bound on the amortized 32k cell (`[R6-e40]`): +800 / +1 900 ns over PROMPT-6's trip-free prize -/
+theorem T6r_e40_amort : dfr32k - floorF1 32768 = 123700 ∧
+    amortLo - floorF1 32768 = 124500 ∧
+    amortHi - floorF1 32768 = 125600 ∧
+    dfr32k - floorF2 32768 = 101284 ∧
+    amortHi - floorF2 32768 = 103184 ∧
+    pct stream32k dfr32k = 815 ∧
+    pct stream32k tUng32k = 821 := by decide

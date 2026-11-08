@@ -1,5 +1,32 @@
 # DESIGN-3 — decode attention over the KV cache (gather → softmax → reduce), one die, 8 cores
 
+> **ROUND-6 STATUS (2026-11-08 — the deferred-guard kernel MEASURED end-to-end, kernel session 5; HW-MAP 3928d0e, the DEFERRED GUARD row;
+> `proof/attn.py` `[R6-*]`, `proof/attn.lean` `T6r_*` (16 new theorems, 366 total, 0 axioms / sorry / native_decide; `lake build` clean),
+> `proof/fleet.py` `[R6-*]`, PROOF-COVERAGE-3 rows R6-1 … R6-20).** The round-5 "inferred ≈ 950 µs" fused reading is replaced by the
+> measured cells; prior model output is byte-identical (attn.py's first 942 lines); every number is marked MEASURED (session 5 unless
+> named), DERIVED (a theorem) or UNMEASURED. **MEASURED (production flags, trips 0): 945.5 / 3 618.8 / 28 694.0 µs at 32k / 128k / 1M,
+> t = 1 = 142.0 / 148.4 / 149.7 GB/s** (§6.0′); at 32k the legacy scan 1 514.9 µs (2 trips), guard-off 902.9 µs, the adversarial canonical
+> profile 1 818.1 µs (63 trips; 56.0 ms at 1M against the legacy 46.3). **The amortized band 946.3–947.4 µs (141.8–141.7 GB/s) is an
+> amortization, not a third measurement:** T(p) = T₀ + p·R with R = canonical − trip-free = 872.6 µs per tripped step reproduces both
+> ends to the displayed 0.1 µs at p = 0.087 / 0.22 % (T6r_amort). **E39 is RESOLVED by measurement** — the cell beats round 5's target
+> (958.8 µs = 140.0 GB/s) by 1.4 %, but as a net of two terms: the deferred guard costs 42.6 µs per step over its own base, 2.1× the
+> modelled 20 µs crossing, while the session-5 base runs 35.9 µs (3.8 %) under session 3's unguarded kernel (T6r_e39, T6r_base; round 5's
+> lesson repeats — a cell-level match can net term errors). **E35's device half is CLOSED** (zero scalar ops per block; +42.6 µs per step;
+> trips ≈ free: +0.8–1.9 µs at the premise) and the deferred guard beats the legacy scan **at every trip rate ≤ 65.25 % of steps (32k) /
+> 64.47 % (1M)** — ∀ p, T6r_trip_breakeven; the premise is ≥ 296× inside, and the adversarial canonical profile (~100 %) loses by 20.0 /
+> 21.0 % — the upper bound, never the fleet cell. **Round 5's off-32k reading rule is tested and was optimistic:** its fused readings sit
+> 1.3 % / 2.7 % under the measured cells at 128k / 1M (legacy − deferred is 8 876 / 8 726 / 8 603 ns per block, not a flat 8 981 —
+> T6r_perblock, T6r_vs_round5). **MoE 128k (DESIGN-4) stays attention-bound on the measured cell, by 12.8 %** (anchored; 37.0 % direct),
+> and even a perfect stage overlap leaves it 2.5 % over (T6r_fleet_moe_128k). **Two numerics classes are documented with dispositions
+> (§3.4, §9):** the 1M canonical bad-2 (a weightless-outlier row whose surviving mass lands in f16 subnormals at the global-m retry, ~1e-2
+> granularity; adversarial-only; the exact P path, 8 388 608 lanes, 100.00 %) and the random-profile out-verify floor (bad 324 at 32k /
+> 65 at 1M, identical for deferred, legacy and guard-off — a verification-methodology class). **Two quoted differences do not reproduce
+> from the quoted cells and are carried unused:** PROMPT-3R6's "the fold costs −59 µs vs the scan (one pass)" (the one-pass cell
+> difference is 569.4 µs, 9.7× it) and HW-MAP's "−558 µs at real rates" (the cell differences are 567.5–568.6 µs). Post-fusion, the
+> stage overlap (E40, §5.1) is the attention-side #1 lever — its PROMPT-6 bound already sat on these cells; DESIGN-4 round 6 ranks it.
+> Ladder (§8): E39 RESOLVED, E35 device half CLOSED; order E40a (φ) → E41 (new: re-time the deferred kernel's phases and its t ≥ 4 cells)
+> → E40b → E35's model half → E27′'s sink → E25. The rounds-2…5 and PROMPT-6 banners and bodies are kept.
+
 > **PROMPT-6 AUDIT + E40 PRE-DESIGN (2026-11-08 — the errata #18–#31 audit against HW-MAP 3928d0e; `proof/attn.py` `[PA-*]` `[E40-*]`,
 > `proof/attn.lean` `T6a_*` / `T40_*` (58 new theorems, 350 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-3
 > rows PA-1 … PA-6 and E40-1 … E40-12; the tables for all five designs are ERRATA-IMPACT.md).** No new silicon claims; no prior model line
@@ -696,6 +723,27 @@ racing composition; the deterministic one is 16 scalar-destination reduces = 17 
 rowmax ≥ 2 065 200 ns at 32k (65.0 GB/s) and ≥ 63 964 800 ns at 1M. The 10 318 ns figure stays a valid lower bound; every verdict
 above (never switch, KV-int8 on rowmax) only strengthens.
 
+**Round 6 — the shipped guard MEASURED: E39 resolved (`[R6-e39]`, `[R6-fold]`, `[R6-base]`; T6r_e39, T6r_fold, T6r_base).** The batched guard of the
+table above (a per-block flag lane read at one crossing per step) was killed by erratum #31 before it was built; its proven replacement — the
+deferred guard (a vector-only excess fold per block, ONE end-of-step read, a whole-step re-run at the observed per-row global max on a trip)
+— is MEASURED in kernel session 5. It completes the table:
+
+| guard implementation | cost per step at 32k (over the kernel's own unguarded base) | 32k cell, t = 1 | status |
+|---|---|---|---|
+| none — session 5's guard-off | 0 | **902 900 ns** = 148.7 GB/s (session 3's unguarded: 938 800 = 143.0) | MEASURED |
+| the legacy scan, session 5 (the byte-identical A/B control) | 612 000 (session 3: 574 800 over its own base) | **1 514 900** = 88.6 GB/s (2 trips; session 3: 1 513 600) | MEASURED |
+| **the deferred guard: vector fold + one end read + whole-step re-run** | **42 600 trip-free** (fold + end read; the split is UNMEASURED, the read ≤ 20 µs by #29's band) + p × 872 600 per tripped step | **945 500 trip-free (142.0 GB/s); 946 300–947 400 at the 0.087–0.22 % premise** | MEASURED (the amortized band: an amortization of the trip-free and canonical cells, `[R6-amort]`) |
+
+Against round 5's model: the target was the unguarded 938 800 + one 20 µs crossing = 958 800 ns (140.0 GB/s); the measured cell is 13 300 ns
+(1.4 %) under it trip-free and ≥ 11 400 under it amortized. Round 5's residual X (the cell minus 938 800) is 6 700 trip-free and 7 500 –
+8 600 amortized — the band straddles DESIGN-4's line X ≤ 8 279 ns, which is why the 32k rank against E29 comes out a tie (DESIGN-4 §10‴).
+Term by term the match is again a net: over its own base the deferred guard costs 42 600 ns — 2.1× the modelled 20 µs crossing, between the
+crossing alone and the crossing plus round 5's side-product at the measured softmax rate (20 000 + 93 120 / 3 = 51 040) — and the session-5
+base itself runs 35 900 ns (3.8 %) under session 3's unguarded cell. The guard removes 569 400 ns of the legacy scan's 612 000 trip-free
+(93.0 %), 567 500 – 568 600 amortized. Two quoted differences do not reproduce from these cells and enter no cell: PROMPT-3R6's "the fold
+costs −59 µs vs the scan (one pass)" (the one-pass cell difference is 569.4 µs, 9.7× it; the frame of the −59 is not given) and HW-MAP's
+"−558 µs vs the legacy scan at real rates" (9.5–10.6 µs under the cell differences).
+
 
 ### 3.3 Numerics
 Scores are f32 (exact products of f16 inputs, f32 sums over d ≤ 128); the shift makes every exp argument ≤ 0 so
@@ -807,6 +855,46 @@ machinery is REQUIRED and the trips themselves are ≈ free. **E35's device half
 - **KV-int8 (review item 4).** Its rowmax route pays the same crossing: ≥ 1 311 142 ns at 32k (round 4: 650 790) and ≥ 41.2 ms at 1M —
   slower than the fused f16 lazy target (958 800 ns at 32k). The μ = 0 lazy route (P ≤ 1 at the fixed scale 127, every P > 1 trips) is the
   only KV-int8 route without a per-block crossing; its trip rate is UNMEASURED (E35, model half).
+
+**Round 6 — E35's device half closed, the trip model, and the two numerics classes (`[R6-amort*]`, `[R6-trip-breakeven]`, `[R6-adversarial]`,
+`[R6-e35]`, `[R6-fold-bound]`, `[R6-numerics-*]`; T6r_amort, T6r_trip_breakeven, T6r_trip_premise, T6r_adversarial, T6r_fold_bound,
+T6r_numerics).** The shipped deferred guard changes the closure (a)–(f) of round 4 as follows; every number is MEASURED (kernel session 5)
+or DERIVED from MEASURED cells:
+- **(b) the result path — closed.** The common path issues zero scalar operations per block: the guard is a vector-only excess fold whose
+  cap (3 072 = 3 × 2¹⁰, f16-exact, ≥ e⁸) never binds an untripped lane, and the step's one scalar read happens after the last barrier. Its
+  cost is 42 600 ns per step over guard-off (4.7 % of the 902 900 ns base; the fold / read split is UNMEASURED). The session-4 report of a
+  "spurious fold misread under the PV flow" is closed as a test-harness artifact (the rung-0 identity gate repacked the shared input arenas
+  before the timing cell; MEASURED).
+- **(c) the trip — a whole-step re-run, priced.** The adversarial canonical profile retries ~100 % of steps (63 trips) at 1 818 100 ns, so one
+  re-run costs R = 1 818 100 − 945 500 = **872 600 ns** — 30 300 under one guard-off step (DERIVED, under the ~100 % reading). The trip model
+  T(p) = T₀ + p·R reproduces the quoted amortized band at the premise (p = 0.087 / 0.22 % of steps → 946 259 / 947 419 ns = 946.3 / 947.4 µs
+  at the displayed 0.1 µs): **trips add 0.08–0.20 % to the cell.** At 1M the measured adversarial cell (56.0 ms) gives R = 27 306 000 ns,
+  so IF the 32k premise transfers (the rate per (model, L) is UNMEASURED) the 1M cell moves by 0.08–0.21 % (149.6–149.4 GB/s).
+- **(e) the switch policy — replaced by a breakeven.** There is no lazy switch on this path (round 5 voided it). The deferred guard beats the
+  legacy scan **iff its trip rate is ≤ 65.25 % of steps at 32k (p ≤ 65 253 per 10⁵) and ≤ 64.47 % at 1M** (∀ p, T6r_trip_breakeven): the
+  measured premise is ≥ 296× inside. The canonical profile sits above the line — 1 818.1 µs vs the legacy 1 514.9 (+20.0 %) at 32k, 56.0 ms
+  vs 46.3 (+21.0 %) at 1M; the absolute gap grows with L (303.2 µs → 9.70 ms): a re-run doubles the step at every L and no lazy switch caps it —
+  an upper bound, never the fleet cell.
+- **(f) the +8 bound — exact.** Planted near-bound deltas trip exactly as specified: ln P = 8.0 → 0 trips (the bound is inclusive), 8.02 →
+  exactly 1, with the cap not yet binding (MEASURED). Arithmetic (T6r_fold_bound, given e < 2.7183 and e^x ≤ 1/(1 − x)): e⁸ < 2.7183⁸ = 2 981.1
+  < 3 072 and e^8.02 < 2.7183⁸ · 50/49 = 3 042.0 < 3 072 (e⁸ = 2 981.0, e^8.02 = 3 041.2) — the cap starts clamping only from ln 3 072 = 8.030, so the planted 8.02 exercises
+  the trip, not the clamp.
+- **E35's device half is CLOSED:** the guard's device cost is the fold (+42.6 µs per step), the trips are ≈ free at the premise, and no
+  per-block scalar cost remains. **Open (the model half):** the trip rate per (model, L) at μ = 8, β = 3 — the 65 % breakeven makes it a
+  question of how far inside, not whether — and at μ = 0 for KV-int8.
+
+**The two numerics classes the runs surfaced (MEASURED; dispositions).**
+1. **The 1M canonical bad-2 — f16-subnormal granularity at the global-m retry.** Under the adversarial canonical profile at 1M, 2 output
+   lanes miss the out-verify tolerance. The session's description — "a weightless-outlier row's whole mass lands in f16 subnormals at the
+   global-m retry" — reads as a row whose maximum is an outlier carrying no output weight, so that after the retry's shift to that maximum
+   the rest of the row's mass sits in P values below the f16 normal floor 2⁻¹⁴ = 1/16 384 (ln −9.704). Subnormal spacing is 2⁻²⁴, so the relative granularity of such a value reaches 1 % at P ≤ 100 · 2⁻²⁴ = 1/167 772 (ln −12.03):
+   the row's output is quantised at ~1e-2 (T6r_numerics). The exact P path itself — all 1 048 576 × 8 = 8 388 608 P lanes at 1M — is 100.00 %
+   exact. **Disposition:** an adversarial-profile-only class; no fleet cell runs that profile and no kernel change follows. It sits in the
+   corner E27′'s planted-sink test (β) probes — row mass far below the shift — and that test stays open.
+2. **The random-profile out-verify noise floor.** The random profile reports bad 324 lanes at 32k and 65 at 1M — the SAME lanes for the
+   deferred, legacy and guard-off kernels, so the guard path contributes none of them; the worst lanes have near-zero expected values.
+   **Disposition:** a verification-methodology class (a relative tolerance applied to near-zero wants), not a kernel defect — the fix is the
+   checker's tolerance (an absolute floor near zero), not the kernel.
 
 
 ---
@@ -1072,6 +1160,14 @@ Order: E40a first (an afternoon on the existing stream rung; it can kill E40 bef
 | The deferred kernel's own phases differ from session 3's | the next kernel session | the bound's floor and V move (the cells above are a mixed-session reading) | re-instantiate T40_* (every cell is a function of c, v, p, s, b) |
 | A per-block scalar read reappears (a new guard, a per-block scale) | design review | E40's gain vanishes (T40_crossing_serial) | batch it into the end-of-step read with a re-run |
 
+**Round 6 (PROMPT-3R6) — E40 is the attention-side #1 after fusion (`[R6-e40]`; T6r_e40_amort).** The pre-design above already priced E40 on
+the session-5 deferred cells, which round 6 folds as the fleet's attention term, so no cell of (e) moves: the reachable-overlap bound stays
+123.7 / 101.3 µs at 32k (F1 / F2, free end read), 331.6 / 241.9 µs at 128k and 2 396.4 / 1 679.1 µs at 1M, and on the amortized 32k cell it
+is 0.8–1.9 µs larger (the re-run is serial — E40 does not overlap it). With guard fusion banked, DESIGN-4 round 6 ranks the remaining levers
+per token: E40 is the largest attention-side lever on every cell (above the bounce removal at both ends of its F1/F2 bracket), below E29 on
+MoE 32k / 128k and first on MoE 1M — always gated on φ, so E40a still runs before any restructuring. The floors remain a mixed-session
+reading (session 3's stream phase under session 5's totals) until E41 re-times the deferred kernel's phases.
+
 
 ---
 
@@ -1093,6 +1189,35 @@ the 20-call reel, the merge), `drain` at the measured R_drain (hidden; 268 ns in
 chain corners: **spec** = the chain as specified (throughput convention), **chained** = every call at its chained latency,
 **lazy** = the fixed-shift variant of §3.4. The round-2 tables 6.1 / 6.2 are kept below as the record of the retired branches;
 the round-3 cells are 6.1′ / 6.2′, and `[R3-moved-*]` pairs every round-2 headline cell with its replacement.
+
+### 6.0′ Round 6 — MEASURED: the deferred-guard kernel (kernel session 5) — `[R6-cells-*]`, `[R6-amort*]`, `[R6-adversarial]`, `[R6-perblock]`, `[R6-gemv]`, `[R6-moved]`; T6r_cells, T6r_vs_round5, T6r_amort, T6r_adversarial, T6r_perblock, T6r_layer_fractions
+
+The shipped kernel's cells (in-kernel µs, production flags, headline shape: H_kv = 8, g = 8, d = 128, f16 KV, 256 KiB pages, bounce legs = 2,
+t = 1). These are the attention cells now — DESIGN-4 reads them as the per-layer attention; the round-5 sweep of §6.0 (the legacy scan) is the
+A/B control:
+
+| L | **deferred, trip-free (M)** | GB/s | per block | amortized at the 0.087–0.22 % premise | adversarial canonical (M; upper bound) | round 5 fused reading (D) | round 5 unguarded | legacy scan (M) | × GEMV |
+|---|---|---|---|---|---|---|---|---|---|
+| 32k | **945.5** | **142.0** | 14 773 ns | 946.3–947.4 (141.8–141.7; M as quoted = T₀ + p·R, D) | 1 818.1 (73.8 GB/s, 63 trips) | 958.8 (measured −1.4 %) | 938.8 M (+0.7 %) | 1 513.6 (s3) / 1 514.9 (s5) | 237.6 % |
+| 128k | **3 618.8** | **148.4** | 14 135 ns | not measured (≤ +0.22 % if the premise transfers and a re-run costs ≤ one step, as at 32k / 1M) | — | 3 573.7 (+1.3 %) | 3 553.7 D (+1.8 %) | 5 852.9 | 909.2 % |
+| 1M | **28 694.0** | **149.7** | 14 010 ns | 28 717.8–28 754.1 (149.6–149.4; D, premise transferred — UNMEASURED) | 56.0 ms (76.7 GB/s) | 27 940.0 (+2.7 %) | 27 920.0 D (+2.8 %) | 46 313.6 | 7 209.5 % |
+
+**Reading the table.** At 32k the measured cell lands 1.4 % under round 5's fused reading (the target, 140.0 GB/s); at 128k and 1M it lands
+1.3 % and 2.7 % over it — round 5's off-32k rule (the guarded cell minus a flat 8 981 ns per block) over-charged the legacy guard: the
+measured legacy − deferred difference per block is 8 876 / 8 726 / 8 603 ns at 32k / 128k / 1M (a mixed-session difference: legacy from
+session 3, deferred from session 5), so the difference carries a per-step part the flat per-block rule did not have (T6r_perblock; how it splits between the scan, the
+fold and the session-3 → session-5 base shift is UNMEASURED). The
+measured cells sit 5.6 % / 6.5 % under the constant-rate bracket (140.0 GB/s at every L) at 128k / 1M: they lie between the two round-5
+readings, nearer the per-block one. **The deferred kernel is affine in the block count within 0.4 %:** its chord slopes are 13 923 ns per
+block (32k → 128k) and 13 992 (128k → 1M), with a per-step intercept of 54 428 ns; the 1M cell sits 125 268 ns (0.4 %) above the 32k–128k
+chord — a DERIVED reading of three measured cells; the kernel below 32k (4k included) is UNMEASURED. × GEMV (the 398 µs unit): 2.38 / 9.09 /
+72.1 units (the legacy scan: 3.80 / 14.7 / 116.4). Per DESIGN-4 layer: the MoE layer (3 207 719 ns) sees 29.5 / 112.8 / 894.5 % of its own
+weight time in attention, the dense layer (18 256 993 ns) 5.2 / 19.8 % (dense 1M runs KV-int8 only).
+
+**The session-5 base (`[R6-base]`, T6r_base).** Guard-off runs 902 900 ns = 148.7 GB/s, 35 900 ns (3.8 %) under session 3's unguarded
+938 800; the legacy scan reproduces session 3 within 1 300 ns (+0.1 %), so the A/B control is stable and the base moved. Against the round-4
+legs-2 cell (911 680 ns) the session-5 guard-off kernel is −1.0 % — the validation row of §6.0 tightens from +3.0 % to −1.0 %, still inside
+the 5 % line; session 5 did not re-time the per-engine phases, so the term-by-term reading of T5r_validate_terms is not re-instantiated (E41).
 
 ### 6.0 Round 5 — MEASURED: the production kernel's t × L sweep (attention session 3) — `[R5-meas-*]`, `[R5-ung-*]`, `[R5-overlap-*]`, `[R5-validate*]`, `[R5-engines*]`; T5r_meas_*, T5r_readings, T5r_overlap, T5r_validate*, T5r_engines
 
@@ -1283,6 +1408,15 @@ effective rate the line is G_eff ≤ 167.3 GB/s (every reading — 91.7 / 151.1 
 against round 4's legs-2 line 189.4: attention-bound at every G ≤ 174.6 whatever the chain costs (DESIGN-4 round 5 restates T3r_moe128k_tie
 on these numbers).
 
+**The fractions, round 6** (`[R6-gemv]`, `[R6-fleet-moe-128k]`; T6r_cells, T6r_layer_fractions, T6r_fleet_moe_128k, T6r_fleet_moe_128k_eff). On the measured
+deferred kernel attention is **2.38 / 9.09 / 72.1** GEMV units at 32k / 128k / 1M (round 5's legacy scan: 3.80 / 14.7 / 116.4; round 4's
+model: 2.29 / 9.02 / 71.8 — the shipped kernel is back within 4 % of the round-4 cells at every measured L). The crossover itself is not
+re-derived: the deferred kernel is unmeasured below 32k and its chord (§6.0′) would be an extrapolation, so round 5's chord lines (guarded
+L ≥ 7 697, unguarded L ≥ 13 329) stay the bracket until E41 adds a 4k cell. Per DESIGN-4 layer the MoE-128k cell is attention-bound on the measured kernel: **3 618 800 ns against
+the 3 207 719 ns anchored layer (+12.8 %) and the 2 641 199 ns direct-path layer (+37.0 %)**; its rate, 148.4 GB/s, is under both
+effective-rate lines (G_eff ≤ 167.3 / 203.2), and even the E40 floor F1 (3 287 200 ns) exceeds the anchored layer by 2.5 % — no remaining
+attention lever flips the cell (round 5's fused reading said +11.4 %; the measured cell is 1.3 % slower than that reading).
+
 
 ---
 
@@ -1377,6 +1511,15 @@ stream-amortisation argument of the round-4 map does not hold on the guarded ker
 chain loses every cell to the guarded lazy chain (≥ 1 599 µs at 32k: its per-block crossing); KV-int8 on rowmax is ≥ 1 311 µs. Build order:
 the batched guard (E39) first, then the phase overlap (E40).
 
+**Round 6 — the regime map on the deferred kernel (§6.0′; T6r_cells, T6r_perblock).** The t = 1 cells are MEASURED at 32k / 128k / 1M and
+the kernel is affine in the block count (≈ 13.9–14.0 µs per 512-token block + ≈ 54 µs per step). The binding engine is UNMEASURED for this
+kernel (session 5 did not re-time the phases): on session 3's phases the deferred cell (945.5 µs) is 123.7 µs above the stream + bounce
+floor, so the K+V stream phase is 81.5 % of the cell — the chain-serial reading of round 5 (82.1 % unguarded) carries over, and the
+remainder is exactly E40's prize.
+Verify batches (t ≥ 4) on the deferred kernel are UNMEASURED; DESIGN-4 round 6 carries the dense verify attention v as a variable (spec
+pays at α = 0.7 for every v ≤ 31.09 ms per layer, 32.8× the t = 1 cell) and the MoE verify by the round-5 fragment transfer (= the t = 1
+cell). The adversarial profile is the only regime in which the legacy scan wins (the 65 % breakeven, §3.4). Build order: E40a, E41, E40b.
+
 
 ---
 
@@ -1443,6 +1586,20 @@ Order (round 5): **E39 first** (554.8–564.8 µs per layer at 32k; it decides t
 test, E25. **audit (PROMPT-6):** E39 is resolved by the shipped deferred guard (its batched fence + flag design is killed by erratum #31);
 E40 is pre-designed in §5.1 and refined there into E40a (the φ gate, first) and E40b (the pipelined kernel).
 
+**Round 6 — the ladder after session 5** (statuses MEASURED / DERIVED / UNMEASURED):
+
+| # | Settles | Status / result | Observable failure | Decides |
+|---|---|---|---|---|
+| **E39 — RESOLVED (session 5)** | the guard without per-block crossings | the deferred guard (vector fold, one end-of-step read, whole-step re-run) MEASURED: 945.5 µs trip-free at 32k (142.0 GB/s), 946.3–947.4 amortized; 1.4 % under round 5's 958.8 µs target — as a net (residual 42.6 µs over its own base = 2.1× the modelled crossing; base −35.9 µs) | — | the 32k rank: a TIE with E29 on the 141.7 line (DESIGN-4 §10‴) |
+| **E35 — device half CLOSED (session 5)** | the guard's device cost | +42.6 µs per step (fold + end read); a trip = one whole-step re-run, R = 872.6 µs; amortized +0.8–1.9 µs at the premise; beats the legacy scan at every trip rate ≤ 65.25 % (32k) / 64.47 % (1M); the fold exact at the +8 bound; **open (model half): the trip rate per (model, L) at μ = 8, β = 3 and at μ = 0** | a production trip rate approaching the breakeven | KV-int8 at μ = 0; how far inside 65 % a model sits |
+| **E40a — the φ gate (first)** | the cost of a full barrier issued with vector work in flight | §5.1 (f) | φ above the k-line → E40 dead at that k | E40b or record E40 dead |
+| **E41 (new) — the deferred kernel re-timed** | the deferred kernel's per-engine phases at 32k t = 1 (the session-3 method), its t = 4 / t = 16 cells at 32k, and a 4k t = 1 cell | the phases re-instantiate E40's floors and V on one session (T40_* are functions of c, v, p, s, b); the t ≥ 4 cells replace DESIGN-4's dense verify variable v; the 4k cell closes the crossover | phases that do not sum to the total (a hidden overlap or crossing); a t ≥ 4 cell above fragments × the t = 1 cell | E40's prize on a single-session basis; the dense spec cell; L_eq on the shipped kernel |
+| **E40b — the pipelined kernel** | §5.1 (f) | — | §5.1 (f) | the attention-side #1 lever after fusion |
+| E27′ (sink), E25 | unchanged | | | |
+
+Order (round 6): **E40a first** (it can kill E40 in an afternoon), **E41 alongside** (timing-only, same rung; it makes E40's prize a
+single-session number), then E40b, E35's model half, E27′'s sink test, E25.
+
 
 ---
 
@@ -1498,6 +1655,18 @@ E40 is pre-designed in §5.1 and refined there into E40a (the φ gate, first) an
 | The validation is a net of terms | T5r_validate_terms | the 2.9–3.0 % match hides −97.7 / +48.1 / +22.4 µs term errors; a change that moves one term alone loses the match | re-validate per term (stream phase, bounce, exposed chain) |
 | Erratum #30 (B-slot ping-pong state carries across loop nests; per-region loop bounds) | spec | a consumer expecting "tile 0 preloaded" reads stale K/V; a strips·2 bound writes into a neighbour core | every consumer resets the ping-pong state; per-region bounds |
 | **E40's gate φ** (PROMPT-6: a full barrier issued with vector work in flight) | E40a | above 1.7 µs per vector-carrying barrier the stage overlap is unreachable at every k (§5.1) | stay serial on the deferred kernel |
+
+**Round 6 — the risk rows session 5 added or retired:**
+
+| Risk | Trigger | Impact (measured / derived) | Fallback |
+|---|---|---|---|
+| ~~The batched guard's side-product / its re-run~~ | — | **retired**: the shipped deferred guard costs 42.6 µs per step and its trips 0.08–0.20 % of the cell (MEASURED) | — |
+| A production model trips far above the premise | E35 (model half) | each 1 % of tripped steps costs 8.73 µs at 32k (0.92 %); the deferred guard loses to the legacy scan only above 65.25 % of steps (32k) / 64.47 % (1M) | the legacy scan stays in the binary as the byte-identical A/B control |
+| Adversarial inputs (a canonical-like profile) | input-dependent | 1 818.1 µs at 32k (+20.0 % over legacy), 56.0 ms at 1M (+21.0 %) — the upper bound; no lazy switch caps it | rate-limit / detect pathological prompts; the legacy scan as a fallback kernel |
+| **f16-subnormal granularity at the global-m retry** (the 1M canonical bad-2) | a row whose surviving mass sits > 9.7 nats below its retry shift | that row's output quantised at ~1e-2 (subnormal spacing 2⁻²⁴); adversarial-profile-only; the P path 100.00 % exact | documented class; the planted-sink test (E27′, β) probes the same corner; no kernel change |
+| **The random-profile out-verify floor** | relative tolerance on near-zero expected values | bad 324 at 32k / 65 at 1M, kernel-independent (deferred = legacy = guard-off) — a false-positive class of the checker | an absolute floor in the checker; never read as a kernel defect |
+| E40's floors are a mixed-session reading | E41 | the 8.6–13.1 % prize at 32k may move with the deferred kernel's own phases | re-instantiate T40_* from E41's phases |
+| A cell-level match nets term errors (again) | E41 | E39's 1.4 % is residual +22.6 µs over the model netted against a base −35.9 µs; a change that moves one term alone loses the match | re-validate per term once E41 times the phases |
 
 
 ---
@@ -1576,6 +1745,15 @@ E40 is pre-designed in §5.1 and refined there into E40a (the φ gate, first) an
     crossed in batches; a kernel interface that exposes a per-block scalar decision (the guard verdict, a per-block scale) is batched per
     step, with a re-run path for the rare positive. **audit (#31):** batching a fresh reduction's readback at a fence races; the proven form
     is a vector-only fold + ONE end-of-step read + a whole-step re-run (the shipped deferred guard).
+15. **The planner reads the measured deferred cells (round 6).** Per-layer attention at t = 1: 945.5 / 3 618.8 / 28 694.0 µs at 32k / 128k /
+    1M (MEASURED, trip-free); the trips add 0.08–0.20 % at the measured premise (the amortized 32k band 946.3–947.4 µs). The legacy-scan
+    sweep (§6.0) is the A/B control, not the fleet term; 4k and the t ≥ 4 verify cells of the deferred kernel are UNMEASURED (E41) — the
+    planner keeps round 5's 4k readings and carries the dense verify attention as a variable (DESIGN-4 §6.6).
+16. **Verification discipline (round 6).** Out-verify uses an absolute floor beside the relative tolerance — the random-profile floor (bad
+    324 / 65, identical across the deferred, legacy and guard-off kernels) is a checker artifact at near-zero expected values; the canonical
+    adversarial profile is reported as an upper bound only, and its bad-2 at 1M (f16-subnormal granularity after the global-m retry) is a
+    documented class, not a regression. A kernel change is judged against the A/B control (the legacy scan, byte-identical) on the same
+    profile.
 
 
 ---
@@ -1649,3 +1827,15 @@ PROMPT-6 (2026-11-08): the audit cells `T6a_*` (4: the deterministic rowmax cros
 32-KiB granularity, the vector tail's Duplicate count) and the E40 pre-design `T40_*` (54: the interval schedule ∀ lists, the step model
 ∀ inputs, the floors, the prizes, 36 φ lines, the budgets, the trip) — PROOF-COVERAGE-3 rows PA-1 … PA-6 and E40-1 … E40-12. New
 hypothesis variables: φ (E40a), the vector-carrying interval count k, the (fold, end read) split of the session-5 42.6 µs, τ.
+
+
+Round 6 (2026-11-08): kernel session 5's deferred-guard cells are the `T6r_*` theorems (16, listed in PROOF-COVERAGE-3.md rows R6-1 – R6-20
+with their `[R6-*]` labels): the cells and their rates (T6r_cells), the comparison with round 5's readings (T6r_vs_round5), the trip model
+and the amortized band (T6r_amort), the trip-rate breakeven ∀ p (T6r_trip_breakeven, T6r_trip_premise), the adversarial profile
+(T6r_adversarial), the session-5 base (T6r_base), the fold decomposition and the two unreproduced quotes (T6r_fold), E39's resolution
+(T6r_e39), the per-block rule tested (T6r_perblock), the per-layer fractions and the MoE-128k cell (T6r_layer_fractions, T6r_fleet_moe_128k,
+T6r_fleet_moe_128k_eff), the +8 bound (T6r_fold_bound), the numerics constants (T6r_numerics), E40 on the amortized cell (T6r_e40_amort).
+Resolved as hypotheses: E39's residual X (MEASURED: the deferred guard), the fused reading at every measured L (MEASURED), round 5's off-32k
+per-block rule (tested: optimistic by 1.3 / 2.7 % at 128k / 1M). New hypothesis variables: the trip rate p (∀ p, per 10⁵ steps; the
+premise 87–220 is an input), the dense verify attention v (DESIGN-4). Analytic inputs used once: e < 2.7183 and e^x ≤ 1/(1 − x) (the +8
+bound). Quoted and unused: PROMPT-3R6's "−59 µs (one pass)" and HW-MAP's "−558 µs at real rates".

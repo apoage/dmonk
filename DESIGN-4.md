@@ -1,5 +1,30 @@
 # DESIGN-4 — fleet partition planner (4 cards × 2 dies, no P2P, layer-split-only runtime)
 
+> **ROUND-6 STATUS (2026-11-08 — the MEASURED deferred-guard cells are the attention term; kernel session 5, HW-MAP 3928d0e; `proof/fleet.py`
+> `[R6-*]`, `proof/fleet.lean` `T6r_*` (20 new theorems, 334 total, 0 axioms / sorry / native_decide; `lake build` clean), PROOF-COVERAGE-4
+> rows F6-1 … F6-14).** fleet.py's first 676 output lines are byte-identical (alt.py's output unchanged). The per-layer attention at t = 1
+> is the MEASURED deferred-guard kernel (DESIGN-3 §6.0′): **945.5 µs trip-free at 32k (142.0 GB/s; 946.3–947.4 amortized at the trip
+> premise, 141.8–141.7), 3 618.8 at 128k (148.4), 28 694.0 at 1M (149.7)**. **Cells, t = 1: MoE 32k 1.755 trip-free / 1.754 amortized
+> (round 5: fused reading 1.750, unguarded 1.757, the legacy scan 1.578), dense 32k 0.104 on every reading; MoE 128k 1.150 (round 5 fused
+> 1.157), MoE 1M 0.271 (0.278), dense 128k 0.091** — at 128k / 1M the measured cells are 1.3 / 2.7 % slower per layer than round 5's
+> fused readings (its off-32k per-block rule was optimistic). **MoE 128k stays attention-bound on the measured cell**, by 12.8 % per layer
+> (anchored; 37.0 % direct) and 101.32 vs 92.82 ms per step, and even E40's floor leaves it 2.5 % over; MoE 32k stays weights-bound
+> (attention 18.6 % of the step), MoE 1M attention-bound (87.4 %). **The 32k rank question is answered — a tie on the line:** the realized
+> guard fusion (legacy → deferred) outranks E29 iff the cell is ≤ 947 079 ns = 141.7 GB/s (∀ T, T6r_tie32k, round 5's basis); the measured
+> band straddles it (fusion leads by 0.28 / 0.14 % at the trip-free / low-rate readings, E29 by 0.06 % at the high-rate one; on the
+> same-session legacy 1 514.9 µs the line is 948 379 ns = 141.5 GB/s and fusion leads at every reading by 0.17–0.51 %). **At 128k / 1M
+> attention wins outright:** the tie lines are 101.6 / 93.9 GB/s, and the banked fusion is 62.55 / 493.34 ms per token against E29's 15.86
+> (3.9× / 31.1×). **Post-fusion ranking (§10‴, T6r_levers6):** the stage overlap (E40; a bound gated on φ) is the attention-side #1 on
+> every cell — above the bounce removal at both ends of its F1/F2 bracket; E29 stays the expert-side lever and the largest remaining lever
+> on MoE 32k / 128k (15.86 ms vs E40 ≤ 3.46 / 9.28); at MoE 1M E40 ≤ 67.09 > bounce 45.69 > E29; the bounce removal is last everywhere
+> except MoE 1M (second there, as in round 5) and needs an unproven US → S1 route (#20). **Spec decode at the fused G (§6.6):**
+> T_spec_moe_loss survives with its line moved **0.807 → 0.854** on every deferred reading (∀ α); dense spec is affine in the verify
+> kernel's attention v (UNMEASURED on the deferred kernel at t ≥ 4) and at α = 0.7 beats t = 1 for every v ≤ 31.09 ms per layer (32.8×
+> the t = 1 cell); at the fragment-serial / ratio-scaled / legacy-verify readings of v the dense spec cell is 0.225 / 0.229 / 0.211 with
+> breakevens α ≥ 0.146 / 0.130 / 0.201. MoE B = 16 2.247; two instances (V3 with the erratum-#19 merge) MoE 3.576 / 3.504, dense 0.149 /
+> 0.140 — the instance verdict holds (c ≥ 0.978–0.998 of the measured 1.990). T_min_dies is untouched. The round-5 guarded column is now
+> the legacy A/B control; the rounds-2…5 and PROMPT-6 banners and bodies are kept.
+
 > **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; `proof/fleet.py` `[PA-*]`,
 > `proof/fleet.lean` `T6f_*` (4 new theorems, 314 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-4 rows
 > PA4-1 … PA4-4; all five designs in ERRATA-IMPACT.md).** No new silicon; fleet.py's first 669 output lines are byte-identical (alt.py's
@@ -197,6 +222,20 @@ Draft model: 1 GB int8, 24 layers, 121 launches per draft token, 4k-token slidin
 ---
 
 ## 0. Summary — does any configuration close, and at what tokens/s
+
+### 0‴ Round-6 summary (`[R6-headline-*]`, `[R6-step-*]`, `[R6-tie-*]`, `[R6-levers-*]`)
+
+**Nothing in the partition moves; the attention term is the measured deferred-guard kernel.** What round 6 settles: (1) the fused cells are
+MEASURED, so the fleet numbers stop depending on E39's residual X — MoE 32k 1.755 (trip-free) / 1.754 (amortized), dense 0.104; (2) the 32k
+rank against E29 is a tie on the 141.7 GB/s line (within 0.51 % on either legacy basis), and at 128k / 1M the banked fusion is 3.9× / 31.1×
+E29; (3) post-fusion the attention-side order is E40 > bounce removal on every cell, with E29 > E40 on MoE 32k / 128k and E40 > bounce > E29
+on MoE 1M; (4) the MoE spec loss line moves 0.807 → 0.854; the dense spec decision holds for any verify kernel ≤ 31.09 ms per layer.
+
+| L = 32k, t = 1 | deferred, trip-free (M) | amortized 946.3 / 947.4 µs | round 5 fused (D) | round 5 unguarded | legacy scan (M, s3) | round 4 |
+|---|---|---|---|---|---|---|
+| dense tokens/s/card | **0.104** | 0.104 / 0.104 | 0.103 | 0.104 | 0.101 | 0.104 |
+| MoE tokens/s/card | **1.755** | 1.754 / 1.754 | 1.750 | 1.757 | 1.578 | 1.766 |
+| MoE attention per token | 26.47 ms (18.6 %) | 26.49 / 26.52 ms | 26.84 | 26.28 | 42.38 | 25.52 |
 
 ### 0″ Round-5 summary (`[R5-headline-*]`, `[R5-step-*]`, `[R5-levers-*]`)
 
@@ -764,6 +803,36 @@ shares, H10's c = 1.990): MoE 32k 154.02 / 137.92 / 138.48 ms → **3.230** / 3.
 cell for every c ≥ 0.973 / 0.970 / 0.970; dense 32k 3 307.67 / 3 238.69 / 3 241.09 ms → 0.150 / 0.153 / 0.153, for every c ≥ 1.350 /
 1.361 / 1.349. The instance decision is unchanged on every reading.
 
+### 3.7 Round 6 — the step on the measured deferred kernel (`[R6-attn-*]`, `[R6-step-*]`, `[R6-headline-*]`, `[R6-B16-*]`, `[R6-inst-*]`)
+
+**The attention term is the MEASURED deferred-guard kernel.** The step is still `step5f`, affine in the per-layer attention a (T5r_step_form:
+T_dense = 2 289 788 669 + 120·a, T_MoE = 115 956 899 + 28·a), so every cell below is an instance of that form at a measured a
+(T6r_attn6, T6r_step6_cells):
+
+| L | per-layer a (M, session 5) | GB/s | against round 5's fused reading (D) | against the legacy scan (M, session 3) |
+|---|---|---|---|---|
+| 4k | not measured — round 5's readings stay (unguarded 141 650 / fused 161 650 ns, D) | | | |
+| 32k | **945 500** trip-free; 946 300–947 400 amortized (the 0.087–0.22 % premise) | 142.0; 141.8–141.7 | −1.4 % | −37.5 % |
+| 128k | **3 618 800** | 148.4 | +1.3 % | −38.2 % |
+| 1M | **28 694 000** | 149.7 | +2.7 % | −38.0 % |
+
+| shape, L | round 4 | round 5: legacy (M) / unguarded / fused | **round 6: deferred (M attention)** | binding; ATTN share of the step |
+|---|---|---|---|---|
+| dense 32k | 0.104 | 0.101 / 0.104 / 0.103 | 2 403.24 ms → **0.104** (amortized 2 403.34 / 2 403.47 → 0.104 / 0.104) | W; 4.7 % |
+| dense 128k | 0.091 | 0.083 / 0.092 / 0.091 | 2 724.04 → **0.091** | W; 15.9 % |
+| MoE 32k | 1.766 | 1.578 / 1.757 / 1.750 | 142.43 → **1.755** (amortized 142.45 / 142.48 → 1.754 / 1.754) | W; 18.6 % |
+| MoE 128k | 1.155 | 0.893 / 1.160 / 1.157 | 217.28 → **1.150** | **ATTN**; 46.6 % |
+| MoE 1M | 0.272 | 0.176 / 0.278 / 0.278 | 919.38 → **0.271** | **ATTN**; 87.4 % |
+
+Reading it: at 32k the measured kernel sits between round 5's unguarded and fused readings (1.755 against 1.757 / 1.750); at 128k and 1M
+it sits below both (1.150 against 1.160 / 1.157, 0.271 against 0.278) because round 5's off-32k readings were optimistic per layer
+(DESIGN-3 §6.0′). The trips cost the MoE 32k cell one thousandth (1.755 → 1.754); dense does not see them. Dense 1M exists only on KV-int8,
+which the deferred guard does not reach (the rowmax chain's per-block max, or the lazy μ = 0 route, UNMEASURED): it stays at PROMPT-6's
+≤ 0.027 bound. **MoE B = 16 (uniform)** on the deferred cell: 1 779.53 ms → **2.247** (2.246 amortized-hi; round 5 1.966 / 2.251 / 2.240,
+round 4 2.267; T6r_B16_6). **Two 4-die instances** (V3 with the PROMPT-6 erratum-#19 merge, H10's c = 1.990; T6r_inst6, T6r_inst6_c): MoE
+32k 139.09 ms → **3.576** (T) / 141.97 → **3.504** (C) trip-free (3.575 / 3.502 amortized-hi), each beating the one-instance cell (1.755)
+for every c ≥ 0.978 / 0.998; dense 0.149 (T) / 0.140 (C), for every c ≥ 1.402 / 1.483. The instance decision is unchanged.
+
 ---
 
 ## 4. Regime map and crossover theorems
@@ -917,6 +986,16 @@ kernel the MoE cells are attention-bound at 128k and 1M and weights-bound at 4k 
 weights-bound at 4k–128k; the dense 1M cell exists only on KV-int8 (bounded above by 0.034). The G* iff lines of R13 are superseded by the
 effective-rate lines above (G_eff ≤ 167.3 / 203.2 at MoE 128k).
 
+### 4.5 Round 6 — the MoE-128k cell on the measured deferred kernel (`[R6-moe-128k]`; T6r_moe128k6, T6r_moe128k6_eff)
+
+§4.4's restated tie, evaluated at the measured cell: **3 618 800 ns per layer — attention-bound by 12.8 % against the anchored weight layer
+(3 207 719 ns) and by 37.0 % against the direct-path layer (2 641 199)**; the step at Π = 1 carries 101.32 ms of attention against 92.82 ms
+of weights. The measured rate, 148.4 GB/s, is under both effective-rate lines of T5r_moe128k_tie_measured (G_eff ≤ 167.3 / 203.2 —
+instantiated at G = 148.4 in T6r_moe128k6_eff), and E40's floor (3 287 200 ns, a perfect overlap) still exceeds the anchored layer by 2.5 %.
+The cell stays attention-bound at every reading: it is trip-free here, and the trips only add (≤ 0.22 % if the premise transfers and a
+re-run costs at most one step, as measured at 32k and 1M). Round 5's fused reading (3 573 700 ns, +11.4 %) was 1.3 % optimistic. MoE 1M is
+attention-bound (87.4 % of the step), MoE 32k weights-bound (18.6 %), every dense cell weights-bound.
+
 ---
 
 ## 5. Sensitivity / what-if theorems (each a bound, `[F5]`, L = 32k, B = 1, t = 1, primary branch)
@@ -1067,6 +1146,29 @@ per layer in the verify and the t = 1 step, shrinks the ratio T₄ / T₁ (472.7
 Dense spec still pays: 0.211 against 0.101 (2.09×); its breakeven rises 0.144 → 0.179. The unguarded verify kernel is UNMEASURED — the
 dense guarded-verify cell is the only dense spec number this round can quote.
 
+### 6.6 Round 6 — spec decode at the fused G (`[R6-spec-*]`; T6r_spec6_steps, T6r_spec6_thresholds, T6r_spec_dense_form, T6r_spec_dense_line, T6r_spec_dense_cells, T6r_spec_dense_thresholds)
+
+**MoE** (verify kernel = the t = 1 kernel — rows 16 = one mt-1 fragment, round 5's D transfer, now applied to the measured deferred cell):
+at α = 0.7 the verify batch gives 456.81 ms → 1.386 against 142.43 ms → 1.755 at t = 1 — spec decode loses, and **T_spec_moe_loss survives
+with its line moved to α ≤ 0.854 on every deferred reading** (trip-free and both amortized ends; ∀ α ∈ [0, 1] in thousandths, `decide
++kernel`): **0.807** (round 5, the legacy scan) **→ 0.854**. It lands where round 5's unguarded reading put it (0.854; fused 0.853)
+because the measured cell lies between those two readings.
+
+**Dense** (the deferred kernel's verify cells at t ≥ 4 are UNMEASURED — E41): the verify step is affine in its per-layer attention v,
+**T₄(v) = 2 356 301 528 + 120·v ns** (∀ v, T6r_spec_dense_form), and at α = 0.7 spec decode beats t = 1 (2 403.24 ms) **iff v ≤ 31 092 727
+ns per layer** (∀ v, T6r_spec_dense_line) — 32.8× the t = 1 cell, so the dense spec decision holds for any plausible verify kernel. The cell
+and the breakeven move with v:
+
+| reading of v (dense t = 4 = rows 64, one mt-4 pass) | v per layer | spec at α = 0.7 (t = 1: 0.104) | beats t = 1 iff |
+|---|---|---|---|
+| fragment-serial: 4 × the t = 1 deferred cell (D; round 5's rule, its conservative end) | 3 782 000 | 2 810.14 ms → **0.225** | **α ≥ 0.146** |
+| ratio-scaled: the legacy t = 16 half × deferred / legacy at t = 1 (D) | 3 355 007 | 2 758.90 → 0.229 | α ≥ 0.130 |
+| the legacy verify kernel: half the t = 16 cell (MEASURED, session 3) | 5 370 850 | 3 000.80 → 0.211 | α ≥ 0.201 |
+
+Until E41 measures the deferred verify, DESIGN-4 quotes the fragment-serial reading (0.225, α ≥ 0.146) as the dense spec number and the
+legacy verify (0.211, α ≥ 0.201) as its measured floor; round 5's 0.179 paired the legacy verify with the legacy t = 1 kernel and is
+superseded (the t = 1 cell got faster, so the breakeven on the legacy verify rises to 0.201).
+
 ---
 
 ## 7. Rollout plan: 1 card → 2 cards → 4 cards without re-partitioning
@@ -1168,6 +1270,19 @@ Order (round 5): H10 and H11 keep their place (host-only); on the kernel side **
 (15.53–15.81 ms per MoE token, 66.57–67.77 per dense token) and decides the 32k rank against E29 — then E29, then E40; the bounce (E24′)
 is closed and cheap.
 
+**Round 6 — the ladder rows after kernel session 5** (kernel-side; owned by DESIGN-3 §8 / §5.1, listed here because they rank the plan's
+follow-ups):
+
+| # | Settles | Setup | Observable failure | Decides |
+|---|---|---|---|---|
+| **E39 — RESOLVED** (DESIGN-3 §8) | the guard without per-block crossings | the shipped deferred guard, MEASURED: 945.5 µs trip-free at 32k, 946.3–947.4 amortized | — | the MoE 32k rank: a tie with E29 on the 141.7 GB/s line (§10‴) |
+| **E40a → E40b** (DESIGN-3 §5.1) | the stage overlap | the φ probe on the stream rung, then the pipelined kernel | φ above 1.7 µs per vector-carrying barrier → E40 dead | the attention-side #1 lever: ≤ 3.46 / 9.28 / 67.09 ms per MoE token at 32k / 128k / 1M, ≤ 14.84 / 39.79 per dense token |
+| **E41 (new)** (DESIGN-3 §8) | the deferred kernel re-timed: its per-engine phases, its t = 4 / 16 cells and a 4k cell | timing-only, the session-3 method | phases that do not sum to the cell | the dense verify attention v (§6.6), E40's prize on one session, the 4k cell |
+
+Order (round 6): H10 and H11 keep their place (host-only). On the kernel side E29 is the largest remaining lever on MoE ≤ 128k (15.86 ms per
+token, weights side) and E40a the cheapest decision (an afternoon; it gates the attention-side #1), so both go first; then E41, then E40b;
+the bounce removal waits on a proven US → S1 route (#20).
+
 ---
 
 ## 9. Risk register
@@ -1222,6 +1337,16 @@ is closed and cheap.
 | The per-block guard does not scale per block off 32k | the readings' rule | the unguarded / fused columns off 32k move to the constant-rate bracket: MoE 128k 1.130 / 1.119, 1M 0.261 / 0.256 (−2.6 … −7.9 %) | measure the unguarded kernel at 128k / 1M |
 | Verify batches at the measured per-fragment cost | measured (t ≥ 4) | dense spec 0.211 (round 4: 0.252); MoE spec loses for α ≤ 0.807 | E39 and E40 at mt ≥ 2 |
 | Dense 1M on KV-int8 pays erratum #29 | no KV-int8 kernel | ≤ 0.034 tokens/s/card (rowmax crossing bound; **audit, #31:** ≤ 0.027 at the deterministic crossing, T6f_dense1M_det) | the lazy μ = 0 KV-int8 route (trip rate UNMEASURED) |
+
+**Round 6 — the risk rows of the measured deferred kernel:**
+
+| Risk | Trigger | Impact | Fallback |
+|---|---|---|---|
+| ~~The shipped guard stays in production~~; ~~the batched guard misses its target~~ | — | **retired**: the deferred guard shipped and is MEASURED (MoE 32k 1.755, not the legacy 1.578) | — |
+| A production model trips far above the premise | E35 (model half) | each 1 % of tripped steps costs 8.73 µs per layer at 32k (0.92 % of the cell); the deferred guard loses to the legacy scan only above 65.25 % of steps (32k) / 64.47 % (1M) | the legacy scan, kept byte-identical as the A/B control |
+| Off-32k cells read by a rule instead of measured | any future reading | round 5's rule was 1.3 / 2.7 % optimistic per layer at 128k / 1M (MoE 128k 1.157 → 1.150, 1M 0.278 → 0.271) | measure the cell; do not scale it |
+| E40's bound unreachable (φ) | E40a | the attention-side #1 is lost: MoE 1M falls back to the bounce removal (45.69 ms, itself conditional on #20), MoE 32k / 128k to E29 alone | stay serial on the deferred kernel |
+| The deferred verify kernel slower than fragment-serial | E41 | dense spec 0.225 → toward 0.211 (the legacy verify); spec still pays at α = 0.7 for every v ≤ 31.09 ms per layer | none needed |
 
 ---
 
@@ -1306,6 +1431,53 @@ at a 10 µs crossing) and on every dense cell; E29 keeps first place on short-co
 attention lever except at MoE 1M, where the measured bounce removal (45.69 ms) edges out the overlap bound (45.42). **audit (#20):** bounce
 removal means legs = 0, which needs a proven US → S1 route for P — #20 measured the plain copy wrong and no other route is proven, so the
 lever is conditional (UNMEASURED route); at MoE 1M the next lever is the overlap bound (DESIGN-3 §5.1 pre-designs it, gated on φ).
+
+### 10‴ Round 6 — the levers after fusion (`[R6-tie-*]`, `[R6-realized-*]`, `[R6-levers-*]`; T6r_tie32k, T6r_tie32k_cells, T6r_tie_lines, T6r_tie_lines_cells, T6r_realized, T6r_levers6, T6r_levers_moe4k)
+
+**Guard fusion is banked.** What it delivered per token at Π = 1 (the legacy scan, session 3 → the deferred kernel, session 5; T6r_realized):
+MoE 15.90 / 62.55 / 493.34 ms at 32k / 128k / 1M, dense 68.17 / 268.09 ms at 32k / 128k (amortized at 32k: MoE 15.85–15.88, dense
+67.94–68.07; on the same-session legacy scan, 1 514.9 µs: MoE 15.94, dense 68.32).
+
+**Round 5's open question — does guard fusion outrank E29 at MoE 32k? — answered by measurement: a tie on the line.** For every per-layer
+cell T, the realized fusion outranks E29 (15.86 ms per token) **iff T ≤ 947 079 ns = 141.7 GB/s** on round 5's basis (the session-3 legacy
+1 513 600 ns; ∀ T, T6r_tie32k) — round 5's "X ≤ 8 279 ns" in absolute form. The measured readings straddle it (T6r_tie32k_cells):
+
+| 32k reading | cell | against the 947 079 ns line (round 5's basis) | on the session-5 legacy (line 948 379 ns = 141.5 GB/s) |
+|---|---|---|---|
+| trip-free | 945 500 (142.0 GB/s) | fusion 15.90 ms: leads by 44 240 ns per token (0.28 %) | fusion leads by 80 640 (0.51 %) |
+| amortized, 0.087 % of steps | 946 300 (141.8) | fusion leads by 21 840 (0.14 %) | fusion leads by 58 240 (0.37 %) |
+| amortized, 0.22 % of steps | 947 400 (141.7) | **E29 leads by 8 960 (0.06 %)** | fusion leads by 27 440 (0.17 %) |
+
+The two levers are equal within 0.51 % on either basis — the amortized band alone spans 1.9 µs per layer — so at exactly 32k the rank is
+a tie, ON the 141.7 line, as the steering note reads it. **At 128k / 1M attention wins outright:** the tie lines are T ≤ 5 286 379 ns
+(101.6 GB/s) and T ≤ 45 747 079 ns (93.9 GB/s) (∀ T, T6r_tie_lines); the measured cells sit 1 667 579 / 17 053 079 ns per layer inside them,
+and the banked fusion is 3.9× / 31.1× E29 (T6r_tie_lines_cells).
+
+**The levers that remain, per token at Π = 1 (T6r_levers6, T6r_levers_moe4k).** E40 = the stage overlap's reachable bound on the measured
+cell (deferred − floor − end read, DESIGN-3 §5.1; top = F1 + a free read, bottom = F2 + a 20 µs read; reachable only if φ is small — E40a);
+bounce removal = the measured bounce scaled per block (conditional on a proven US → S1 route, #20); E29 = 28 × 566 520 ns (weights side,
+L-independent):
+
+| cell | #1 | #2 | #3 | E40 bracket (bottom – top) | E40's bottom over the bounce removal |
+|---|---|---|---|---|---|
+| MoE 4k (no deferred cell) | **E29 15.86** | E40 ≤ 3.10 and bounce 0.17 — for every deferred 4k cell ≤ the guarded 213.5 µs (their order UNMEASURED) | | — | — |
+| MoE 32k | **E29 15.86** | E40 ≤ 3.46 | bounce 1.42 | 2.27 – 3.46 | 0.84 ms |
+| MoE 128k | **E29 15.86** | E40 ≤ 9.28 | bounce 5.71 | 6.21 – 9.28 | 0.50 ms |
+| MoE 1M | **E40 ≤ 67.09** | bounce 45.69 | E29 15.86 | 46.45 – 67.09 | 0.75 ms |
+| dense 32k | **E40 ≤ 14.84** | bounce 6.12 | — | 9.75 – 14.84 | 3.63 ms |
+| dense 128k | **E40 ≤ 39.79** | bounce 24.48 | — | 26.63 – 39.79 | 2.15 ms |
+
+**The order, as theorems:** every row holds at both ends of the E40 bracket (T6r_levers6). So **E40 is the attention-side #1 on every
+cell** — even at its pessimistic end it beats the bounce removal, by 0.50 ms per token at MoE 128k and 0.75 ms at MoE 1M, the two closest
+cells; **E29 remains the expert-side lever, and the largest remaining lever on MoE at 32k and 128k** (15.86 ms against E40 ≤ 3.46 / 9.28);
+**at MoE 1M E40 ≤ 67.09 > bounce 45.69 > E29 15.86**. The bounce removal is last on every cell except MoE 1M, where it is second — the same
+exception as round 5 — so "bounce removal stays last (~51 µs)" holds at 32k (51 µs per layer = 1.42 ms per MoE token) and 128k, not at 1M.
+MoE 4k: E29 first for every deferred 4k cell up to the guarded one (∀ T, T6r_levers_moe4k). Context (not ranked): the E31 megakernel is a
+non-attention lever of the same size class as E29 (§5′; its primary reading is c_sync = 20 µs since PROMPT-6).
+
+What ships next, by this table: **E29 and E40a first** — E29 is the largest lever on short- and mid-context MoE, E40a decides in an
+afternoon whether E40's bound is reachable at all; then E41 (E40's prize on one session, the dense verify v), then E40b; the bounce removal
+waits on a proven US → S1 route.
 
 ---
 
@@ -1420,3 +1592,15 @@ lever ranking (T5r_levers, T5r_levers_moe32k_iff ∀ X, T5r_levers_overtake ∀ 
 decode (T5r_spec, T5r_spec_steps, T5r_spec_thresholds ∀ α), B = 16 (T5r_B16), the instances (T5r_inst, ∀ c) and the dense 1M bound
 (T5r_dense1M_bound). Hypothesis variables new this round: the per-layer attention a (the step's only attention input), the fused kernel's
 residual X (E39), the block count nb (the per-block guard reading); the measured inputs are DESIGN-3 §6.0's (attention session 3).
+
+## Appendix A‴ — round-6 claim ledger (`proof/fleet.py` `[R6-*]`, `proof/fleet.lean` `T6r_*`)
+
+Every round-6 number of this document is printed by `proof/fleet.py` (`[R6-*]`, after the unchanged first 676 output lines) and fixed by a
+theorem of `proof/fleet.lean`'s round-6 section (20 theorems, generated from the script's own values; 334 in all). The ledger rows F6-1 …
+F6-14 with their statuses are in PROOF-COVERAGE-4.md's round-6 section: the readings (T6r_attn6), the cells (T6r_step6_cells), MoE 128k
+(T6r_moe128k6, T6r_moe128k6_eff), the 32k tie (T6r_tie32k ∀ T, T6r_tie32k_cells), the 128k / 1M lines (T6r_tie_lines ∀ T,
+T6r_tie_lines_cells), the banked fusion (T6r_realized), the post-fusion ranking (T6r_levers6, T6r_levers_moe4k ∀ T), spec decode
+(T6r_spec6_steps, T6r_spec6_thresholds ∀ α, T6r_spec_dense_form ∀ v, T6r_spec_dense_line ∀ v, T6r_spec_dense_cells,
+T6r_spec_dense_thresholds ∀ α), B = 16 (T6r_B16_6), the instances (T6r_inst6, T6r_inst6_c ∀ c). Resolved hypothesis: E39's residual X
+(the fused cells are MEASURED). New hypothesis variable: the dense verify attention v (E41). The measured inputs are DESIGN-3 §6.0′'s
+(kernel session 5).
