@@ -2733,3 +2733,328 @@ theorem T5r_moved : usR (step4H 4096 1 g256 .lazy .T 2) = 131 ∧
     usR (step4H 32768 4 g256 .lazy .T 2) = 1030 ∧
     usR (step4H 32768 16 g256 .lazy .T 2) = 2565 ∧
     usR (step4H 32768 1 g256 .rowmax .T 2) = 917 := by decide
+
+/-! # PROMPT-6 (2026-11-08) — the new-errata audit cells and the E40 stage-overlap pre-design
+    (`[PA-*]` / `[E40-*]` in proof/attn.py; DESIGN-3 "Round 6 (PROMPT-6)"; PROOF-COVERAGE-3 rows PA-1 … PA-6, E40-1 … E40-12). No new
+    silicon: the inputs are `Measured5` (attention session 3) and the session-5 deferred-guard cells of HW-MAP (MEASURED). Cell theorems
+    are generated from the model (scratchpad gen_lean6.py); the structural theorems hold for every input. -/
+namespace Audit6
+open Measured Measured3 Measured4 Measured5 Design Design3 Design4 Design5
+/-- the deferred guard, trip-free, t = 1 (kernel session 5, MEASURED, production flags) and the session-5 32k references -/
+def dfr32k : Nat := 945500
+def dfr128k : Nat := 3618800
+def dfr1M : Nat := 28694000
+def off32k : Nat := 902900
+def leg32k : Nat := 1514900
+def amortLo : Nat := 946300
+def amortHi : Nat := 947400
+/-- the barrier-interval schedule of one macro-step: per tile interval the DDR load `p.1` and the other engines' work `p.2`; every
+    interval is closed by the full barrier (erratum #14), which waits for every pipe, so an interval costs `max p.1 p.2` -/
+def ivl : List (Nat × Nat) → Nat
+  | [] => 0
+  | p :: r => max p.1 p.2 + ivl r
+def sumD : List (Nat × Nat) → Nat
+  | [] => 0
+  | p :: r => p.1 + sumD r
+def sumW : List (Nat × Nat) → Nat
+  | [] => 0
+  | p :: r => p.2 + sumW r
+/-- the E40 step: floor + nb·((V − k·d)⁺ + k·φ) + τ + nx·cx — V the block's vector work cut into k slices (the truncated subtraction is
+    the excess over its k intervals), φ the cost of a full barrier issued with vector work in flight (UNMEASURED, E40a), τ the exposed
+    prologue / epilogue, nx·cx the serial crossings per step (the deferred guard's end-of-step read: nx = 1) -/
+def e40 (floor nb V k d phi tau nx cx : Nat) : Nat := floor + nb * (V - k * d) + nb * k * phi + tau + nx * cx
+/-- F1 = the K+V stream phase + the measured bounce (round 5's overlapped floor); F2 = the E21 basis (K/V at 169.2 with the per-tile
+    barrier + MMA) + the bounce -/
+def floorF1 (L : Nat) : Nat := stream5 L + bounce5 L
+def floorF2 (L : Nat) : Nat := nb5 L * ddr4Block g256 1 0 + bounce5 L
+/-- the rowmax chain's deterministic per-block crossing: 16 scalar-destination reduce calls (erratum #31 bars the cheaper drain + 16
+    scalar reads of freshly reduced data) -/
+def xDet : Nat := 16 * cSdst
+end Audit6
+
+open Audit6
+
+/-! ## T40_ivl — the barrier-interval schedule, ∀ interval lists (`[E40-*]` structure): no schedule beats its busiest engine, none is
+    slower than serial, the excess form, and a macro-step runs at its DDR time IFF every interval's other-engine work fits under that
+    interval's load -/
+theorem T40_ivl_lower (l : List (Nat × Nat)) : sumD l ≤ ivl l ∧ sumW l ≤ ivl l := by
+  induction l with
+  | nil => simp [sumD, sumW, ivl]
+  | cons p r ih =>
+    obtain ⟨h1, h2⟩ := ih
+    simp only [sumD, sumW, ivl]
+    omega
+theorem T40_ivl_upper (l : List (Nat × Nat)) : ivl l ≤ sumD l + sumW l := by
+  induction l with
+  | nil => simp [sumD, sumW, ivl]
+  | cons p r ih =>
+    simp only [sumD, sumW, ivl]
+    omega
+theorem T40_ivl_excess (l : List (Nat × Nat)) : sumD l + (sumW l - sumD l) ≤ ivl l := by
+  have h := T40_ivl_lower l
+  omega
+theorem T40_ivl_floor_iff (l : List (Nat × Nat)) : ivl l = sumD l ↔ ∀ p ∈ l, p.2 ≤ p.1 := by
+  induction l with
+  | nil => simp [ivl, sumD]
+  | cons p r ih =>
+    simp only [ivl, sumD, List.forall_mem_cons]
+    have hl := (T40_ivl_lower r).1
+    constructor
+    · intro h
+      have h1 : p.2 ≤ p.1 := by omega
+      exact ⟨h1, ih.mp (by omega)⟩
+    · intro ⟨h1, h2⟩
+      have h3 := ih.mpr h2
+      omega
+
+/-! ## T40_step — the E40 step model, ∀ inputs: the floor plus the serial crossings bound every schedule (the reachable-overlap bound);
+    E40 reaches it IFF the vector work fits its k intervals and φ = 0; E40 beats a serial base IFF nb·k·φ fits under what is left -/
+theorem T40_gain_le (floor nb V k d phi tau nx cx Tb : Nat) :
+    floor + nx * cx ≤ e40 floor nb V k d phi tau nx cx ∧ Tb - e40 floor nb V k d phi tau nx cx ≤ Tb - (floor + nx * cx) := by
+  unfold e40
+  omega
+theorem T40_reach_iff (floor nb V k d phi tau nx cx : Nat) (hnb : 0 < nb) (hk : 0 < k) :
+    e40 floor nb V k d phi tau nx cx = floor + tau + nx * cx ↔ V ≤ k * d ∧ phi = 0 := by
+  unfold e40
+  constructor
+  · intro h
+    have h1 : nb * (V - k * d) = 0 := by omega
+    have h2 : nb * k * phi = 0 := by omega
+    rcases Nat.mul_eq_zero.mp h1 with h3 | h3
+    · omega
+    · rcases Nat.mul_eq_zero.mp h2 with h4 | h4
+      · have h5 : 0 < nb * k := Nat.mul_pos hnb hk
+        omega
+      · omega
+  · rintro ⟨h1, rfl⟩
+    rw [Nat.sub_eq_zero_of_le h1]
+    simp
+theorem T40_pays_iff (floor nb V k d phi tau nx cx Tb : Nat) :
+    e40 floor nb V k d phi tau nx cx < Tb ↔ nb * k * phi < Tb - (floor + nb * (V - k * d) + tau + nx * cx) := by
+  unfold e40
+  omega
+theorem T40_mono_phi (floor nb V k d tau nx cx phi phi' : Nat) (h : phi ≤ phi') :
+    e40 floor nb V k d phi tau nx cx ≤ e40 floor nb V k d phi' tau nx cx := by
+  unfold e40
+  have h2 : nb * k * phi ≤ nb * k * phi' := Nat.mul_le_mul_left (nb * k) h
+  omega
+/-- a per-block crossing (the legacy scan) is serial: it adds nb·X to every schedule -/
+theorem T40_crossing_serial (floor nb V k d phi tau cx X : Nat) :
+    e40 floor nb V k d phi tau 1 cx + nb * X = e40 floor nb V k d phi (tau + nb * X) 1 cx := by
+  unfold e40
+  omega
+
+/-! ## T40_inputs — the measured phase deltas, the per-tile DDR time and the per-block vector work (`[E40-inputs]`, `[E40-tile]`,
+    `[E40-vec]`): fold + end read = 42 600 ns per step (the session-5 difference; split UNMEASURED, the end read ≤ 20 µs ⇒ fold ≥ 353 ns
+    per block); V ∈ [1438, 2107] ns; k = 1 fits V ≤ d, k = 2 fits every V -/
+theorem T40_inputs : engScores + engSoftGuard + engPV = 1513100 ∧ engScores + (engSoftGuard - guardTab) + engPV = 938300 ∧
+    dfr32k - off32k = 42600 ∧ stream32k / (64 * 8) = 1505 ∧ ddr4Block g256 1 0 = 12394 ∧ ddr4Block g256 1 0 / 8 = 1549 ∧
+    (engSoftGuard - guardTab) / 64 = 1085 ∧ (dfr32k - off32k) / 64 = 665 ∧ (dfr32k - off32k - 10000) / 64 = 509 ∧
+    (dfr32k - off32k - 20000) / 64 = 353 ∧ merge4 512 .lazy .T * 10 / (rVecCore * 100) = 357 ∧
+    1438 ≤ 1505 ∧ 2107 ≤ 2 * 1505 ∧ 1750 > 1505 ∧ 2107 ≤ 2 * 1549 := by decide
+
+/-! ## T40_floor / T40_prize — the floors and the reachable-overlap bound on the deferred kernel (`[E40-floor-*]`, `[E40-prize-*]`):
+    gain ≤ deferred − floor − end read (φ = 0, τ = 0, V ≤ k·d — T40_gain_le / T40_reach_iff), at an end read of 0 / 10 / 20 µs; per token
+    × 28 MoE layers (round 5 read 28 × 266 500 = 7 462 000 on the unguarded reading) -/
+theorem T40_floor : floorF1 32768 = 821800 ∧ floorF2 32768 = 844216 ∧ floorF1 131072 = 3287200 ∧ floorF2 131072 = 3376864 ∧
+    floorF1 1048576 = 26297600 ∧ floorF2 1048576 = 27014912 ∧
+    effRate 32768 8 128 1 821800 = 1633 ∧ effRate 32768 8 128 1 844216 = 1590 ∧
+    effRate 32768 8 128 1 dfr32k = 1420 ∧ effRate 131072 8 128 1 dfr128k = 1484 ∧
+    effRate 1048576 8 128 1 dfr1M = 1497 := by decide
+
+theorem T40_prize_32k : dfr32k - floorF1 32768 = 123700 ∧
+    dfr32k - floorF2 32768 = 101284 ∧
+    pct 123700 dfr32k = 131 ∧
+    pct 101284 dfr32k = 107 ∧
+    pct 113700 dfr32k = 120 ∧
+    pct 91284 dfr32k = 97 ∧
+    pct 103700 dfr32k = 110 ∧
+    pct 81284 dfr32k = 86 ∧
+    28 * (dfr32k - floorF1 32768) = 3463600 ∧
+    28 * (dfr32k - floorF2 32768) = 2835952 ∧
+    28 * (dfr32k - floorF1 32768 - 20000) = 2903600 ∧
+    28 * (dfr32k - floorF2 32768 - 20000) = 2275952 := by decide
+
+theorem T40_prize_128k : dfr128k - floorF1 131072 = 331600 ∧
+    dfr128k - floorF2 131072 = 241936 ∧
+    pct 331600 dfr128k = 92 ∧
+    pct 241936 dfr128k = 67 ∧
+    pct 321600 dfr128k = 89 ∧
+    pct 231936 dfr128k = 64 ∧
+    pct 311600 dfr128k = 86 ∧
+    pct 221936 dfr128k = 61 ∧
+    28 * (dfr128k - floorF1 131072) = 9284800 ∧
+    28 * (dfr128k - floorF2 131072) = 6774208 ∧
+    28 * (dfr128k - floorF1 131072 - 20000) = 8724800 ∧
+    28 * (dfr128k - floorF2 131072 - 20000) = 6214208 ∧
+    28 * overlap5 t1L128k 131072 = 7462000 := by decide
+
+theorem T40_prize_1M : dfr1M - floorF1 1048576 = 2396400 ∧
+    dfr1M - floorF2 1048576 = 1679088 ∧
+    pct 2396400 dfr1M = 84 ∧
+    pct 1679088 dfr1M = 59 ∧
+    pct 2386400 dfr1M = 83 ∧
+    pct 1669088 dfr1M = 58 ∧
+    pct 2376400 dfr1M = 83 ∧
+    pct 1659088 dfr1M = 58 ∧
+    28 * (dfr1M - floorF1 1048576) = 67099200 ∧
+    28 * (dfr1M - floorF2 1048576) = 47014464 ∧
+    28 * (dfr1M - floorF1 1048576 - 20000) = 66539200 ∧
+    28 * (dfr1M - floorF2 1048576 - 20000) = 46454464 := by decide
+
+/-! ## T40_phi — the gate (`[E40-phi-32k-*]`, `[E40-phi-gate]`): ∀ φ, E40 beats the deferred kernel IFF φ is at most the line, at the
+    consistent (end read, fold) splits — k = 2 at every V, k = 1 where V ≤ d or the excess is paid, k = 8 (one slice per tile) -/
+theorem T40_phi_F1_c0_v1750_k1 (phi : Nat) : e40 821800 64 1750 1 1505 phi 0 1 0 < dfr32k ↔ phi ≤ 1687 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c0_v1750_k2 (phi : Nat) : e40 821800 64 1750 2 1505 phi 0 1 0 < dfr32k ↔ phi ≤ 966 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c0_v1750_k8 (phi : Nat) : e40 821800 64 1750 8 1505 phi 0 1 0 < dfr32k ↔ phi ≤ 241 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c0_v2107_k1 (phi : Nat) : e40 821800 64 2107 1 1505 phi 0 1 0 < dfr32k ↔ phi ≤ 1330 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c0_v2107_k2 (phi : Nat) : e40 821800 64 2107 2 1505 phi 0 1 0 < dfr32k ↔ phi ≤ 966 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c0_v2107_k8 (phi : Nat) : e40 821800 64 2107 8 1505 phi 0 1 0 < dfr32k ↔ phi ≤ 241 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c10_v1594_k1 (phi : Nat) : e40 821800 64 1594 1 1505 phi 0 1 10000 < dfr32k ↔ phi ≤ 1687 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c10_v1594_k2 (phi : Nat) : e40 821800 64 1594 2 1505 phi 0 1 10000 < dfr32k ↔ phi ≤ 888 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c10_v1594_k8 (phi : Nat) : e40 821800 64 1594 8 1505 phi 0 1 10000 < dfr32k ↔ phi ≤ 222 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c10_v1951_k1 (phi : Nat) : e40 821800 64 1951 1 1505 phi 0 1 10000 < dfr32k ↔ phi ≤ 1330 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c10_v1951_k2 (phi : Nat) : e40 821800 64 1951 2 1505 phi 0 1 10000 < dfr32k ↔ phi ≤ 888 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c10_v1951_k8 (phi : Nat) : e40 821800 64 1951 8 1505 phi 0 1 10000 < dfr32k ↔ phi ≤ 222 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c20_v1438_k1 (phi : Nat) : e40 821800 64 1438 1 1505 phi 0 1 20000 < dfr32k ↔ phi ≤ 1620 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c20_v1438_k2 (phi : Nat) : e40 821800 64 1438 2 1505 phi 0 1 20000 < dfr32k ↔ phi ≤ 810 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c20_v1438_k8 (phi : Nat) : e40 821800 64 1438 8 1505 phi 0 1 20000 < dfr32k ↔ phi ≤ 202 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c20_v1795_k1 (phi : Nat) : e40 821800 64 1795 1 1505 phi 0 1 20000 < dfr32k ↔ phi ≤ 1330 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c20_v1795_k2 (phi : Nat) : e40 821800 64 1795 2 1505 phi 0 1 20000 < dfr32k ↔ phi ≤ 810 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F1_c20_v1795_k8 (phi : Nat) : e40 821800 64 1795 8 1505 phi 0 1 20000 < dfr32k ↔ phi ≤ 202 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c0_v1750_k1 (phi : Nat) : e40 844216 64 1750 1 1549 phi 0 1 0 < dfr32k ↔ phi ≤ 1381 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c0_v1750_k2 (phi : Nat) : e40 844216 64 1750 2 1549 phi 0 1 0 < dfr32k ↔ phi ≤ 791 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c0_v1750_k8 (phi : Nat) : e40 844216 64 1750 8 1549 phi 0 1 0 < dfr32k ↔ phi ≤ 197 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c0_v2107_k1 (phi : Nat) : e40 844216 64 2107 1 1549 phi 0 1 0 < dfr32k ↔ phi ≤ 1024 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c0_v2107_k2 (phi : Nat) : e40 844216 64 2107 2 1549 phi 0 1 0 < dfr32k ↔ phi ≤ 791 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c0_v2107_k8 (phi : Nat) : e40 844216 64 2107 8 1549 phi 0 1 0 < dfr32k ↔ phi ≤ 197 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c10_v1594_k1 (phi : Nat) : e40 844216 64 1594 1 1549 phi 0 1 10000 < dfr32k ↔ phi ≤ 1381 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c10_v1594_k2 (phi : Nat) : e40 844216 64 1594 2 1549 phi 0 1 10000 < dfr32k ↔ phi ≤ 713 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c10_v1594_k8 (phi : Nat) : e40 844216 64 1594 8 1549 phi 0 1 10000 < dfr32k ↔ phi ≤ 178 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c10_v1951_k1 (phi : Nat) : e40 844216 64 1951 1 1549 phi 0 1 10000 < dfr32k ↔ phi ≤ 1024 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c10_v1951_k2 (phi : Nat) : e40 844216 64 1951 2 1549 phi 0 1 10000 < dfr32k ↔ phi ≤ 713 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c10_v1951_k8 (phi : Nat) : e40 844216 64 1951 8 1549 phi 0 1 10000 < dfr32k ↔ phi ≤ 178 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c20_v1438_k1 (phi : Nat) : e40 844216 64 1438 1 1549 phi 0 1 20000 < dfr32k ↔ phi ≤ 1270 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c20_v1438_k2 (phi : Nat) : e40 844216 64 1438 2 1549 phi 0 1 20000 < dfr32k ↔ phi ≤ 635 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c20_v1438_k8 (phi : Nat) : e40 844216 64 1438 8 1549 phi 0 1 20000 < dfr32k ↔ phi ≤ 158 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c20_v1795_k1 (phi : Nat) : e40 844216 64 1795 1 1549 phi 0 1 20000 < dfr32k ↔ phi ≤ 1024 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c20_v1795_k2 (phi : Nat) : e40 844216 64 1795 2 1549 phi 0 1 20000 < dfr32k ↔ phi ≤ 635 := by
+  unfold e40 dfr32k
+  omega
+theorem T40_phi_F2_c20_v1795_k8 (phi : Nat) : e40 844216 64 1795 8 1549 phi 0 1 20000 < dfr32k ↔ phi ≤ 158 := by
+  unfold e40 dfr32k
+  omega
+/-- the most tolerant consistent cell needs φ ≤ 1687 ns; the erratum-#29 crossing band (10–20 µs) is 5.9–11.9× above it -/
+theorem T40_phi_gate : x10r cxLo 1687 = 59 ∧ x10r cxHi 1687 = 119 ∧ 1687 < cxLo := by decide
+
+/-! ## T40_phases / T40_legacy (`[E40-phases]`, `[E40-legacy]`): the parameterized form gain ≤ (c + v + p) − (s + b) − serial crossings,
+    at the session-3 deltas; on the legacy scan E40 cannot beat floor + nb × guard -/
+theorem T40_phases : engScores + engSoftGuard + engPV - floorF1 32768 - guardTab = 116500 ∧
+    engScores + (engSoftGuard - guardTab) + engPV - floorF1 32768 = 116500 ∧
+    pct 116500 938300 = 124 ∧
+    floorF1 32768 + guardTab = 1396600 ∧ effRate 32768 8 128 1 1396600 = 961 ∧
+    pct (1396600 - dfr32k) dfr32k = 477 := by decide
+
+/-! ## T40_buf — what the budgets force (`[E40-buf-mt*]`): double-buffered C_o fits L0C at mt = 1, 3 only; a second drained C_s fits US
+    at mt = 1 only (208 KiB evidence = 212 992 B); the S1 P slots for two blocks in flight at the 32-KiB granularity of erratum #25 fit the
+    ~1 MB PRIOR at every mt -/
+theorem T40_buf : l0c4 1 + coSets (blockOf 1) * 16 * dH * 4 * 1 = 163840 ∧
+    us4 1 + blockOf 1 * 16 * 4 * 1 = 157760 ∧
+    2 * (pBytes 1 / fragB) * 32768 = 262144 ∧
+    l0c4 2 + coSets (blockOf 2) * 16 * dH * 4 * 2 = 327680 ∧
+    us4 2 + blockOf 2 * 16 * 4 * 2 = 254016 ∧
+    2 * (pBytes 2 / fragB) * 32768 = 524288 ∧
+    l0c4 3 + coSets (blockOf 3) * 16 * dH * 4 * 3 = 245760 ∧
+    us4 3 + blockOf 3 * 16 * 4 * 3 = 243776 ∧
+    2 * (pBytes 3 / fragB) * 32768 = 393216 ∧
+    l0c4 4 + coSets (blockOf 4) * 16 * dH * 4 * 4 = 327680 ∧
+    us4 4 + blockOf 4 * 16 * 4 * 4 = 266304 ∧
+    2 * (pBytes 4 / fragB) * 32768 = 524288 ∧
+    163840 ≤ 262144 ∧ 262144 < 327680 ∧ 245760 ≤ 262144 ∧ 157760 ≤ 212992 ∧ 212992 < 254016 ∧ 212992 < 243776 ∧ 212992 < 266304 ∧
+    524288 ≤ 1000000 ∧ 7 * 1505 = 10535 ∧ 7 * 1505 / 2 = 5267 ∧ 3 * 1505 / 3 = 1505 ∧ 3 * 1505 / 4 = 1128 := by decide
+theorem T40_trip : amortLo - dfr32k = 800 ∧ amortHi - dfr32k = 1900 ∧ 1900 * 10000 ≤ 22 * dfr32k := by decide
+
+/-! ## T6a — the audit cells (`[PA-*]`): erratum #31 on the rowmax crossing and on the first-block max, erratum #25 on the S1 P ring,
+    erratum #22 on the vector tail -/
+theorem T6a_rowmax_det : xDet = 17600 ∧ xRowmax = 10318 ∧ xRowmax < xDet ∧ tUng32k + 64 * xDet = 2065200 ∧
+    effRate 32768 8 128 1 2065200 = 650 ∧ ung5 t1L1M 1048576 + 2048 * xDet = 63964800 ∧
+    t1L32k < tUng32k + 64 * xDet ∧ tUng32k + 64 * xRowmax < tUng32k + 64 * xDet := by decide
+theorem T6a_firstmax_det : firstMax4Ns 512 1 .T = 5200 ∧ 16 * call100 tRm16 * 10 / (rVecCore * 100) = 2910 ∧ 5200 - 2910 + xDet = 19890 ∧
+    fixed4 32768 1 .lazy .T (merge4 512 .lazy .T) 1 1 = 19328 ∧ 19328 - 5200 + 19890 = 34018 := by decide
+theorem T6a_s1_pring : 2 * fragB * 1 = 8192 ∧ 2 * fragB * 4 = 32768 ∧ fragB * 1 = 4096 ∧ 2 * 1 * 32768 = 65536 ∧ 2 * 2 * 32768 = 131072 ∧
+    2 * 3 * 32768 = 196608 ∧ 2 * 4 * 32768 = 262144 ∧ 262144 ≤ 1000000 ∧ (∀ j : Nat, j * 32768 % 32768 = 0) := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide, by decide, ?_⟩
+  intro j
+  omega
+theorem T6a_tail_dup : 2 * 16 * dH = 4096 ∧ 4096 * tF16 / 10 = 190054 ∧
+    tail4Ops 32768 1 1 * unitF32 .T * 10 / (rVecCore * 100) = 4156 ∧
+    tn (16 * dH * 2) rFrac + 9 * 15 = 720 := by decide
+

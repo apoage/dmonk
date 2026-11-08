@@ -279,3 +279,18 @@ mode is specified in DESIGN-2.md §9 (or the generator of §9.3, whose statistic
 --zipf` reproduces). Universally quantified results (over c_res, the loader rate L, σ_d, D, t ≤ 16, routing
 outcomes, region histories, pack offsets) are stated as such; nothing about silicon behaviour is claimed by a
 theorem. Claims that DESIGN-2.md does not make are not in this ledger.
+
+
+## PROMPT-6 audit (2026-11-08) — the cells errata #18–#31 move in DESIGN-2.md
+
+`[PA-*]` labels are printed by `python3 -I proof/moe.py` after the original output (the first 72 lines byte-identical); theorems `T6m_*`
+(2) close `proof/moe.lean` (namespace `Audit6M`; 191 theorems in all; standalone and `lake build` clean; both depend on no axiom).
+
+| # | Claim (DESIGN-2 PROMPT-6 banner and marks) | Proof | labels | Status |
+|---|---|---|---|---|
+| PA2-1 | erratum #22: the epilogue's unary Muls is a silent no-op — Cast, Mul(s_e), Duplicate(score·sx), Mul, Add = 5 × 512 = 2 560 lane-ops = 59 ns per routed pair (was 2 048 = 47); per-step vector epilogue at t = 16, D = 128: 30 340 → **31 857 ns**, 0.2 % of the step | T6m_epi | [PA-epi] | PROVED; CORRECTION of the §3.2 / §5.4 cost cells (T_epilogue_vector stays true of the as-written 4 ops) |
+| PA2-2 | erratum #25: x_q in 32 KiB legs at 32-KiB-granular offsets — 2 legs at K = 4 096 (unchanged), 4 padded legs = 128 KiB at K = 7 168 (the as-written second 56 KiB copy sat at a 56 KiB offset: 56 KiB mod 32 KiB ≠ 0); S1 total 512–**608** KiB (was 592) ≤ 976 KiB; with G = 2 768–864 | T6m_xq | [PA-xq] | PROVED (S1 size: PRIOR); CORRECTION of T_budget_s1's K = 7168 cell |
+
+Placements without a number (ERRATA-IMPACT.md): #30 (the L0B rotation's per-expert restart), #18 (byte-offset C regions), #27 / #24 (the
+drain and shadow copy forms), #21 (E11's period 31), #29 (the dispatch's first crossing), #20 / #31 (the in-kernel quantization option);
+#19 does not apply (i8). **Coverage, PROMPT-6:** 2 / 2 rows; both theorems cited; 0 orphans.

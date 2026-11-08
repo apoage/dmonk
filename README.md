@@ -31,6 +31,9 @@ spec sheets; every claim stands on its own measurement or proof.
 | 4 | Fleet partition planner: 4 cards × 2 dies, no P2P | `DESIGN-4.md` | `proof/fleet.lean` | `PROOF-COVERAGE-4.md` |
 | 5 | Cross-problem search for alternative solution families | `ALTERNATIVES.md` | `proof/alt.lean` | `PROOF-COVERAGE-5.md` |
 
+`ERRATA-IMPACT.md` audits all five designs against the later silicon errata (#18–#31), with the corrections applied in place
+(marked **audit**) and ranked.
+
 `PROBLEM*.md` state each problem. Each design and proof round was handed to an external AI assistant
 session for adversarial review — the `PROMPT*.md` files are those briefs, and the round sections in
 the ledgers record what the reviews corrected. Designs carry status banners at the top. When later
@@ -63,6 +66,7 @@ python3 alt.py             # print the labelled numbers a design quotes
 HW-MAP.md, ISA.md          measured hardware + primitives
 PROBLEM*.md                problem statements
 DESIGN*.md, ALTERNATIVES.md designs
+ERRATA-IMPACT.md           errata #18–#31 audit of the designs
 PROOF-COVERAGE*.md         claim → theorem ledgers
 PROMPT*.md                 design / proof round prompts
 proof/                     *.lean theorems, *.py models, lakefile

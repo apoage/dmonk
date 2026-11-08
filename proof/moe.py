@@ -253,3 +253,27 @@ if __name__ == "__main__":
     print("[M29] silicon-sync sensitivity: re-anchored to the current HW-MAP serial fallback 138.9 -> T_dense", tDense2, "ns, c_res", t10(cres2), "ns, headline", t10(rateSer(K,Ne,8,1,cres2)),
           "; DDR-bound ceiling at the ~181 pure-read roof:", t10(rateT(8*bX(K,Ne), ddrBytes(K,Ne,8,1)*10//1810 + FIXED)), "(173.8 r+w roof: 171.2) ; dense 174.6 flat row is the DDR->L0B direct path, not modelled here (no S1->L0B loader leg)")
     print("[M30] dispatch: t*k <=", 16*10, "iterations ; the 127 remaining iterations hide under expert 0's", TS, "ns chain iff sigma_d <=", TS // 127, "ns ; descriptor max 16 x 10 x 6 B =", 16*10*6, "; CSR memory", 512+512+128*16*5, "B")
+
+
+# =====================================================================================================================================
+# PROMPT-6 (2026-11-08) — the new-errata audit (#18-#31): the cells it moves in DESIGN-2. Labels [PA-*]; every label above is unchanged.
+#   erratum #22 (unary Muls is a silent no-op): the epilogue's Muls(row, score*sx) becomes Duplicate(reel, score*sx) + binary Mul --
+#   5 ops x 512 lanes per routed pair instead of 4;
+#   erratum #25 (DDR -> S1-A-slot staging: only offset-0 4-KiB blocks and 32-KiB-granular offsets are proven; a 16-KiB single block zeroes
+#   A rows >= 2): x_q is staged as 32 KiB legs at 32-KiB-granular offsets (the measured production route) -- at K = 7168 the 112 KiB A
+#   pads to 4 legs = 128 KiB of S1 (the as-written "two COPYs of 56 KiB" put the second at a 56 KiB offset).
+# =====================================================================================================================================
+def main_pa():
+    print("\n# ---- PROMPT-6 (2026-11-08; the new-errata audit): [PA-*] cells. Every label above is unchanged ----")
+    epi4, epi5 = 4 * 512 * 10 // R_VEC, 5 * 512 * 10 // R_VEC
+    v4 = 128 * 4 * 512 * 10 // R_VEC + 128 * 8192 * 10 // R_VEC; v5 = 128 * 5 * 512 * 10 // R_VEC + 128 * 8192 * 10 // R_VEC
+    print(f"[PA-epi] erratum #22: per routed (tau, e) the epilogue is Cast, Mul(s_e), Duplicate(score*sx), Mul, Add = 5 ops x 512 lanes = {5 * 512} lane-ops = {epi5} ns "
+          f"(as written 4 ops with a unary Muls: {4 * 512} = {epi4} ns -- a silent no-op multiply); per-step vector epilogue at t = 16, D = 128: {v4} -> {v5} ns "
+          f"({t10(pct(v5, stepSer(K, Ne, 128, 16)))}% of the step)")
+    a7 = aCore(7168); legs = ceil(a7, 32 * KiB)
+    print(f"[PA-xq] erratum #25: x_q in 32 KiB legs at 32-KiB-granular offsets: K = 4096 {aCore(4096) // KiB} KiB = {aCore(4096) // (32 * KiB)} legs (the measured production route); "
+          f"K = 7168 {a7 // KiB} KiB -> {legs} legs = {legs * 32} KiB (padded); S1 total {256 + 64 + 192} / {256 + legs * 32 + 224} KiB (was 512 / 592) <= 976 KiB P; "
+          f"G = 2 adds 256 KiB -> {256 + 64 + 192 + 256} / {256 + legs * 32 + 224 + 256} KiB")
+
+if __name__ == "__main__":
+    main_pa()

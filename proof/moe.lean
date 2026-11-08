@@ -1033,3 +1033,15 @@ theorem T_sync_reanchor : 64 * MiB * 10 / rSerialFallback = 483145 ∧ cResOf 48
 theorem T_sync_roof : rateT (128 * MiB) (timeNs (ddrBytes 4096 4096 8 1) rPureRead + fixed) = 1782 ∧ ratePP 4096 4096 8 1 lSer fixed = 1712 ∧ 1746 ≤ rDirectLoad ∧ rKernelDirect ≤ rPureRead := by decide
 
 end Proofs
+
+/-! # PROMPT-6 (2026-11-08) — the new-errata audit: the cells it moves in DESIGN-2 (`[PA-*]` in proof/moe.py; PROOF-COVERAGE-2 rows
+    PA2-1, PA2-2). Erratum #22: the epilogue's unary Muls is a silent no-op — Duplicate + binary Mul makes it 5 ops × 512 lanes per routed
+    pair. Erratum #25: x_q staged as 32 KiB legs at 32-KiB-granular offsets (the measured production route); at K = 7168 the A pads to
+    4 legs = 128 KiB (the as-written second 56 KiB copy sat at a 56 KiB offset, not 32-KiB-granular). -/
+namespace Audit6M
+open Measured Design
+theorem T6m_epi : laneNs 2560 = 59 ∧ laneNs 2048 = 47 ∧ epilogueNs 128 128 = 30340 ∧
+    128 * 5 * 512 * 10 / Measured.rVec + 128 * 8192 * 10 / Measured.rVec = 31857 ∧ pct 31857 (stepSer 4096 4096 128 16 254 fixed) = 2 := by decide
+theorem T6m_xq : aCore 4096 = 64 * KiB ∧ aCore 4096 / (32 * KiB) = 2 ∧ aCore 7168 = 112 * KiB ∧ (aCore 7168 + 32 * KiB - 1) / (32 * KiB) = 4 ∧
+    56 * KiB % (32 * KiB) ≠ 0 ∧ 256 + 4 * 32 + 224 = 608 ∧ 608 * KiB ≤ s1P ∧ 608 + 256 = 864 ∧ 864 * KiB ≤ s1P := by decide
+end Audit6M

@@ -1,5 +1,25 @@
 # DESIGN-2 — MoE grouped quant-GEMM decode kernel (one die, 8 cores)
 
+> **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; `proof/moe.py` `[PA-*]`,
+> `proof/moe.lean` `T6m_*` (2 new theorems, 191 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-2 rows
+> PA2-1, PA2-2; all five designs in ERRATA-IMPACT.md).** No new silicon; moe.py's first 72 output lines are byte-identical; every
+> correction is marked **audit** in place. The live MMA tuple is i8 × i8 → i32 — **erratum #19 does not touch it** (i8 chains across
+> barriers and A re-lifts are measured exact to depth 8 192, E21): the region-difference accumulator stands. **Live findings:**
+> (1) **#22 VIOLATES the epilogue** — `Muls(row, score·sx)` is a silent no-op (every routed output would come out unscaled); the fix is
+> Duplicate + binary Mul: 4 → 5 ops × 512 lanes per routed pair (47 → 59 ns), the per-step vector epilogue 30.3 → 31.9 µs at t = 16,
+> D = 128, still 0.2 % (T6m_epi). (2) **#25 VIOLATES the x_q staging as written** — "one COPY of 64 KiB" is a single large block (the
+> measured failure class zeroes A rows ≥ 2: wrong rows from t = 3, i.e. B = 16 and verify batches) and at K = 7168 the second 56 KiB copy
+> lands at a 56 KiB offset (not 32-KiB-granular: unproven, every row); the production route is 32 KiB legs at 32-KiB-granular offsets —
+> 2 legs at K = 4096 (unchanged bytes), 4 padded legs at K = 7168 (S1 592 → 608 KiB, T6m_xq). (3) **#30:** the L0B rotation
+> `(4j + p) mod 3` restarts at every expert while the copy ring's q runs on — at K/128 = 32 chunks the rotation shifts by 128 mod 3 = 2
+> per expert, so the first piece of expert d + 1 can land in a slot still in use; one global piece counter fixes it. (4) **#18:** every
+> C destination (`C[r] + g·1 KiB`) is an explicit byte-offset tensor — a view-sliced region lands in chunk 0, collapsing the six regions.
+> (5) **#27 / #24:** the 32 KiB drains and shadow copies are 1 KiB-chunk drains / plain or blocked copies, never a full 32 KiB queue →
+> vector-buffer stage or an element-form copy above 4 KiB. (6) **#21:** E11's pattern (period 31) aliases rows k and k + 31 inside a
+> 32-row fragment. (7) **#29:** the dispatch's first scalar read of the vector-zeroed slot[] is one crossing per launch at kernel start —
+> inside F only if the vector pipe is empty there (E14 measures). Corrected #3 (8 × 1 024-lane Subs) and corrected #14 (the exactly-full
+> L0C works) are OBSOLESCENT — nothing in the cost model paid for the former; the latter frees W-dyn's single slab and the G = 8 knob.
+
 > **ROUND-2 STATUS (proof session, commit after 81d5184)**: every derived number below is checked by
 > `proof/moe.lean` (189 core-Lean theorems, 0 axioms) and printed by `proof/moe.py`; the claim ledger is
 > `PROOF-COVERAGE-2.md`. Corrections the prover forced are applied in place and listed there (the W4
@@ -43,7 +63,7 @@ Per-core column slice N_c = N_e/8 = 512. Weight bytes per step = 8 × 16 MiB = 1
 | R_vec | 40 lanes/cycle × 1.08 GHz = 43.2 G lane-ops/s/core | M |
 | T_launch | ~91 µs launch + queue floor | M |
 | L0A, L0B | 64 KB each | M |
-| L0C | 256 KB; **filling it to exactly 256 KB hangs** (errata 14) | M |
+| L0C | 256 KB; **filling it to exactly 256 KB hangs** (errata 14; **audit:** OBSOLESCENT — HW-MAP #14 now records m = 64 across the full 256 KB as WORKING, the hang was a 4-sweep artifact) | M |
 | S1 | ~1 MB (976 KiB) | P |
 | US | 256 KB (≥ 208 evidenced) | P/M |
 | R_vendor | 24.6 GB/s, grouped quant op at the headline shape | M |
@@ -157,7 +177,7 @@ headline step and 211 % of a (K, N_e, k) = (2048, 512, 4) step (`[M16]`, `[M17]`
 
 ### 1.5 The five MoE deltas on the dense pipeline
 (1) A resident in S1 for the step, lifted per k-chunk per expert; (2) expert loop outside the k-chunk loop,
-flat chunk stream, ring never drains; (3) C accumulates into one of six 32 KiB L0C regions per expert, result
+flat chunk stream, ring never drains; (3) C accumulates (i8 × i8 → i32 — **audit:** erratum #19 is f16-only; i8 chains across barriers are measured exact to depth 8 192) into one of six 32 KiB L0C regions per expert, result
 = region difference (init flags ignored, §3.2); (4) per-expert epilogue: s_e slice, score·sx scalar, f32
 accumulation into y_acc, one f16 cast at the end; (5) per-core dispatch prologue.
 
@@ -217,8 +237,8 @@ with a region switch every 2 MiB instead of every 8 MiB (A-reg, M-class; E15 rec
 ### 3.1 Gather(x): nothing to gather
 | Item | Path | Cost (headline, per core) | Status |
 |---|---|---|---|
-| x_q + sx | one DDR→S1 COPY of 64 KiB (two of 56 KiB at K=7168) + 64 B to US, once per step | 2.9 µs at 22.5 GB/s/core, issued first, overlapped with dispatch; counted in the DDR byte total (0.4 %) | M path |
-| per-token quantization f16→i8 | producer's epilogue (integration) or host (benchmark — exactly the measured dense kernel's setup) | if done in this kernel: 3 lane-ops/element × t·K = 4.6 µs at t=16, K=4096; needs a row-max reduce (U, not in ISA.md's op list) | U |
+| x_q + sx | one DDR→S1 COPY of 64 KiB (two of 56 KiB at K=7168) + 64 B to US, once per step [**audit (#25): VIOLATES as written — a single large block is the class that zeroes A rows ≥ 2, and the second 56 KiB copy lands at a non-32-KiB-granular offset; stage 32 KiB legs at 32-KiB-granular offsets (the measured production route): 2 legs at K = 4096, 4 padded legs = 128 KiB at K = 7168 (`[PA-xq]`, T6m_xq)**] | 2.9 µs at 22.5 GB/s/core, issued first, overlapped with dispatch; counted in the DDR byte total (0.4 %) | M path |
+| per-token quantization f16→i8 | producer's epilogue (integration) or host (benchmark — exactly the measured dense kernel's setup) | if done in this kernel: 3 lane-ops/element × t·K = 4.6 µs at t=16, K=4096; needs a row-max reduce (U, not in ISA.md's op list; **audit, #20 / #22 / #31:** an A built in vector SRAM cannot be copied into the S1 A slot — it rides a DDR bounce; the scale multiply is Duplicate + Mul; the row max reaches the scalar side only through a proven-deterministic composition — the measured separate pass is the route) | U |
 | per-expert token rows | none: all 16 rows are in the shared A; routed rows chosen by the CSR in the epilogue | 0 | — |
 
 ### 3.2 Scatter-add: the region-difference epilogue (init flags are ignored on this part)
@@ -231,10 +251,14 @@ sum over every expert that used it; expert d's result is the difference of its r
 shadow[r] := drain(C[r])                       # once per region, lazily before first use (16 rows × 2 KiB)
 per expert d (region r = d mod 6), after its last k-chunk:
     new  := drain(C[r])                        # 16 rows: 32 × 64 B runs at stride 1024 per row → 32 KiB in US
+                                               # audit (#27 / #24): in 1 KiB chunks read from the drained queue tensor —
+                                               # never a full 32 KiB queue → vector-buffer stage, never an element copy > 4 KiB
                                                # (C fragment [16 m][16 n] i32 row-major = DESIGN.md §3.3's P; E11(v)(vii))
-    diff := new − shadow[r]  (i32, 16 × 512 lanes = 8 calls of 1024)   ;  shadow[r] := new   # shadows live in S1 (§6)
+    diff := new − shadow[r]  (i32, 16 × 512 lanes = 8 calls of 1024 — audit: hygiene, corrected #3; Sub runs 4 096 lanes per call)   ;  shadow[r] := new   # shadows live in S1 (§6)
     for each routed (τ, e=act[d]) :  row := Cast_i32→f32(diff[τ]) ; Mul(row, s_e slice) ;
                                      Muls(row, score_{τ,e}·sx[τ]) ; Add(y_acc[τ], row)      # 4 × 512 lanes
+         # audit (#22): VIOLATES — a unary Muls is a silent no-op; Duplicate(reel, score·sx) + Mul(row, reel): 5 × 512 lanes
+         # per routed pair = 59 ns (was 47); per step at t = 16, D = 128: 31.9 µs (was 30.3) — [PA-epi], T6m_epi
 step end: Cast_f32→f16(y_acc rows < t) ; COPY t × 1 KiB → y[τ, c·N_c ..]
 ```
 Exactness (Lean targets): **P2** the difference is exact whatever the region held before, in modular i32
@@ -252,7 +276,8 @@ ISA.md's "DDR ↔ S1 ↔ vector SRAM plain copies are real" and is content-check
 Costs per step (`[M8]`, `[M15]`, `[M19]`): drain D × 32 KiB per core (256 KiB at D = 8; 4 MiB at D = 128) on
 the L0C→US path at R_drain (U): 3.3 µs per expert at 10 GB/s/core = 2.7 % of the 123 µs per-expert serial
 time **if exposed**, 0 if overlapped with the next expert's MMA into another region (E16); vector: 8192
-lane-ops Sub per expert (189 ns) + 2048 per routed pair (47 ns) → 30.3 µs per step at t = 16, D = 128 = 0.2 %;
+lane-ops Sub per expert (189 ns) + 2048 per routed pair (47 ns) → 30.3 µs per step at t = 16, D = 128 = 0.2 % (**audit, #22:** 2 560 per pair
+(59 ns) with the Duplicate → 31.9 µs, still 0.2 %);
 copy-out t KiB.
 
 Branches: (i) E11 shows the first call of an expert does zero-init after all → drop the shadow/Sub, keep
@@ -293,6 +318,8 @@ dispatch share is 0.2 %.
 ```
 COPY desc → US (idx i32 [t][k], score f16 [t][k]); COPY sx → US (64 B)
 Duplicate(slot[0..E), 0)                      # E bytes, ≤ 512: one vector call
+                                              # audit (#29): the scan's first scalar read of slot[] follows vector work —
+                                              # one crossing per launch; keep the vector pipe otherwise empty here (E14)
 D := 0
 for τ in 0..t−1: for j in 0..k−1:             # t·k ≤ 160 iterations
     e := idx[τ][j]
@@ -333,7 +360,7 @@ descriptor's DDR latency, which is why the descriptor copy is the first instruct
 
 ### 5.2 Loop nest (per core)
 ```
-prologue : COPY desc, sx → US ; COPY x_q → S1 (64 KiB) ; dispatch (§4.2) ; Duplicate(y_acc[16][N_c] f32, 0)
+prologue : COPY desc, sx → US ; COPY x_q → S1 (64 KiB — audit #25: as 2 × 32 KiB legs at 32-KiB-granular offsets) ; dispatch (§4.2) ; Duplicate(y_acc[16][N_c] f32, 0)
 for d in 0 .. D−1:                                        # expert loop; flat chunk stream, ring never drains
     e := act[d] ; r := d mod 6 ; COPY s_e[c·N_c .. +N_c) → US (2 KiB, double-buffered)
     if first use of r: drain C[r] → shadow[r]             # lazily, under the previous expert's chain
@@ -341,8 +368,12 @@ for d in 0 .. D−1:                                        # expert loop; flat 
         copy-in : COPY(ring[q mod 4], base + e·K·N_e + c·K·N_c + j·64 KiB, 64 KiB) ; q += 1
         loader  : L0A[j mod 2] ← x_q block j (2 KiB)      # skipped when A is L0A-resident (K ≤ 3072)
                   for p in 0..3: L0B[(4j+p) mod 3] ← ring slot + p·16 KiB   # 8 operands per piece
+                  # audit (#30): (4j+p) restarts at every expert while q runs on (128 mod 3 = 2 per expert at K = 4096):
+                  # use one global piece counter qp, L0B[qp mod 3], qp += 1 across experts — no consumer assumes slot 0
         MMA     : for g in 0 .. N_c/16−1:
                       MMA(C[r] + g·1 KiB, L0A[j mod 2], L0B piece(g div 8) + (g mod 8)·2 KiB, 16,16,128)
+                      # audit (#18): C[r] + g·1 KiB, the L0A slot and the L0B piece offsets are explicit byte-offset
+                      # tensors — a view-sliced C destination lands in chunk 0 (and A view offsets are ignored)
                   # accumulates (flags ignored); chunk 0 of expert d adds onto the region's running sum
     epilogue (vector, overlapped with expert d+1's chain): §3.2 on C[r]
 tail      : Cast y_acc rows < t → f16 ; COPY t × 1 KiB → y
@@ -369,7 +400,7 @@ threshold is 22.3 versus 21.8 for the dense kernel (DESIGN.md §7.3) because of 
   every routing, so MMA calls per expert are independent of the routing. Z6: separate (token, expert) passes
   would stream Σ_e m_e = k·t slabs; batching streams D; the ratio k·t/D ≥ 1 with equality iff all pairs are
   distinct (uniform, k·t ≤ E); under single-hot routing it is t. Nothing is paid for the batching except
-  2048 lane-ops per routed pair (47 ns).
+  2048 lane-ops per routed pair (47 ns; **audit, #22:** 2 560 = 59 ns with the Duplicate that replaces the unary Muls).
 - The t-curve analogue of DESIGN.md's m-curve: the per-expert cost is flat in t; the step is D(t) × 123 µs +
   F, so **tokens/s scale with t/D(t)**: idealized uniform routing (D = 8t) gains nothing from a verify batch
   (1.01 tokens/ms at every t); Zipf(1.5) at t = 16 gives 2.89 tokens/ms (§8). Spec-decode gains on this
@@ -380,7 +411,7 @@ threshold is 22.3 versus 21.8 for the dense kernel (DESIGN.md §7.3) because of 
 
 ### 5.5 Barrier plan (errata 8, 14)
 DESIGN.md §4.2's B1–B9 edges carry over per k-chunk and per piece with these MoE additions, all explicit
-pipe barriers, each a strict flag → wait pair (errata 14: never two producer flags without a wait):
+pipe barriers, each a strict flag → wait pair (errata 14: never two producer flags without a wait; **audit:** this is also erratum #28's rule — arm once per handshake; HW-MAP #14 now licenses consecutive same-pair different-ID flags, the strict form stays safe):
 B10 copy-in(desc, sx) → scalar scan; B11 scalar scan → copy-in (first B COPY address); B12 copy-in(s_e) →
 vector Mul; B5' last MMA of expert d → drain of C[r]; B6' drain of C[r] retired → first MMA of expert d+6
 into C[r] (six regions make this edge six experts apart, so it never stalls); B13 Sub/Cast/… of expert d →
@@ -411,7 +442,7 @@ and changes the DDR pattern class (A-reg2, E15 timing).
 |---|---|---|---|---|
 | B ring | S1 | 4 × 64 KiB = 256 KiB | 4 / 4 | 64 KiB = errata-2 maximum and the measured 180 GB/s granule; 2 chunks (5.8–6.0 µs) of lookahead over the loader |
 | x_q (A) resident | S1 | 16·K = 64 KiB (K=4096) … 112 KiB (K=7168) | 1 | one copy per step; re-lifted per expert |
-| **S1 total** | | **512–592 KiB** incl. shadows | | ≤ 976 KiB P; the G = 2 knob adds 256 KiB (768–848) |
+| **S1 total** | | **512–592 KiB** incl. shadows (**audit, #25:** 512–608 KiB with x_q in padded 32 KiB legs at K = 7168, T6m_xq) | | ≤ 976 KiB P; the G = 2 knob adds 256 KiB (768–848; **audit:** 768–864) |
 | L0A | L0A | 2 × 2 KiB (or 32 KiB resident at K = 2048) | 2 / 2 | 64 KB measured; never filled |
 | L0B | L0B | 3 × 16 KiB = 48 KiB | 3 / 3 | 64 KB measured; one piece ahead of the MMA, one in flight, never all 64 (errata 14 analogue) |
 | C regions | L0C | 6 × 32 KiB = 192 KiB (7 × 32 at K = 7168) | 6 / 6 | 256 KB measured; the overflow bound (P3) needs 6–7; never 256 |
@@ -588,8 +619,8 @@ reused as written there with the (16,16,128) shape.
 
 | # | Settles | Setup | Observable failure | Decides |
 |---|---|---|---|---|
-| **E11** | accumulator semantics across experts, the region-difference epilogue, launch state, wrap-vs-saturate, H-op, H-A | A = all-ones i8 [16, 256] (2 k-chunks); two experts with b_e[k,n] = ((7k + 13n + 5e) mod 31) − 15 packed per §2.1 into one 64-column slice; (i) run expert 0 then expert 1 into the same region with no reset → drained row 0 must equal ΣW_0 + ΣW_1 (accumulate-across-experts confirmed; if it equals ΣW_1, the first call of a pass zero-inits and §3.2 simplifies); (ii) drain before/after expert 1, i32 difference must equal ΣW_1 exactly; repeat with a second B pattern at the same addresses; (iii) drain all six regions at kernel start and write them out, 20 launches; (iv) 1 100 calls of a 127-valued oracle into one region (2 064 512 per call) → the drained value is either the wrapped integer (known) or 2³¹−1; (v) A row r = one-hot e_j for every j → C[r, n] must equal b[j, n] (H-A); (vi) a B pattern whose four 32-k fragments have distinct column sums → the permutation of fragments in the result (H-op); (vii) rows 1..15 of C must be 0 for row-0-only A | all-zero → silent no-op (bisect with E5/E3); expert-1-only → zero-init exists (branch); difference ≠ ΣW_1 → Sub/drain path broken; non-identical launch state → regions must be drained lazily (the design does, so this only informs); wrong (j, n) in (v)/(vi) → packer change | the reset mechanism (**the ranking measurement**, Summary), the two geometry hypotheses, the overflow semantics |
-| **E12** | the epilogue vector chain and the drain rate R_drain | i32 Sub (or Add of a negated operand), Cast i32→f32, Mul f32, Muls scalar, Add; 1024-lane calls with a sentinel beyond lane 1024 (errata 3); 1 000 drains of a 32 KiB region with known content; S1→US copy of a 32 KiB shadow | lanes beyond 1024 keep the sentinel; a missing i32 Sub shows as wrong bits at magnitudes ≥ 2²⁴ (test with 2²⁵ + 1); drain content mismatch or rep-to-rep islands; the measured R_drain classifies §3.2's overlap claim | i32 vs f32 difference branch; whether 3.3 µs per expert of drain is hidden (E16) |
+| **E11** | accumulator semantics across experts, the region-difference epilogue, launch state, wrap-vs-saturate, H-op, H-A | A = all-ones i8 [16, 256] (2 k-chunks); two experts with b_e[k,n] = ((7k + 13n + 5e) mod 31) − 15 (**audit, #21:** period 31 < the 32-row fragment — rows k and k + 31 share values and a swap of them is invisible; use a prime period > K or seeded pseudo-random integers) packed per §2.1 into one 64-column slice; (i) run expert 0 then expert 1 into the same region with no reset → drained row 0 must equal ΣW_0 + ΣW_1 (accumulate-across-experts confirmed; if it equals ΣW_1, the first call of a pass zero-inits and §3.2 simplifies); (ii) drain before/after expert 1, i32 difference must equal ΣW_1 exactly; repeat with a second B pattern at the same addresses; (iii) drain all six regions at kernel start and write them out, 20 launches; (iv) 1 100 calls of a 127-valued oracle into one region (2 064 512 per call) → the drained value is either the wrapped integer (known) or 2³¹−1; (v) A row r = one-hot e_j for every j → C[r, n] must equal b[j, n] (H-A); (vi) a B pattern whose four 32-k fragments have distinct column sums → the permutation of fragments in the result (H-op); (vii) rows 1..15 of C must be 0 for row-0-only A | all-zero → silent no-op (bisect with E5/E3); expert-1-only → zero-init exists (branch); difference ≠ ΣW_1 → Sub/drain path broken; non-identical launch state → regions must be drained lazily (the design does, so this only informs); wrong (j, n) in (v)/(vi) → packer change | the reset mechanism (**the ranking measurement**, Summary), the two geometry hypotheses, the overflow semantics |
+| **E12** | the epilogue vector chain and the drain rate R_drain | i32 Sub (or Add of a negated operand), Cast i32→f32, Mul f32, Muls scalar, Add; 1024-lane calls with a sentinel beyond lane 1024 (errata 3; **audit:** OBSOLESCENT — corrected #3, count-mode ops do not truncate at 1 024; probe per op; the Muls in this chain must show as a no-op — the #22 control); 1 000 drains of a 32 KiB region with known content; S1→US copy of a 32 KiB shadow | lanes beyond 1024 keep the sentinel; a missing i32 Sub shows as wrong bits at magnitudes ≥ 2²⁴ (test with 2²⁵ + 1); drain content mismatch or rep-to-rep islands; the measured R_drain classifies §3.2's overlap claim | i32 vs f32 difference branch; whether 3.3 µs per expert of drain is hidden (E16) |
 | **E13** | **the loader regime: c_res split into granule overhead and barrier cost; ping-pong** | (a) E2-style accumulating oracle (10 000 loads alternating tiles X/Y into L0B, each followed by 8 MMA calls into one region; expected total n_X·ΣX + n_Y·ΣY ≤ 10 000 × 8 × 128 × 15 = 1.5·10⁸ < 2³¹, exact in i32 — above 2²⁴, so the region is read as i32, never through f32) at 2 KiB and 16 KiB load granules with strict-serial barriers; (b) the same with 2 and 3 L0B slots and flag→wait choreography; 20 reps each; (c) positive control: one wait removed — must hang (watchdog) or corrupt the total | a skipped or stale load changes the total; any rep-to-rep difference in (b) = choreography fault; a positive control that passes means the detector is blind and (b) is void | the headline number: serial 135.3 vs ping-pong 171.2 (§8.2); the per-piece barrier budget 136 ns |
 | **E14** | dispatch correctness and σ_d | every core builds the CSR from a synthetic descriptor with duplicates (t = 16, k = 8, 37 distinct experts) and writes `act, tok, sc, cnt` to DDR; compared with the host; a second descriptor through the same address; 20 reps; descriptor-only kernel vs empty kernel for σ_d and the descriptor latency | wrong or stale lists; cores disagreeing with each other (impossible by construction — a disagreement is a copy fault) | the 2 µs exposed-dispatch assumption inside F |
 | **E15** | end-to-end numerics and the balance premise under every family | random x (per-token-quantized on the host), random W_e, routing from the generator Z (§9.3) for (U, U_s, Z(1.0), Z(1.5), H) at t ∈ {1, 4, 16}, 20 reps per config; host f64 reference of Σ_e score·sx·s_e·(x_q·W_e); each core also writes (chunk count, expert list) to DDR | relerr > 10⁻³ (includes a violated A-mag in the f32 branch); any rep-to-rep bit difference = missing barrier; any core whose chunk count ≠ D × 32 = mapping bug (Z2's premise checked on silicon) | ship/no-ship; the region-switch timing A-reg (recorded) |

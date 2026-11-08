@@ -1,9 +1,29 @@
 # DESIGN-4 — fleet partition planner (4 cards × 2 dies, no P2P, layer-split-only runtime)
 
+> **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; `proof/fleet.py` `[PA-*]`,
+> `proof/fleet.lean` `T6f_*` (4 new theorems, 314 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-4 rows
+> PA4-1 … PA4-4; all five designs in ERRATA-IMPACT.md).** No new silicon; fleet.py's first 669 output lines are byte-identical (alt.py's
+> output unchanged); every correction is marked **audit** in place. DESIGN-4 writes two kernel patterns of its own (the V3 cold tier,
+> the KV-int8 route) and consumes the rest as cells that inherit their designs' audit status. **What moves:** (1) **erratum #19 VIOLATES
+> the V3 cold tier** (§1.8: f16 × f16 → f32 accumulation of K across the per-piece barriers and the A re-lifts, and the region-difference
+> epilogue is itself such a chain) — fresh chunks + the vector f32 sum (ALTERNATIVES' fix): V3 MoE 32k **3.720 → 3.693** (throughput) /
+> 3.617 (chained), round-5 readings at c = 1.990: guarded 3.230 → 3.209 / 3.151, fused 3.567 / 3.495; dense 0.155 → 0.150 / 0.142
+> (T6f_cold_merge_*); V3 survives on every reading (it needs c ≥ 0.98–1.00 of the measured 1.99). (2) **Erratum #29 re-prices V2:** each
+> flag round ends in a crossing (10–20 µs), so the primary branch is 20 µs: V2 MoE **2.012 → 1.979**, V3 + V2 MoE 4.170 → **4.098**, dense
+> unchanged at 0.157 (T6f_mega_20us); the 2 / 5 µs branches assumed crossing-free polls. (3) **Erratum #31 on the dense 1M KV-int8 route:**
+> the rowmax chain's cheaper crossing (a drain + 16 scalar reads of fresh maxima) is the racing composition; the deterministic one (16
+> scalar-destination reduces, 17 600 ns per block) tightens the bound **≤ 0.034 → ≤ 0.027** tokens/s/card (T6f_dense1M_det) — a route
+> that is shippable, deterministically, and still UNMEASURED. (4) Placements, no cell moves: x_q staging for rows ≥ 2 (#25: the production
+> 2 × 32 KiB legs, never one block — B = 16 and verify batches); the bounce-removal lever needs a proven US → S1 route that #20 rules out;
+> the V2 protocol's checksum compare and in-kernel top-k (#31), unbounded polls (#26), nest boundaries (#30 / #18 / #28); the quantizing-
+> epilogue fallback's Muls (#22); the router top-k (#31 / #26). (5) **Obsolescent by measurement:** the guarded column (the legacy scan)
+> is no longer the shipped kernel — the deferred guard (#31's production answer) is MEASURED (945.5 / 3 618.8 / 28 694 µs) and E39 is
+> resolved by it; round 6 (PROMPT-3R6) folds those cells and re-ranks — this audit does not pre-empt it.
+
 > **ROUND-5 STATUS (2026-11-07 — the measured production attention kernel; attention session 3, HW-MAP 62e8137; `proof/fleet.py`
 > `[R5-*]`, `proof/fleet.lean` `T5r_*` (18 new theorems, 310 total, 0 axioms / sorry / native_decide), PROOF-COVERAGE-4.md round-5
 > section).** The attention term is now a MEASURED per-layer time (DESIGN-3 §6.0), carried as three readings — the G triplet at 32k:
-> **guarded 88.7 GB/s** (the kernel as shipped, MEASURED at every L: 213.5 / 1 513.6 / 5 852.9 / 46 313.6 µs), **unguarded 143.0**
+> **guarded 88.7 GB/s** (the kernel as shipped at session 3 — **audit:** OBSOLESCENT by measurement, the deferred guard shipped in session 4 is MEASURED in session 5 and round 6 folds it; MEASURED at every L: 213.5 / 1 513.6 / 5 852.9 / 46 313.6 µs), **unguarded 143.0**
 > (MEASURED at 32k, 938.8 µs; off 32k the guarded cell minus the per-block guard — DERIVED), **fused ≈ 140** (the target: the unguarded
 > kernel plus one batched 20 µs crossing per step — UNMEASURED, E39). The step is affine in the per-layer attention a (dense 2 289 788 669
 > + 120·a ns, MoE 115 956 899 + 28·a — T5r_step_form, ∀ a), so every cell below is a theorem about the measured number. **Headline,
@@ -149,10 +169,10 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 | T_launch | 91 µs kernel launch + queue floor — unchanged, now split from λ | M |
 | G (round 3) | **169.2 GB/s at 256 KiB pages** (the DESIGN-3 §10 default and this plan's primary; = the sequential rate, c_pg = 3 ns), 167.0 at 64 KiB shuffled (c_pg 39 ns), 153.8 at 16 KiB; the W8 kernel's 174.6 is the ceiling (the attention choreography's per-tile barrier + per-chunk MMA cost 3.2 %); "gather3x" 58.2 is a what-if only | **M** (round 3, E21) |
 | attention chain | DESIGN-3 round 3 (`proof/attn.py` step3): 9 276 ns per 512-token block-fragment on the chain as specified (throughput convention; 11 836 chained-latency corner), fixed 18 820 ns per launch; fixed-shift variant 5 530 / 11 328 (E35); rows = t·g per core, mt = ⌈rows/16⌉ fragments, 256-token blocks at mt ≥ 3, two passes above 64 rows | **M/D** (round 3, E22) |
-| c_q | **43.7 µs per on-device f16→i8 A-quantization pass** (m = 1, K = 8192; +12.2 % over host-packed A); 4 passes per layer (QKV, O, gate/up, down); "prop" branch: 43.7 µs per 8 192 elements (E38) | **M** (round 3) |
+| c_q | **43.7 µs per on-device f16→i8 A-quantization pass** (m = 1, K = 8192; +12.2 % over host-packed A); 4 passes per layer (QKV, O, gate/up, down); "prop" branch: 43.7 µs per 8 192 elements (E38; **audit, #29 / #31:** measured at m = 1 only — a per-row absmax read through a per-row crossing or a fresh-reduction readback would scale with rows; E38 adds rows 4 / 16 and a 20-rep determinism check) | **M** (round 3) |
 | R_gemm,int | 135.5 GB/s — the integrated production kernel f32-in / f32-out (the quant pass folded in): the pessimistic branch for every weight stream | **M** (round 3) |
 | T_slab (variants) | anchor 122 979 (DESIGN-2 serial, primary); **direct path 99 374** (A lift serialised) / 96 089 (overlapped) — ALT-1, all rates measured, choreography E29; ping-pong 97 015 (E13) | D2 / ALT |
-| c_sync | cross-core DDR-flag round trip of the per-layer megakernel (ALT-3): branches 2 / 5 / 20 µs; pays iff c_sync ≤ 108.4 µs (MoE) / 109.9 (dense) | **U** — E31 |
+| c_sync | cross-core DDR-flag round trip of the per-layer megakernel (ALT-3): branches 2 / 5 / 20 µs; pays iff c_sync ≤ 108.4 µs (MoE) / 109.9 (dense) (**audit, #29:** each flag round ends in a scalar read after a fence = one crossing, 10–20 µs measured — the 20 µs branch is the primary reading; 2 / 5 µs assumed crossing-free polls) | **U** — E31 |
 | R_w4v | **5.3 GB/s per core** of int4 bytes on the 5-pass vector unpack (42.4 per die = 84.8 W8-equivalent); serial-chain branch **807 ns** per 2 KiB piece (40.8 W8-equivalent; proof: the 596 ns / 55.2 first written here carried 4 KiB of f16 per 2 KiB of int4 — T3r_serpiece) — the instance variant's cold tier | **M** (ALT-2 premise, was "> 0.8") |
 | Π, H10 | Π = 1 measured; Π = 8 the H4 what-if; **two concurrent runtime instances: H10 GREEN at card scale (disjoint dies, 1.99× aggregate); on disjoint card pairs the inheritance is the hypothesis, carried as the concurrency variable c (T3r_inst_h10)** | U — H4 / M (card scale) — H10 |
 
@@ -169,7 +189,7 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 | streamed per token (t = 1, uniform) | 384.6 GB | 12.9 GB (8 experts × 48 MiB + attention per layer, + lm_head) |
 | KV per token per layer (f16) | 4 096 B → 491 520 B per token | 4 096 B → 114 688 B per token |
 | KV at L = 1M (f16) | **515.3 GB** | 120.2 GB |
-| launches per layer | 6 (QKV, attention, O, gate-up, down, norm/rope/residual) | 7 (+ router, experts gate-up fused, experts down) |
+| launches per layer | 6 (QKV, attention, O, gate-up, down, norm/rope/residual) | 7 (+ router, experts gate-up fused, experts down; **audit, #31 / #26:** the router's top-k is computed vector-side with the ids copied out — never a fresh reduce-max read at a fence, never a > 256-deep scalar scan; DESIGN-2's dispatch reads the ids once per launch) |
 
 Draft model: 1 GB int8, 24 layers, 121 launches per draft token, 4k-token sliding window of its own KV
 (201 MB), k = 3 draft tokens per verify step (PROBLEM-4's "up to 3").
@@ -284,7 +304,8 @@ O(t·H) state, never O(L)).
 
 **KV-int8 variant** (the dense escape above 551k): K and V stored as per-token-quantised i8 (2 048 B per
 token per layer), scores and PV on the i8×i8→i32 route the dense kernel already runs (errata #13's realised
-path), P quantised per row to i8 for the PV pass — a numerics risk (§9), not a rate risk: the stream halves.
+path), P quantised per row to i8 for the PV pass — a numerics risk (§9), not a rate risk: the stream halves (**audit, #29 / #31:** the per-row
+scale needs the block's row maxima on the scalar side — deterministically 16 scalar-destination reduces per block, 17 600 ns; see §3.6).
 
 ### 1.4 (d) draft placement — §6
 Dense: position 1 (c0.d0), the die with the fewest extras (the binding die for L_max is position 0 with the
@@ -359,7 +380,12 @@ T3r_inst_fit_moe_32k / _dense_32k over every x, T3r_instance_margin over every o
 Under Zipf popularity the int4 experts are the coldest by H9's histogram. *Hot path:* DESIGN-2 scheme S (per-core column
 slice of every active expert) at the anchored 122 979 ns per core-slab, or 99 374 on the direct path (E29). *Cold path:*
 host-packed i4 nibbles in the f16 fractal order → DDR → US plain copies (≤ 64 KiB) → the measured 5-pass unpack → US → S1
-(250 GB/s/core) → the 26.5 GB/s/core loader → f16×f16→f32 MMA → the region-difference epilogue; same core, same column
+(250 GB/s/core) → the 26.5 GB/s/core loader → f16×f16→f32 MMA → the region-difference epilogue [**audit (#19): VIOLATES — f16
+accumulation into one C chunk across the per-piece barriers and the A re-lifts corrupts at ≥ 2 accumulations; every call writes a fresh
+chunk and the vector unit sums the partials in f32: + 8 313 / 32 614 ns per core-slab, V3 MoE 32k 3.720 → 3.693 / 3.617, dense 0.155 →
+0.150 / 0.142 (`[PA-inst-*]`, T6f_cold_merge_*); (#20 sibling): the US → S1 B-slot copy has a rate, not a content proof — E30 checks it;
+(#25): the f16 A (x, 128 KiB) is staged in 32 KiB legs at 32-KiB-granular offsets beside x_q; (#30 / #18 / #28): the cold nest resets the
+L0B ping-pong and preloads its own first piece, C regions by explicit byte offset, one arm per handshake**]; same core, same column
 slice, hot experts first then cold, so scheme S's balance theorem holds per tier. KV, draft and exchange exactly as §1.3–1.5
 with four positions. *Fleet accounting:* tokens/s per card = 2 instances / (4 cards × T_inst).
 
@@ -725,7 +751,9 @@ a (ns); every other term (weights, lm_head, launches, quant passes, bounce, draf
 | MoE 1M | 916.04 → 0.272 | 1 412.73 → **0.176** (−35.2 %; **ATTN** 91.8 %) | 897.71 → 0.278 | 898.27 → 0.278 | 0.261 / 0.256 |
 
 Dense 1M (KV-int8 only; no KV-int8 kernel is measured): the round-4 rowmax cell (4 698.92 ms → 0.053) plus erratum #29's per-block crossing
-(≥ 10 318 ns × 2 048 blocks × 120 layers = +2 535.75 ms) gives **≤ 0.034** (T5r_dense1M_bound — a bound; the lazy μ = 0 route is UNMEASURED).
+(≥ 10 318 ns × 2 048 blocks × 120 layers = +2 535.75 ms) gives **≤ 0.034** (T5r_dense1M_bound — a bound; the lazy μ = 0 route is UNMEASURED). **audit (#31):** the 10 318 ns crossing is the
+drain + 16 scalar reads of freshly reduced maxima — the racing composition; the deterministic crossing (16 scalar-destination reduces,
+17 600 ns) adds 4 325.38 ms: **≤ 0.027** (`[PA-dense-1M-kvi8]`, T6f_dense1M_det) — a tighter bound on a route that is shippable, still UNMEASURED.
 Reading it: the guarded column is what the shipped kernel delivers (the guard is 38 % of the attention at 32k); the unguarded and fused
 columns are within ±2.2 % of round 4 on every cell (the round-4 attention model was right on the unguarded cell); the bracket shows how
 much of that rests on the per-block scaling of the guard off 32k (up to 6.1 % / 7.9 % at MoE 1M, unguarded / fused).
@@ -923,8 +951,8 @@ table. The three variants that need **no runtime change** (each a measured-rate 
 
 | variant — what changes in the step | gate | dense 32k | MoE 32k |
 |---|---|---|---|
-| **V1 — MoE expert kernel on the DDR→L0B direct path** (ALT-1): T_slab 122 979 → 99 374 (A lift serialised with the barrier cadence) / 96 089 (overlapped); every rate measured, the A-L0LOAD interleave is the one unmeasured choreography | E29 | – | **2.035 (+12.9 %)** / 2.072 (+15.0 %) |
-| **V2 — per-layer persistent megakernel** (ALT-3): one launch per layer instead of 6 / 7 (saves 54.60 / 15.28 ms per token), two DDR K-split reductions per layer (+1.84 / +0.10 ms) and 480 / 140 flag rounds at c_sync each; **pays iff c_sync ≤ 109.9 µs (dense) / 108.4 µs (MoE)** (T3r_mega_threshold, an iff; proof: the dense line is a tie — at 109 903 ns the step is unchanged, strictly better iff ≤ 109 902) | E31 (c_sync), E32 (watchdog) | 0.107 / 0.106 / 0.106 at c_sync 2 / 5 / 20 µs (+2.8 / +1.9 / +1.9 %) | 2.019 / 2.012 / 1.979 (+12.0 / +11.6 / +9.8 %); with V1: **2.307 (+28.0 %)** |
+| **V1 — MoE expert kernel on the DDR→L0B direct path** (ALT-1): T_slab 122 979 → 99 374 (A lift serialised with the barrier cadence) / 96 089 (overlapped); every rate measured, the A-L0LOAD interleave is the one unmeasured choreography (**audit, #25:** x_q rides the production 2 × 32 KiB legs at 32-KiB-granular offsets, never one 64 KiB block — a single large block zeroes A rows ≥ 2, silent at t = 1 and wrong at B = 16 / verify t = 4; E29 checks rows 0–15 with prime-period patterns) | E29 | – | **2.035 (+12.9 %)** / 2.072 (+15.0 %) |
+| **V2 — per-layer persistent megakernel** (ALT-3): one launch per layer instead of 6 / 7 (saves 54.60 / 15.28 ms per token), two DDR K-split reductions per layer (+1.84 / +0.10 ms) and 480 / 140 flag rounds at c_sync each; **pays iff c_sync ≤ 109.9 µs (dense) / 108.4 µs (MoE)** [**audit (#29): the primary reading is c_sync = 20 µs — V2 MoE 1.979, V3 + V2 4.098 (`[PA-mega-*]`, T6f_mega_20us); (#31 / #26 / #30 / #22): the consumer's checksum compare and an in-kernel top-k are fresh-reduction readbacks — compare on the vector side, read once per layer, re-run on a mismatch, keep the router behind a launch boundary or route through the deterministic dispatch; polls in bounded nests; every nest resets the B ping-pong; the quantizer uses Duplicate + Mul or the measured pass**] (T3r_mega_threshold, an iff; proof: the dense line is a tie — at 109 903 ns the step is unchanged, strictly better iff ≤ 109 902) | E31 (c_sync), E32 (watchdog) | 0.107 / 0.106 / 0.106 at c_sync 2 / 5 / 20 µs (+2.8 / +1.9 / +1.9 %) | 2.019 / 2.012 / 1.979 (+12.0 / +11.6 / +9.8 %); with V1: **2.307 (+28.0 %)** |
 | **V3 — two 4-die instances with the minimal int4 tier** (§1.8) | H10, H11 (+ E29 for the hot tier) | **0.155 (+49.0 %)**; spec 0.349 / 0.374 | **3.720 (+106.4 %)** (3.391 on the anchored kernel); with V2 4.170 (+131 %), with V1-overlapped and V2 4.234 |
 
 Reading: on this runtime the only upgrade that still pays is Π = 8 (×7–8, zero link bandwidth, zero kernel change); V3 is its
@@ -1133,7 +1161,7 @@ plan's follow-ups):
 
 | # | Settles | Setup | Observable failure | Decides |
 |---|---|---|---|---|
-| **E39** (DESIGN-3 §8) | the batched guard's residual X per step (crossings + vector side-product + re-runs) over the unguarded 938.8 µs | the 32k t = 1 cell of the batched-guard kernel | X > 20 µs = the side-product sits on the serial chain | **the MoE 32k rank: guard fusion beats E29 iff X ≤ 8 279 ns** (T5r_levers_moe32k_iff); the fused column of §3.6 |
+| **E39** (DESIGN-3 §8) | the batched guard's residual X per step (crossings + vector side-product + re-runs) over the unguarded 938.8 µs (**audit, #31:** the batched fence + flag design is the racing composition — killed in session 4; RESOLVED by the shipped deferred guard, MEASURED in session 5 — round 6 folds it) | the 32k t = 1 cell of the batched-guard kernel | X > 20 µs = the side-product sits on the serial chain | **the MoE 32k rank: guard fusion beats E29 iff X ≤ 8 279 ns** (T5r_levers_moe32k_iff); the fused column of §3.6 |
 | **E40** (DESIGN-3 §8) | the serial phases overlapped across blocks | the 32k cell against the overlapped floor (821.8 µs) | no gain = a hidden per-phase crossing | ≤ 3.27 / 7.46 / 45.42 ms per MoE token at 32k / 128k / 1M |
 
 Order (round 5): H10 and H11 keep their place (host-only); on the kernel side **E39 first** — it is worth 554.8–564.8 µs per layer at 32k
@@ -1181,7 +1209,7 @@ is closed and cheap.
 | Megakernel sync slower than the iff line | E31 | pays iff c_sync ≤ 108.4 / 109.9 µs; at 20 µs still +9.8 % MoE | launch fusion without the sync (head-aligned QKV: +1.9 %) |
 | Expert kernel stays on the S1-staged path | E29 | 1.802 instead of 2.035 (−11 %); the instance cell 3.391 instead of 3.720 | ship the anchored number; the direct path is the follow-up |
 | H4 passes after the instances ship | H4 | the two-instance layout is 3.4× / 5.2× below Π = 8 of one chain | reload the 8-die int8 image (3.5 s); the instances are a Π = 1 substitute by construction |
-| Quant pass scales with rows / K (E38) | E38 | dense 0.102, MoE 1.771 (proportional reading at rows = 1); × rows at B = 16 would cost 8.7 ms per dense layer | fuse the quantizer into the producing epilogue (E33) |
+| Quant pass scales with rows / K (E38) | E38 | dense 0.102, MoE 1.771 (proportional reading at rows = 1); × rows at B = 16 would cost 8.7 ms per dense layer | fuse the quantizer into the producing epilogue (E33; **audit, #22 / #31 / #20:** with Duplicate + Mul, the per-row scale as a deterministic side-product, the i8 A out through DDR in 32 KiB legs — ALTERNATIVES §2.4's Muls and A-slot extraction are struck) |
 | Launch floor | unchanged | 2.8 % dense / 13.0 % MoE / 50 % of a draft token / 46 % of the MoE tensor-split what-if | V2; H6 |
 | Thermal | unchanged | two instances = two cards at 141 W each at Π = 1; Π = 8 four cards at 141 < 150 | none |
 
@@ -1193,7 +1221,7 @@ is closed and cheap.
 | The batched guard misses its target | E39 | X > 20 µs per step: each 10 µs is 0.28 ms per MoE token (0.2 % of the 32k step) — small on cells, decisive only for the 32k rank against E29 | E40 on the side-product |
 | The per-block guard does not scale per block off 32k | the readings' rule | the unguarded / fused columns off 32k move to the constant-rate bracket: MoE 128k 1.130 / 1.119, 1M 0.261 / 0.256 (−2.6 … −7.9 %) | measure the unguarded kernel at 128k / 1M |
 | Verify batches at the measured per-fragment cost | measured (t ≥ 4) | dense spec 0.211 (round 4: 0.252); MoE spec loses for α ≤ 0.807 | E39 and E40 at mt ≥ 2 |
-| Dense 1M on KV-int8 pays erratum #29 | no KV-int8 kernel | ≤ 0.034 tokens/s/card (rowmax crossing bound) | the lazy μ = 0 KV-int8 route (trip rate UNMEASURED) |
+| Dense 1M on KV-int8 pays erratum #29 | no KV-int8 kernel | ≤ 0.034 tokens/s/card (rowmax crossing bound; **audit, #31:** ≤ 0.027 at the deterministic crossing, T6f_dense1M_det) | the lazy μ = 0 KV-int8 route (trip rate UNMEASURED) |
 
 ---
 
@@ -1275,7 +1303,9 @@ bound; bounce removal = the measured bounce scaled per block; E29 = 28 × 566 52
 
 What ships next, by this table: the batched guard (E39) is the largest attention-side lever on every MoE cell above 33.3k tokens (32.8k
 at a 10 µs crossing) and on every dense cell; E29 keeps first place on short-context MoE serving; E40 is worth at most an eighth of E39 at 128k; the bounce is the smallest
-attention lever except at MoE 1M, where the measured bounce removal (45.69 ms) edges out the overlap bound (45.42).
+attention lever except at MoE 1M, where the measured bounce removal (45.69 ms) edges out the overlap bound (45.42). **audit (#20):** bounce
+removal means legs = 0, which needs a proven US → S1 route for P — #20 measured the plain copy wrong and no other route is proven, so the
+lever is conditional (UNMEASURED route); at MoE 1M the next lever is the overlap bound (DESIGN-3 §5.1 pre-designs it, gated on φ).
 
 ---
 

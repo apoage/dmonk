@@ -3455,3 +3455,65 @@ theorem T5r_inst : instStep5 moe 1 1 xsMoe32k .directSer tW4 0 .uniform br3 1513
 /-- dense 1M KV-int8 (rowmax chain; no KV-int8 kernel is measured): erratum #29's per-block crossing bound (≥ xRowmaxF ns per block) caps the cell -/
 theorem T5r_dense1M_bound : step4F dense 1048576 1 1 br3I8 2 lam3 = 4698924749 ∧ tpsCard 1000 4698924749 = 53 ∧
     120 * 2048 * xRowmaxF = 2535751680 ∧ tpsCard 1000 (4698924749 + 2535751680) = 34 := by decide
+
+/-! # PROMPT-6 (2026-11-08) — the new-errata audit: the cells it moves in DESIGN-4 (`[PA-*]` in proof/fleet.py; PROOF-COVERAGE-4 rows
+    PA4-1 … PA4-4). No new silicon. (1) Erratum #19 on the V3 cold tier: + 8 313 ns (throughput) / 32 614 ns (chained) per int4 core-slab
+    (fresh chunks + the vector f32 K-sum; ALTERNATIVES' `T6a_cold_merge_*`); (2) erratum #29 on V2: the 20 µs branch is the primary
+    reading; (3) erratum #31 on the dense 1M KV-int8 route: the deterministic per-block crossing is 16 scalar-destination reduces. -/
+namespace Audit6F
+open Measured Design Measured3 Attn3F Design3F Measured5F Design5F
+def mergeTF : Nat := 8313
+def mergeCF : Nat := 32614
+/-- fleet.py `cold_tier(ns)`: the dense W8-equivalent die rate of an explicit int4 core-slab time -/
+def rW4ofF (Tc : Nat) : Nat := 2 * 8 * (MiB * 10 / Tc)
+def xDetF : Nat := 16 * 1100
+end Audit6F
+open Audit6F
+
+theorem T6f_cold_merge_T : tW4 + mergeTF = 206157 ∧
+    rW4ofF 206157 = 800 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer 206157 0 .uniform br3 lam3 = 135359943 ∧
+    tpsInst 1000 2000 135359943 = 3693 ∧
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 800 .uniform br3 lam3 = 3321058003 ∧
+    tpsInst 1000 2000 3321058003 = 150 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer 206157 0 .uniform br3 1513600 lam3 = 155003735 ∧
+    tpsInst 1000 1990 155003735 = 3209 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer 206157 0 .uniform br3 938800 lam3 = 138909335 ∧
+    tpsInst 1000 1990 138909335 = 3581 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer 206157 0 .uniform br3 958800 lam3 = 139469335 ∧
+    tpsInst 1000 1990 139469335 = 3567 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 800 .uniform br3 1513600 lam3 = 3405245683 ∧
+    tpsInst 1000 1990 3405245683 = 146 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 800 .uniform br3 938800 lam3 = 3336269683 ∧
+    tpsInst 1000 1990 3336269683 = 149 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 800 .uniform br3 958800 lam3 = 3338669683 ∧
+    tpsInst 1000 1990 3338669683 = 149 := by decide
+
+theorem T6f_cold_merge_C : tW4 + mergeCF = 230458 ∧
+    rW4ofF 230458 = 720 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer 230458 0 .uniform br3 lam3 = 138234059 ∧
+    tpsInst 1000 2000 138234059 = 3617 ∧
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 720 .uniform br3 lam3 = 3512583913 ∧
+    tpsInst 1000 2000 3512583913 = 142 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer 230458 0 .uniform br3 1513600 lam3 = 157877851 ∧
+    tpsInst 1000 1990 157877851 = 3151 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer 230458 0 .uniform br3 938800 lam3 = 141783451 ∧
+    tpsInst 1000 1990 141783451 = 3508 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer 230458 0 .uniform br3 958800 lam3 = 142343451 ∧
+    tpsInst 1000 1990 142343451 = 3495 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 720 .uniform br3 1513600 lam3 = 3596771593 ∧
+    tpsInst 1000 1990 3596771593 = 138 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 720 .uniform br3 938800 lam3 = 3527795593 ∧
+    tpsInst 1000 1990 3527795593 = 141 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 720 .uniform br3 958800 lam3 = 3530195593 ∧
+    tpsInst 1000 1990 3530195593 = 140 := by decide
+
+/-- erratum #29: V2 and V3 + V2 at the 20 µs primary reading (one batched crossing per flag round) -/
+theorem T6f_mega_20us : step3 moe 32768 1 1 (br3Mega 20000) lam3 = 126313595 ∧ tpsCard 1000 126313595 = 1979 ∧
+    instStep3 moe 32768 1 1 xsMoe32k .directSer tW4 0 .uniform (br3Mega 20000) lam3 = 121996425 ∧ tpsInst 1000 2000 121996425 = 4098 ∧
+    instStep3 dense 32768 1 1 xsDense32k .directSer 0 rW4ovl .uniform (br3Mega 20000) lam3 = 3180334753 ∧ tpsInst 1000 2000 3180334753 = 157 := by decide
+
+/-- erratum #31: dense 1M KV-int8 on the rowmax chain with the deterministic crossing (T5r_dense1M_bound used the racing one, 10 318 ns) -/
+theorem T6f_dense1M_det : step4F dense 1048576 1 1 br3I8 2 lam3 = 4698924749 ∧ xDetF = 17600 ∧ 120 * 2048 * xDetF = 4325376000 ∧
+    tpsCard 1000 (4698924749 + 4325376000) = 27 ∧ xRowmaxF < xDetF := by decide
+

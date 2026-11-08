@@ -606,3 +606,70 @@ def proofround():
 
 if __name__ == "__main__":
     main(); extras(); proofround()
+
+
+# =====================================================================================================================================
+# PROMPT-6 (2026-11-08) — the new-errata audit (#18-#31): the cells it moves in this document. Labels [PA-*]; every label above keeps
+# printing its value. No new silicon.
+#   (1) erratum #19 on the cold tier (section 2.1): the unpacked int4 tile is the B operand of the f16 x f16 -> f32 tuple and the C chunk
+#       accumulated K = 4096 (32 calls) across the per-piece barriers and the A re-lifts (x f16 = 128 KiB > L0A) -- f16 accumulation
+#       across a barrier corrupts at >= 2 accumulations. Fix: every call writes a FRESH chunk; the vector unit sums the partials in f32
+#       (DESIGN-3 round 4's pattern). Per 2 KiB piece: 2 fresh 1 KiB chunks drained (2 KiB at the measured 152.8 GB/s/core = 13 ns, copy-out
+#       engine) and added: 512 f32 lanes = 16 ns at the throughput convention (rho32 1.37) / one chained 512-lane f32 Add = 63 ns (C).
+#       Overlapped branch: the vector unit is the cold slab's binding engine (the 5.3 GB/s/core unpack), so the merge adds to it;
+#       serial branch: drain + add join the per-piece chain.
+#   (2) erratum #29 on the megakernel (section 2.3): every flag round ends in a scalar read of a polled DDR->US copy = one crossing
+#       (10-20 us measured); the primary c_sync reading moves from 5 us to the 20 us branch (one batched crossing per round). The cells
+#       of the single megakernel at 20 us already print ([ALT-3-*-csync20000]); the combos are restated here.
+# =====================================================================================================================================
+MERGE6_T = 512 * 512 * 137 * 10 // (100 * R_VEC)          # 8 313 ns per core-slab: 512 pieces x 512 f32 lanes at rho32 1.37 (T)
+MERGE6_C = 512 * 637 // 10                                       # 32 614 ns: one chained 512-lane f32 Add (63.7 ns) per piece (C)
+DRAIN6_PIECE = tn(2 * KiB, 1528)                                 # 13 ns: 2 fresh 1 KiB chunks at the measured L0C -> US drain rate
+ADD6_T, ADD6_C = 512 * 137 * 10 // (100 * R_VEC), 637 // 10   # 16 / 63 ns per piece on the serial chain
+
+def main_pa():
+    global T_SLAB_W4_OVL, R_W4_W8EQ_OVL, T_SLAB_W4_SER, T_PIECE_W4_SER
+    print("\n# ---- PROMPT-6 (2026-11-08; the new-errata audit): [PA-*] cells. Every label above is unchanged ----")
+    D_, M_ = F.DENSE, F.MOE
+    xsM = [min_x(M_, p, 32768) for p in range(4)]; xsD = [min_x(D_, p, 32768) for p in range(4)]
+    T0M, _ = F.step(M_, 32768); T0D, _ = F.step(D_, 32768)
+    oM, oD = F.tps_card(1000, T0M), F.tps_card(1000, T0D)
+    base = T_SLAB_W4_OVL
+    print(f"[PA-cold-merge] erratum #19: fresh chunks + the vector f32 K-sum per int4 core-slab: {MERGE6_T} ns (T) / {MERGE6_C} ns (C) on the binding vector unit "
+          f"(+ {512 * DRAIN6_PIECE} ns of drain on the copy-out engine, overlapped); overlapped core-slab {base} -> {base + MERGE6_T} / {base + MERGE6_C} ns; "
+          f"serial piece {T_PIECE_W4_SER_C} -> {T_PIECE_W4_SER_C + DRAIN6_PIECE + ADD6_T} / {T_PIECE_W4_SER_C + DRAIN6_PIECE + ADD6_C} ns")
+    sv = (T_SLAB_W4_OVL, R_W4_W8EQ_OVL, T_SLAB_W4_SER, T_PIECE_W4_SER)
+    for conv, mg, ad in (("T", MERGE6_T, ADD6_T), ("C", MERGE6_C, ADD6_C)):
+        try:
+            T_SLAB_W4_OVL = base + mg
+            R_W4_W8EQ_OVL = 8 * 2 * MiB * 10 // T_SLAB_W4_OVL
+            TM, _ = inst_step(M_, 32768, xs=xsM); TD, _ = inst_step(D_, 32768, xs=xsD)
+            TZ, _ = inst_step(M_, 32768, xs=xsM, pop="zipf10")
+            gM, gD = tps_card_inst(1000, TM), tps_card_inst(1000, TD)
+            print(f"[PA-inst-{conv}] two 4-die instances, overlapped cold tier with the #19 merge: MoE 32k {ms2(TM)} ms -> {t3(gM)} ({spc(pcs(gM, oM))}; was 3.878); "
+                  f"Zipf(1.0) {ms2(TZ)} -> {t3(tps_card_inst(1000, TZ))} (was 4.190); dense 32k (W8-eq {t10(R_W4_W8EQ_OVL)}) {ms2(TD)} -> {t3(gD)} ({spc(pcs(gD, oD))}; was 0.156); "
+                  f"break-even 1 371 124 ns per core-slab is {t10(1371124 * 10 // T_SLAB_W4_OVL)}x the merged slab (was 6.9x)")
+            T_PIECE_W4_SER = T_PIECE_W4_SER_C + DRAIN6_PIECE + ad; T_SLAB_W4_SER = 512 * T_PIECE_W4_SER
+            TMs, _ = inst_step(M_, 32768, xs=xsM, cold="ser"); TDs, _ = inst_step(D_, 32768, xs=xsD, cold="ser")
+            print(f"[PA-inst-ser-{conv}] serial branch with the #19 merge (piece {T_PIECE_W4_SER} ns, slab {T_SLAB_W4_SER}): MoE 32k {t3(tps_card_inst(1000, TMs))} "
+                  f"({spc(pcs(tps_card_inst(1000, TMs), oM))}; was 3.239); dense 32k (W8-eq {t10(w4_dense_rate('ser'))}) {t3(tps_card_inst(1000, TDs))} "
+                  f"({spc(pcs(tps_card_inst(1000, TDs), oD))}; was 0.100); break-even margin {t10(1371124 * 10 // T_SLAB_W4_SER)}x (was 3.3x)")
+        finally:
+            T_SLAB_W4_OVL, R_W4_W8EQ_OVL, T_SLAB_W4_SER, T_PIECE_W4_SER = sv
+    # ---- the megakernel combos at the 20 us primary reading (erratum #29: one batched crossing per flag round)
+    a = alt1()
+    for cs in (5000, 20000):
+        Tc = alt3(M_, 32768, cs)["T1"] - (T0M - fleet_cell(M_, 32768, tslab=a["ser"])[0])
+        cells = [f"ALT-3+1-moe {ms2(Tc)} ms -> {t3(F.tps_card(1000, Tc))} ({spc(pcs(F.tps_card(1000, Tc), oM))})"]
+        for s, xs, o in ((D_, xsD, oD), (M_, xsM, oM)):
+            T, _ = inst_step(s, 32768, xs=xs, nlaunch=1)
+            Ts = T + s["nL"] * SYNCS_PER_LAYER[s["name"]] * cs + s["nL"] * 2 * tn(reduction_bytes(1, s["d"]), F.R_GEMM)
+            cells.append(f"ALT-2+3-{s['name']} {ms2(Ts)} -> {t3(tps_card_inst(1000, Ts))} ({spc(pcs(tps_card_inst(1000, Ts), o))})")
+        print(f"[PA-mega-combos-{cs // 1000}us] c_sync {cs} ns{' (the erratum-#29 primary reading)' if cs == 20000 else ' (as written)'}: " + "; ".join(cells))
+    r = alt3(M_, 32768, 20000); rd = alt3(D_, 32768, 20000)
+    print(f"[PA-mega-20us] the single megakernel at the primary reading: MoE {t3(F.tps_card(1000, r['T1']))} ({spc(pcs(F.tps_card(1000, r['T1']), oM))}), "
+          f"dense {t3(F.tps_card(1000, rd['T1']))} ({spc(pcs(F.tps_card(1000, rd['T1']), oD))}); the iff lines (108 430 / 109 902 ns) are unchanged -- "
+          f"the margin to them is {t10(108430 * 10 // 20000)}x / {t10(109902 * 10 // 20000)}x at 20 us (was >= 5x at the 'us-class' reading)")
+
+if __name__ == "__main__":
+    main_pa()
