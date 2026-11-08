@@ -3517,3 +3517,260 @@ theorem T6f_mega_20us : step3 moe 32768 1 1 (br3Mega 20000) lam3 = 126313595 ∧
 theorem T6f_dense1M_det : step4F dense 1048576 1 1 br3I8 2 lam3 = 4698924749 ∧ xDetF = 17600 ∧ 120 * 2048 * xDetF = 4325376000 ∧
     tpsCard 1000 (4698924749 + 4325376000) = 27 ∧ xRowmaxF < xDetF := by decide
 
+
+/-! # ROUND 6 (PROMPT-3R6, 2026-11-08) — the MEASURED deferred-guard cells are the fleet's attention term (`[R6-*]` in proof/fleet.py;
+    PROOF-COVERAGE-4 rows F6-1 … F6-14). Inputs (MEASURED, kernel session 5; duplicated from proof/attn.lean `Audit6`, which this file cannot
+    import standalone): the trip-free per-layer cells 945 500 / 3 618 800 / 28 694 000 ns at 32k / 128k / 1M, the amortized 946 300 / 947 400
+    at 32k (an amortization of the trip-free and canonical cells), the session-5 legacy scan 1 514 900. The step is still `step5F` (affine in
+    the per-layer attention, `T5r_step_form`); the post-fusion levers are E40 (the bound deferred − floor − end read of DESIGN-3 §5.1, gated on
+    φ), the bounce removal and E29. Cell theorems generated from fleet.py (scratchpad gen_fleet6.py); the tie lines hold for every cell T,
+    the 4k lever verdict for every deferred 4k cell up to the guarded one, the spec lines for every α and for every verify attention v. -/
+namespace Measured6F
+/-- the deferred-guard per-layer cells (t = 1, ns; MEASURED, session 5): trip-free at 32k / 128k / 1M; amortized at 32k -/
+def dfrF32 : Nat := 945500
+def dfrF128 : Nat := 3618800
+def dfrF1M : Nat := 28694000
+def amLoF : Nat := 946300
+def amHiF : Nat := 947400
+/-- the session-5 legacy scan at 32k (the same-session A/B control) -/
+def legF32 : Nat := 1514900
+end Measured6F
+
+namespace Design6F
+open Measured Design Measured3 Attn3F Design3F Measured5F Design5F Audit6F Measured6F
+/-- E40's floors at the fleet level (DESIGN-3 §5.1): F1 = the K+V stream phase + the bounce; F2 = the E21 basis (169.2) + the bounce -/
+def floorF1F (L : Nat) : Nat := streamF L + bounceF L
+def floorF2F (L : Nat) : Nat := nbF L * ddr4Block g256 1 0 false + bounceF L
+/-- tenths of GB/s, round-half-up (attn.lean `rateT`) -/
+def rateTF (b ns : Nat) : Nat := (2 * b * 10 + ns) / (2 * ns)
+end Design6F
+open Measured6F Design6F
+
+/-! ## T6r_attn6 — the measured per-layer cells against round 5's readings (`[R6-attn-*]`): −1.4 / +1.3 / +2.7 % against the fused reading -/
+theorem T6r_attn6 : aFused aG32k 32768 cxHiF = 958800 ∧
+    aFused aG128k 131072 cxHiF = 3573700 ∧
+    aFused aG1M 1048576 cxHiF = 27940000 ∧
+    pct (958800 - dfrF32) 958800 = 14 ∧
+    pct (dfrF128 - 3573700) 3573700 = 13 ∧
+    pct (dfrF1M - 27940000) 27940000 = 27 ∧
+    rateTF (32768 * 4096) dfrF32 = 1420 ∧
+    rateTF (131072 * 4096) dfrF128 = 1484 ∧
+    rateTF (1048576 * 4096) dfrF1M = 1497 ∧
+    rateTF (32768 * 4096) amLoF = 1418 ∧
+    rateTF (32768 * 4096) amHiF = 1417 := by decide
+/-! ## T6r_step6_cells — the t = 1 cells on the measured deferred kernel (`[R6-step-*]`, `[R6-headline-*]`): dense 32k 0.104, 128k 0.091; MoE
+    32k 1.755 trip-free / 1.754 amortized, 128k 1.150 (ATTN-bound), 1M 0.271 (ATTN-bound); MoE 32k and every dense cell weights-bound -/
+theorem T6r_step6_cells : step5F dense 1 1 br3 dfrF32 lam3 = 2403248669 ∧
+    tpsCard 1000 2403248669 = 104 ∧
+    step5F dense 1 1 br3 amLoF lam3 = 2403344669 ∧
+    tpsCard 1000 2403344669 = 104 ∧
+    step5F dense 1 1 br3 amHiF lam3 = 2403476669 ∧
+    tpsCard 1000 2403476669 = 104 ∧
+    step5F dense 1 1 br3 dfrF128 lam3 = 2724044669 ∧
+    tpsCard 1000 2724044669 = 91 ∧
+    step5F moe 1 1 br3 dfrF32 lam3 = 142430899 ∧
+    tpsCard 1000 142430899 = 1755 ∧
+    step5F moe 1 1 br3 amLoF lam3 = 142453299 ∧
+    tpsCard 1000 142453299 = 1754 ∧
+    step5F moe 1 1 br3 amHiF lam3 = 142484099 ∧
+    tpsCard 1000 142484099 = 1754 ∧
+    step5F moe 1 1 br3 dfrF128 lam3 = 217283299 ∧
+    tpsCard 1000 217283299 = 1150 ∧
+    step5F moe 1 1 br3 dfrF1M lam3 = 919388899 ∧
+    tpsCard 1000 919388899 = 271 ∧
+    W3 moe 1 1 br3 = 92824932 ∧
+    W3 dense 1 1 br3 = 2202874362 ∧
+    28 * dfrF32 < W3 moe 1 1 br3 ∧
+    W3 moe 1 1 br3 < 28 * dfrF128 ∧
+    W3 moe 1 1 br3 < 28 * dfrF1M ∧
+    120 * dfrF32 < W3 dense 1 1 br3 ∧
+    120 * dfrF128 < W3 dense 1 1 br3 := by decide
+/-! ## T6r_moe128k6 — MoE 128k on the measured cell (`[R6-moe-128k]`): ATTN-bound by 12.8 % (anchored) / 37.0 % (direct); the step ATTN 101.32
+    vs W 92.82 ms; the measured 148.4 GB/s is under both effective-rate lines (`T5r_moe128k_tie_measured` at G = 1484); E40's floor still +2.5 % -/
+theorem T6r_moe128k6 : dfrF128 - tw3 moe .anchor = 411081 ∧
+    pct (dfrF128 - tw3 moe .anchor) (tw3 moe .anchor) = 128 ∧
+    dfrF128 - tw3 moe .directSer = 977601 ∧
+    pct (dfrF128 - tw3 moe .directSer) (tw3 moe .directSer) = 370 ∧
+    28 * dfrF128 = 101326400 ∧
+    floorF1F 131072 = 3287200 ∧
+    tw3 moe .anchor < floorF1F 131072 ∧
+    pct (floorF1F 131072 - tw3 moe .anchor) (tw3 moe .anchor) = 25 := by decide
+theorem T6r_moe128k6_eff : tw3 moe .anchor ≤ 5368709120 / 1484 ∧ tw3 moe .directSer ≤ 5368709120 / 1484 :=
+  ⟨(T5r_moe128k_tie_measured 1484 (by decide)).2.2.1.mpr (by decide), (T5r_moe128k_tie_measured 1484 (by decide)).2.2.2.mpr (by decide)⟩
+/-! ## T6r_tie32k — MoE 32k, for every per-layer cell T: the realized guard fusion (legacy → T) outranks E29 iff T ≤ 947079 ns (session-3 legacy,
+    the round-5 basis: G ≥ 141.7) / T ≤ 948379 ns (session-5 legacy: G ≥ 141.5) (`[R6-tie-32k-*]`) -/
+theorem T6r_tie32k (T : Nat) (hT : T ≤ aG32k) : (e29 < 28 * (aG32k - T) ↔ T ≤ 947079) ∧ (e29 < 28 * (legF32 - T) ↔ T ≤ 948379) := by
+  have h1 : e29 = 15862560 := by decide
+  rw [h1]; unfold aG32k legF32 at *; constructor <;> constructor <;> intro h <;> omega
+/-! ## T6r_tie32k_cells — the three readings ON the line (`[R6-tie-32k-*]`): on the round-5 basis fusion leads by 44 240 / 21 840 ns per token
+    (trip-free / amortized-lo) and E29 by 8 960 (amortized-hi) — a tie within 0.3 %; on the same-session legacy fusion leads at every reading -/
+theorem T6r_tie32k_cells : rateTF (32768 * 4096) 947079 = 1417 ∧
+    rateTF (32768 * 4096) 948379 = 1415 ∧
+    28 * (aG32k - dfrF32) = 15906800 ∧
+    e29 < 15906800 ∧
+    15906800 - e29 = 44240 ∧
+    28 * (legF32 - dfrF32) = 15943200 ∧
+    e29 < 15943200 ∧
+    15943200 - e29 = 80640 ∧
+    28 * (aG32k - amLoF) = 15884400 ∧
+    e29 < 15884400 ∧
+    15884400 - e29 = 21840 ∧
+    28 * (legF32 - amLoF) = 15920800 ∧
+    e29 < 15920800 ∧
+    15920800 - e29 = 58240 ∧
+    28 * (aG32k - amHiF) = 15853600 ∧
+    15853600 < e29 ∧
+    e29 - 15853600 = 8960 ∧
+    28 * (legF32 - amHiF) = 15890000 ∧
+    e29 < 15890000 ∧
+    15890000 - e29 = 27440 := by decide
+/-! ## T6r_tie_lines — MoE 128k / 1M, for every cell T: fusion outranks E29 iff T ≤ 5286379 (101.6 GB/s) / T ≤ 45747079 (93.9 GB/s); the measured
+    cells (148.4 / 149.7 GB/s) are far inside: fusion 62.55 / 493.34 ms per token vs E29 15.86 — attention wins outright (`[R6-tie-128k]`, `[R6-tie-1M]`) -/
+theorem T6r_tie_lines (T : Nat) : (T ≤ aG128k → (e29 < 28 * (aG128k - T) ↔ T ≤ 5286379)) ∧ (T ≤ aG1M → (e29 < 28 * (aG1M - T) ↔ T ≤ 45747079)) := by
+  have h1 : e29 = 15862560 := by decide
+  rw [h1]; unfold aG128k aG1M; constructor <;> intro hT <;> constructor <;> intro h <;> omega
+theorem T6r_tie_lines_cells : dfrF128 ≤ 5286379 ∧
+    dfrF1M ≤ 45747079 ∧
+    5286379 - dfrF128 = 1667579 ∧
+    45747079 - dfrF1M = 17053079 ∧
+    28 * (aG128k - dfrF128) = 62554800 ∧
+    28 * (aG1M - dfrF1M) = 493348800 ∧
+    3 * e29 < 28 * (aG128k - dfrF128) ∧
+    31 * e29 < 28 * (aG1M - dfrF1M) ∧
+    rateTF (131072 * 4096) 5286379 = 1016 ∧
+    rateTF (1048576 * 4096) 45747079 = 939 := by decide
+/-! ## T6r_realized — what the guard fusion banked per token (`[R6-realized-*]`; legacy session 3 → deferred session 5): dense 68.17 / 268.09 ms,
+    MoE 15.90 / 62.55 / 493.34 ms at 32k / 128k / 1M; on the session-5 legacy at 32k 68.32 / 15.94 -/
+theorem T6r_realized : 120 * (aG32k - dfrF32) = 68172000 ∧
+    120 * (aG128k - dfrF128) = 268092000 ∧
+    120 * (aG32k - amHiF) = 67944000 ∧
+    120 * (aG32k - amLoF) = 68076000 ∧
+    120 * (legF32 - dfrF32) = 68328000 ∧
+    28 * (aG32k - dfrF32) = 15906800 ∧
+    28 * (aG128k - dfrF128) = 62554800 ∧
+    28 * (aG1M - dfrF1M) = 493348800 ∧
+    28 * (aG32k - amHiF) = 15853600 ∧
+    28 * (aG32k - amLoF) = 15884400 ∧
+    28 * (legF32 - dfrF32) = 15943200 := by decide
+/-! ## T6r_levers6 — the post-fusion ranking per token at Π = 1 (`[R6-levers-*]`), with E40 bracketed (F2 + a 20 µs read .. F1 + a free read; φ = 0):
+    MoE 32k / 128k E29 15.86 > E40 ≤ 3.46 / 9.28 > bounce 1.42 / 5.71; MoE 1M E40 ≤ 67.09 > bounce 45.69 > E29; dense E40 > bounce at 32k / 128k —
+    every order holds at both ends of the E40 bracket: E40 is the attention-side #1, E29 the expert-side lever -/
+theorem T6r_levers6 : e29 = 15862560 ∧
+    floorF1F 32768 = 821800 ∧
+    floorF2F 32768 = 844216 ∧
+    bounceF 32768 = 51000 ∧
+    28 * (dfrF32 - floorF1F 32768) = 3463600 ∧
+    28 * (dfrF32 - floorF2F 32768 - 20000) = 2275952 ∧
+    28 * bounceF 32768 = 1428000 ∧
+    1428000 < 2275952 ∧
+    2275952 - 1428000 = 847952 ∧
+    3463600 < e29 ∧
+    120 * (dfrF32 - floorF1F 32768) = 14844000 ∧
+    120 * (dfrF32 - floorF2F 32768 - 20000) = 9754080 ∧
+    120 * bounceF 32768 = 6120000 ∧
+    6120000 < 9754080 ∧
+    9754080 - 6120000 = 3634080 ∧
+    floorF1F 131072 = 3287200 ∧
+    floorF2F 131072 = 3376864 ∧
+    bounceF 131072 = 204000 ∧
+    28 * (dfrF128 - floorF1F 131072) = 9284800 ∧
+    28 * (dfrF128 - floorF2F 131072 - 20000) = 6214208 ∧
+    28 * bounceF 131072 = 5712000 ∧
+    5712000 < 6214208 ∧
+    6214208 - 5712000 = 502208 ∧
+    9284800 < e29 ∧
+    120 * (dfrF128 - floorF1F 131072) = 39792000 ∧
+    120 * (dfrF128 - floorF2F 131072 - 20000) = 26632320 ∧
+    120 * bounceF 131072 = 24480000 ∧
+    24480000 < 26632320 ∧
+    26632320 - 24480000 = 2152320 ∧
+    floorF1F 1048576 = 26297600 ∧
+    floorF2F 1048576 = 27014912 ∧
+    bounceF 1048576 = 1632000 ∧
+    28 * (dfrF1M - floorF1F 1048576) = 67099200 ∧
+    28 * (dfrF1M - floorF2F 1048576 - 20000) = 46454464 ∧
+    28 * bounceF 1048576 = 45696000 ∧
+    45696000 < 46454464 ∧
+    46454464 - 45696000 = 758464 ∧
+    e29 < 45696000 := by decide
+/-! ## T6r_levers_moe4k — MoE 4k has no deferred cell: for EVERY deferred 4k cell T ≤ the guarded 213500 ns, E40's bound (either floor) and the bounce
+    removal stay under E29 (`[R6-levers-moe-4k]`) -/
+theorem T6r_levers_moe4k (T : Nat) (hT : T ≤ aG4k) : 28 * (T - floorF1F 4096) < e29 ∧ 28 * (T - floorF2F 4096) < e29 ∧ 28 * bounceF 4096 < e29 := by
+  have h1 : e29 = 15862560 := by decide
+  have h2 : floorF1F 4096 = 102725 := by decide
+  have h3 : floorF2F 4096 = 105527 := by decide
+  have h4 : bounceF 4096 = 6375 := by decide
+  rw [h1, h2, h3, h4]; unfold aG4k at hT; refine ⟨?_, ?_, ?_⟩ <;> omega
+/-! ## T6r_spec6 — spec decode at the fused G (`[R6-spec-moe-loss-*]`): MoE (verify = the t = 1 kernel, the round-5 D transfer) at α = 0.7 gives 1.386
+    against 1.755 / 1.754 at t = 1, and LOSES iff α ≤ 0.854 on every reading — T_spec_moe_loss survives, its line moves 0.807 → 0.854 -/
+theorem T6r_spec6_steps : step5F moe 1 1 br3 dfrF32 lam3 = 142430899 ∧
+    step5F moe 1 4 br3 dfrF32 lam3 = 456819203 ∧
+    tpsCard (tau 700 3) 456819203 = 1386 ∧
+    step5F moe 1 1 br3 amLoF lam3 = 142453299 ∧
+    step5F moe 1 4 br3 amLoF lam3 = 456841603 ∧
+    tpsCard (tau 700 3) 456841603 = 1386 ∧
+    step5F moe 1 1 br3 amHiF lam3 = 142484099 ∧
+    step5F moe 1 4 br3 amHiF lam3 = 456872403 ∧
+    tpsCard (tau 700 3) 456872403 = 1386 := by decide
+theorem T6r_spec6_thresholds : (∀ a, a < 1001 → (tau a 3 * 142430899 < 1000 * 456819203 ↔ a ≤ 854)) ∧
+    (∀ a, a < 1001 → (tau a 3 * 142453299 < 1000 * 456841603 ↔ a ≤ 854)) ∧
+    (∀ a, a < 1001 → (tau a 3 * 142484099 < 1000 * 456872403 ↔ a ≤ 854)) := by decide +kernel
+/-! ## T6r_spec_dense_form / _line — dense spec: the verify step is affine in the verify kernel's per-layer attention v (UNMEASURED on the deferred
+    kernel at t ≥ 4), and at α = 0.7 it beats t = 1 iff v ≤ 31092727 ns — 32.8× the t = 1 cell (`[R6-spec-dense-form]`) -/
+theorem T6r_spec_dense_form (v : Nat) : step5F dense 1 4 br3 v lam3 = 2356301528 + 120 * v := by
+  have hd : W3 dense 1 4 br3 + Ln3 dense 1 4 br3 + Q3 dense 1 4 br3 + X3 dense 1 4 lam3 + D3 4 br3 lam3 = 2356301528 := by decide
+  have n1 : dense.nL = 120 := rfl
+  unfold step5F; rw [n1]; omega
+theorem T6r_spec_dense_line (v : Nat) : 1000 * step5F dense 1 4 br3 v lam3 < tau 700 3 * step5F dense 1 1 br3 dfrF32 lam3 ↔ v ≤ 31092727 := by
+  rw [T6r_spec_dense_form]
+  have h1 : step5F dense 1 1 br3 dfrF32 lam3 = 2403248669 := by decide
+  have h2 : tau 700 3 = 2533 := by decide
+  rw [h1, h2]; constructor <;> intro h <;> omega
+/-! ## T6r_spec_dense_cells — the dense spec cells at three readings of v (`[R6-spec-dense-*]`): fragment-serial 3 782 000 → 0.225 (α ≥ 0.146),
+    ratio-scaled 3 355 007 → 0.229 (α ≥ 0.130), the legacy verify 5 370 850 (MEASURED, session 3) → 0.211 (α ≥ 0.201) -/
+theorem T6r_spec_dense_cells : step5F dense 1 4 br3 3782000 lam3 = 2810141528 ∧
+    tpsCard (tau 700 3) 2810141528 = 225 ∧
+    step5F dense 1 4 br3 3355007 lam3 = 2758902368 ∧
+    tpsCard (tau 700 3) 2758902368 = 229 ∧
+    step5F dense 1 4 br3 5370850 lam3 = 3000803528 ∧
+    tpsCard (tau 700 3) 3000803528 = 211 ∧
+    31092727 * 10 / dfrF32 = 328 ∧
+    4 * dfrF32 = 3782000 ∧
+    aT16_32k / 2 * dfrF32 / aG32k = 3355007 ∧
+    tpsCard 1000 2403248669 = 104 := by decide
+theorem T6r_spec_dense_thresholds : (∀ a, a < 1001 → (1000 * 2810141528 < tau a 3 * 2403248669 ↔ 146 ≤ a)) ∧
+    (∀ a, a < 1001 → (1000 * 2758902368 < tau a 3 * 2403248669 ↔ 130 ≤ a)) ∧
+    (∀ a, a < 1001 → (1000 * 3000803528 < tau a 3 * 2403248669 ↔ 201 ≤ a)) := by decide +kernel
+/-! ## T6r_B16_6 — MoE B = 16 (uniform) on the deferred cell (`[R6-B16-moe-32k-*]`): 2.247 trip-free / 2.246 amortized-hi -/
+theorem T6r_B16_6 : step5F moe 16 1 br3 dfrF32 lam3 = 1779534803 ∧
+    tpsCard 16000 1779534803 = 2247 ∧
+    step5F moe 16 1 br3 amHiF lam3 = 1780386003 ∧
+    tpsCard 16000 1780386003 = 2246 := by decide
+/-! ## T6r_inst6 — two 4-die instances (V3 with the erratum-#19 merge; H10's c = 1.990) on the deferred cell (`[R6-inst-*]`): MoE 3.576 / 3.575 (T),
+    3.504 / 3.502 (C), needing c ≥ 0.977–0.998 of the measured 1.990; dense 0.149 (T) / 0.140 (C), c ≥ 1.402 / 1.483 — the instance verdict holds -/
+theorem T6r_inst6 : instStep5 moe 1 1 xsMoe32k .directSer (tW4 + mergeTF) 0 .uniform br3 dfrF32 lam3 = 139096935 ∧
+    tpsInst 1000 h10Card 139096935 = 3576 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer (tW4 + mergeTF) 0 .uniform br3 amHiF lam3 = 139150135 ∧
+    tpsInst 1000 h10Card 139150135 = 3575 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer (tW4 + mergeCF) 0 .uniform br3 dfrF32 lam3 = 141971051 ∧
+    tpsInst 1000 h10Card 141971051 = 3504 ∧
+    instStep5 moe 1 1 xsMoe32k .directSer (tW4 + mergeCF) 0 .uniform br3 amHiF lam3 = 142024251 ∧
+    tpsInst 1000 h10Card 142024251 = 3502 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 (rW4ofF (tW4 + mergeTF)) .uniform br3 dfrF32 lam3 = 3337073683 ∧
+    tpsInst 1000 h10Card 3337073683 = 149 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 (rW4ofF (tW4 + mergeTF)) .uniform br3 amHiF lam3 = 3337301683 ∧
+    tpsInst 1000 h10Card 3337301683 = 149 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 (rW4ofF (tW4 + mergeCF)) .uniform br3 dfrF32 lam3 = 3528599593 ∧
+    tpsInst 1000 h10Card 3528599593 = 140 ∧
+    instStep5 dense 1 1 xsDense32k .directSer 0 (rW4ofF (tW4 + mergeCF)) .uniform br3 amHiF lam3 = 3528827593 ∧
+    tpsInst 1000 h10Card 3528827593 = 140 := by decide
+theorem T6r_inst6_c : (∀ c, 1756 ≤ tpsInst 1000 c 139096935 ↔ 978 ≤ c) ∧
+    (∀ c, 1755 ≤ tpsInst 1000 c 139150135 ↔ 977 ≤ c) ∧
+    (∀ c, 1756 ≤ tpsInst 1000 c 141971051 ↔ 998 ≤ c) ∧
+    (∀ c, 1755 ≤ tpsInst 1000 c 142024251 ↔ 998 ≤ c) ∧
+    (∀ c, 105 ≤ tpsInst 1000 c 3337073683 ↔ 1402 ≤ c) ∧
+    (∀ c, 105 ≤ tpsInst 1000 c 3337301683 ↔ 1402 ≤ c) ∧
+    (∀ c, 105 ≤ tpsInst 1000 c 3528599593 ↔ 1483 ≤ c) ∧
+    (∀ c, 105 ≤ tpsInst 1000 c 3528827593 ↔ 1483 ≤ c) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+  · intro c; unfold tpsInst; rw [Nat.le_div_iff_mul_le (by decide)]; constructor <;> intro h <;> omega

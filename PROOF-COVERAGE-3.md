@@ -1,4 +1,4 @@
-# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07; round 5, 2026-11-07 — the measured production kernel; PROMPT-6, 2026-11-08 — the errata #18–#31 audit and the E40 pre-design)
+# PROOF-COVERAGE-3 — ledger of every quantitative claim in DESIGN-3.md (round 2, 2026-11-04; round 3, 2026-11-05; round 4, 2026-11-07; round 5, 2026-11-07 — the measured production kernel; PROMPT-6, 2026-11-08 — the errata #18–#31 audit and the E40 pre-design; round 6, 2026-11-08 — the measured deferred-guard cells)
 
 How to read a row: **Claim** quotes or paraphrases the DESIGN-3.md statement (section numbers refer to the
 corrected document); **Proof** names the theorem(s) in `proof/attn.lean` that fix the number; **attn.py** names
@@ -21,6 +21,90 @@ flat m = 1..16) as the pure-read roof class — the KV stream is read-only (the 
 ≤ 8 KiB K/V append and the output), so the 173.8 read+write figure does not apply; the raw direct-load 181.3 is
 recorded as the ceiling the kernel's choreography sits under (`Measured.rGemm`, `rDirect`, `rDdrRW`;
 T1_stream_roof gives the 3.8 % what-if).
+
+## Round 6 (2026-11-08) — the MEASURED deferred-guard cells folded in (PROMPT-3R6; kernel session 5, HW-MAP 3928d0e)
+
+Round 6 replaces round 5's fused reading with the measured deferred-guard kernel, resolves E39, closes E35's device half and documents the
+two numerics classes session 5 surfaced. Labels `[R6-*]` are printed by `python3 -I proof/attn.py` after the PROMPT-6 block (the first 942
+output lines — every round-2 … PROMPT-6 line — are byte-identical: `diff` of the two outputs is exactly the `[R6-*]` block); theorems
+`T6r_*` are the last section of `proof/attn.lean` (namespaces `Measured6`, `Design6`). Status words: **MEASURED** (= INPUT: a kernel-session-5
+number used as given, or session 3 where named), PROVED / **DERIVED** (a theorem from measured inputs), **UNMEASURED** (carried as a variable,
+a bracket or a bound, with a ladder row), CORRECTION, EMPIRICAL — Ex.
+
+### Build status, round 6
+
+| Item | Result |
+|---|---|
+| `lean proof/attn.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 8 s |
+| `cd proof && lake build` | **succeeds** (all six targets; the only warnings are smoke.lean's, pre-existing) |
+| Theorems in attn.lean | **366** = 350 (rounds 2–5 + PROMPT-6, kept byte-identical) + **16** round 6 (`T6r_*`) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0; `#print axioms` over the 16: 14 depend on no axiom, 2 (`T6r_trip_breakeven`, `T6r_fleet_moe_128k_eff`) on `propext` + `Quot.sound` |
+| New namespaces | `Measured6` (the canonical adversarial cells, the 1M legacy as quoted, the trip-rate premise, the two quoted differences, the fold's cap, the numerics counts, the direct-path MoE layer), `Design6` (`amort`, `reRun32k`, `reRun1M`, `pctH6`); the session-5 cells themselves are PROMPT-6's `Audit6` constants |
+| `python3 -I proof/attn.py` | 942 lines unchanged + 21 lines (19 `[R6-*]` labels); `python3 -I proof/fleet.py` 676 unchanged + 36 lines; `proof/alt.py` output unchanged |
+| Cell theorems | generated from attn.py's own values (scratch `gen_attn6.py`) — no hand-typed cell |
+
+### The moved cells (round 5 → round 6; `[R6-moved]`, T6r_vs_round5)
+
+| Cell | Round 5 | Round 6 | Status | Theorem |
+|---|---|---|---|---|
+| fused (the fleet's attention), 32k t = 1 | 958 800 ns (140.0 GB/s): unguarded + one 20 µs crossing — the E39 target | **945 500 trip-free (142.0)**; 946 300–947 400 amortized (141.8–141.7) | M (the amortized band: an amortization of two M cells) | T6r_cells, T6r_vs_round5, T6r_amort |
+| fused, 128k / 1M | 3 573 700 / 27 940 000 (D: the per-block guard rule) | **3 618 800 (148.4) / 28 694 000 (149.7)** — 1.3 / 2.7 % slower than the reading | M | T6r_cells, T6r_vs_round5 |
+| E39 (batched guard, residual X) | UNMEASURED; decides the 32k rank iff X ≤ 8 279 ns | **RESOLVED**: the deferred guard; X = 6 700 trip-free / 7 500–8 600 amortized (straddles 8 279) | M | T6r_e39 |
+| E35 device half | RESOLVED: the scan is the cost, trips ≈ free | **CLOSED**: +42 600 ns per step (fold + end read), R = 872 600 per trip, breakeven 65.25 % / 64.47 % of steps | M + D (∀ p) | T6r_fold, T6r_amort, T6r_trip_breakeven |
+| the guarded column | the shipped kernel (1 513 600 at 32k) | the legacy A/B control (1 514 900 at session 5) | M | T6r_base |
+| validation row (vs the round-4 legs-2 cell 911 680) | +3.0 % (session 3's unguarded 938 800) | **−1.0 %** (session 5's guard-off 902 900) | M + D | T6r_base |
+| MoE 128k (DESIGN-4) per layer | +11.4 % over the anchored layer (the fused reading) | **+12.8 %** (anchored), +37.0 % (direct) | D (M cell) | T6r_fleet_moe_128k |
+| × GEMV at 32k / 128k / 1M | 3.80 / 14.7 / 116.4 (guarded) | **2.38 / 9.09 / 72.1** (deferred) | M | T6r_cells |
+
+### Corrections forced by the measurements (round 5 → round 6)
+
+| # | Where | Round 5 said | Now | Caught by |
+|---|---|---|---|---|
+| 1 | §6.0 readings off 32k | unguarded / fused = the guarded cell minus a flat 8 981 ns per block (UNMEASURED off 32k) | the rule was **optimistic by 1.3 / 2.7 % at 128k / 1M** (fused reading vs the measured cell); legacy − deferred per block is 8 876 / 8 726 / 8 603 ns (mixed sessions) | session 5 (T6r_perblock, T6r_vs_round5) |
+| 2 | §3.2 / §8 E39 model | fused = 938 800 + X with X = one ≤ 20 µs crossing | the shipped guard costs **42 600 ns over its own base** (2.1× the modelled crossing); the cell still lands 1.4 % under the target because the base moved −35 900 ns — a net of two terms | session 5 (T6r_e39, T6r_base) |
+| 3 | §3.4 (c) / §9 the trip under a batched guard | ≤ 0.22 % of a step (≈ 2.1 µs at 32k), re-run cost UNMEASURED | re-run R = **872 600 ns** (30 300 under one guard-off step); amortized +800–1 900 ns; the band 946.3–947.4 µs is T₀ + p·R (an amortization of the trip-free and canonical cells, not a third measurement) | session 5 (T6r_amort) |
+| 4 | §6.0 validation | the round-4 cell matches the unguarded kernel at +3.0 % | on the session-5 base the match is **−1.0 %**; the term split is not re-instantiated (session 5 did not re-time the phases) | session 5 (T6r_base) |
+| 5 | steering (PROMPT-3R6) "the fold costs −59 µs vs the scan (one pass)"; HW-MAP "−558 µs at real rates" | — | **neither reproduces from the quoted cells**: the one-pass cell difference is 569 400 ns (9.7× 59 000), the real-rate differences 567 500–568 600 (9 500–10 600 above 558 000); both carried as given, no cell uses them | T6r_fold |
+
+Not corrections (survivals): MoE 128k attention-bound (now by 12.8 % on the measured cell, and still +2.5 % at a perfect overlap); the
+online two-level chain and the trip machinery (exact at the +8 bound); erratum #31's verdict (the batched fence + flag design stays killed);
+E40's pre-design and its prize (PROMPT-6 already priced it on these cells); the legacy scan (byte-identical; it reproduces session 3 within
++0.1 %).
+
+### The round-6 ledger (every `[R6-*]` label and every round-6 claim of DESIGN-3.md)
+
+| # | Claim (round-6 text: banner, §3.2, §3.4, §5.1, §6.0′, §6.3, §7, §8, §9, §10, App. A) | Proof | labels | Status |
+|---|---|---|---|---|
+| R6-1 | the deferred cells, trip-free: 945 500 / 3 618 800 / 28 694 000 ns = 142.0 / 148.4 / 149.7 GB/s; 64 / 256 / 2 048 blocks; 14 773 / 14 135 / 14 010 ns per block; × GEMV 237.6 / 909.2 / 7 209.5 % | T6r_cells | [R6-cells-*] | **INPUT (session 5)** + PROVED |
+| R6-2 | the amortized band 946 300–947 400 ns (141.8–141.7 GB/s) = T₀ + p·R at p = 0.087 / 0.22 % (946 259 / 947 419 → 946.3 / 947.4 µs); R = 872 600 = guard-off − 30 300; trips +800–1 900 ns = 0.08–0.20 %; each 1 % of tripped steps 8 726 ns (0.92 %) | T6r_amort | [R6-amort] | INPUT (band, canonical) + PROVED (the reproduction); the ~100 % canonical trip rate: INPUT |
+| R6-3 | 1M: R = 27 306 000 (the 56.0 ms adversarial cell); IF the 32k premise transfers, 28 717 756–28 754 073 ns = 149.6–149.4 GB/s (+0.08–0.21 %) | T6r_amort | [R6-amort-1M] | PROVED; the trip rate per (model, L): **UNMEASURED** — E35 (model half) |
+| R6-4 | the trip-rate breakeven against the legacy scan, ∀ p: p ≤ 65 253 per 10⁵ (65.25 %) at 32k, ≤ 64 476 (64.47 %, against the quoted 46.3 ms) at 1M; the premise (≤ 220) ≥ 296× inside | T6r_trip_breakeven (∀ p), T6r_trip_premise | [R6-trip-breakeven] | PROVED ∀ p |
+| R6-5 | the adversarial canonical profile: 1 818 100 ns (73.8 GB/s) vs the legacy 1 514 900 (+20.0 %, +303 200); 56.0 ms (76.7 GB/s) vs 46.3 (+21.0 %, +9 700 000); the gap grows with L; an upper bound, never the fleet cell | T6r_adversarial | [R6-adversarial] | INPUT + PROVED |
+| R6-6 | the session-5 base: guard-off 902 900 (148.7 GB/s) = −35 900 (−3.8 %) vs session 3's unguarded; legacy 1 514 900 (88.6 GB/s) = +1 300 (+0.1 %) vs session 3; vs the round-4 cell 911 680: −1.0 % (session 3 +3.0 %), inside the 5 % line | T6r_base | [R6-base] | INPUT + PROVED; the session-5 term split: **UNMEASURED** — E41 |
+| R6-7 | the fold decomposition: legacy − guard-off 612 000 (session 3: 574 800); deferred − guard-off 42 600 (4.7 %); the deferred guard removes 569 400 = 93.0 % trip-free, 567 500–568 600 amortized | T6r_fold | [R6-fold] | INPUT + PROVED; the fold / end-read split: **UNMEASURED** |
+| R6-8 | the quoted differences: "−59 µs vs the scan (one pass)" (PROMPT-3R6) and "−558 µs at real rates" (HW-MAP) do not reproduce (569 400 = 9.7 × 59 000; 558 000 is 9 500–10 600 under the cell differences) | T6r_fold | [R6-fold] | INPUT (as quoted); CORRECTION 5 (not used by any cell) |
+| R6-9 | E39 RESOLVED: the cell beats the 958 800 target by 13 300 (1.4 %) trip-free, ≥ 11 400 amortized; X = 6 700 / 7 500 / 8 600 vs the 8 279 line; own-base residual 42 600 = 2.1× the 20 µs crossing, between 20 000 and 51 040 (crossing + side-product at the measured softmax rate); residual +22 600 netted against the base −35 900 | T6r_e39 | [R6-e39] | INPUT + PROVED |
+| R6-10 | E35's device half CLOSED: zero scalar ops per block; +42 600 per step; R = 872 600; amortized +800–1 900; breakeven 65.25 / 64.47 % | T6r_amort, T6r_trip_breakeven, T6r_fold | [R6-e35] | INPUT + PROVED; the trip rate per (model, L): EMPIRICAL — E35 |
+| R6-11 | the fold at the +8 bound: e⁸ < 2.7183⁸ = 2 981.1 < 3 072; e^8.02 < 2.7183⁸ · 50/49 = 3 042.0 < 3 072 (the cap clamps from ln 3 072 = 8.030); cap = 3 · 2¹⁰ (f16-exact); planted 8.0 → 0 trips, 8.02 → exactly 1 | T6r_fold_bound | [R6-fold-bound] | PROVED given e < 2.7183 and e^x ≤ 1/(1 − x) (analytic inputs); the trip counts: INPUT |
+| R6-12 | round 5's off-32k rule tested: legacy − deferred per block 8 876 / 8 726 / 8 603 ns vs 8 981; the deferred kernel affine in nb (slopes 13 923 / 13 992, intercept 54 428 ns; the 1M cell +125 268 = 0.4 % over the 32k–128k chord) | T6r_perblock, T6r_vs_round5 | [R6-perblock] | PROVED (mixed sessions 3 / 5); CORRECTION 1; below 32k: **UNMEASURED** |
+| R6-13 | the measured cells against round 5's readings: fused −1.4 / +1.3 / +2.7 %, unguarded +0.7 / +1.8 / +2.8 %, the 140.0 bracket −1.4 / −5.6 / −6.5 %, the legacy −37.5 / −38.2 / −38.0 % | T6r_vs_round5 | [R6-cells-*], [R6-moved] | PROVED |
+| R6-14 | × GEMV 2.38 / 9.09 / 72.1 units (legacy 3.80 / 14.7 / 116.4); per DESIGN-4 layer MoE 29.5 / 112.8 / 894.5 %, dense 5.2 / 19.8 %; +3.7 / +0.8 / +0.4 % over the round-4 legs-2 cells | T6r_cells, T6r_layer_fractions | [R6-gemv] | PROVED (layer times: D4 inputs) |
+| R6-15 | MoE 128k on the measured cell: +411 081 ns = 12.8 % (anchored), +977 601 = 37.0 % (direct); 148.4 GB/s under the 167.3 / 203.2 effective-rate lines; the E40 floor F1 +79 481 = 2.5 % | T6r_fleet_moe_128k, T6r_fleet_moe_128k_eff (instance of the ∀ G iff) | [R6-fleet-moe-128k] | PROVED |
+| R6-16 | the 1M canonical bad-2: f16 normals end at 2⁻¹⁴ (ln −9.704), subnormal spacing 2⁻²⁴, 1 % granularity at P ≤ 1/167 772 (ln −12.03); the exact P path = 8 388 608 lanes, 100.00 %; disposition: adversarial-only, documented, no kernel change | T6r_numerics | [R6-numerics-subnormal] | INPUT (the class, the counts) + PROVED (the constants); its reading as a row-max outlier with no output weight: INTERPRETATION of the session's description |
+| R6-17 | the random-profile out-verify floor: bad 324 at 32k / 65 at 1M, identical for deferred / legacy / guard-off; disposition: a verification-methodology class (an absolute floor in the checker) | T6r_numerics | [R6-numerics-verify] | INPUT |
+| R6-18 | E40 post-fusion: the PROMPT-6 bound on the measured cells (123 700 / 101 284, 331 600 / 241 936, 2 396 400 / 1 679 088 ns) is unchanged, +800 / +1 900 on the amortized 32k cell; the session-3 stream phase = 81.5 % of the deferred cell (82.1 % of the unguarded) | T6r_e40_amort (+ T40_prize_*) | [R6-e40] | PROVED; reaching it: EMPIRICAL — E40a / E40b |
+| R6-19 | the session-4 "spurious fold misread under the PV flow" closed as a test-harness artifact (the identity gate repacked the shared arenas before the timing cell); the deferred guard exact and deterministic (12/12 matrix, stress) | — | — | INPUT (session 5) |
+| R6-20 | the ladder: E39 RESOLVED, E35 device half CLOSED, E41 new (the deferred kernel's phases, t = 4 / 16 and a 4k cell); order E40a → E41 → E40b → E35 (model half) → E27′ (sink) → E25; risk rows (trip rate, adversarial inputs, the two numerics classes, the mixed-session floors, the netted match) | — | — | DEFINITION (ladder / risk structure); EMPIRICAL — E40a, E41, E40b |
+
+**Coverage, round 6: 20 rows, 18 with a theorem (90 %); the 2 without (R6-19, R6-20) are a measurement statement used as given and the
+ladder structure. 0 orphans — every `T6r_*` theorem of attn.lean is cited above (T6r_cells, T6r_vs_round5, T6r_amort, T6r_trip_breakeven,
+T6r_trip_premise, T6r_adversarial, T6r_base, T6r_fold, T6r_e39, T6r_perblock, T6r_layer_fractions, T6r_fleet_moe_128k,
+T6r_fleet_moe_128k_eff, T6r_fold_bound, T6r_numerics, T6r_e40_amort), and every `[R6-*]` label family of attn.py is cited.** Status summary:
+**MEASURED** — the three trip-free cells, the amortized band (as quoted; reproduced from two measured cells), the legacy / guard-off /
+canonical cells at 32k, the 1M adversarial and legacy cells (as quoted), the planted-delta trip counts, the two numerics classes and their
+counts, the harness-artifact closure; **DERIVED** — every other number of the section; **UNMEASURED** — the trip rate per (model, L), the
+fold / end-read split, the session-5 phase split (E41), the deferred kernel below 32k and at t ≥ 4 (E41), φ (E40a). The rounds-2 … 5 and
+PROMPT-6 ledgers below are unchanged.
 
 ## PROMPT-6 (2026-11-08) — the errata #18–#31 audit cells and the E40 stage-overlap pre-design
 

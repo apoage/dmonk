@@ -1014,3 +1014,132 @@ def main6a():
 
 if __name__ == "__main__":
     main6a()
+
+
+# =====================================================================================================================================
+# ROUND 6 (PROMPT-3R6, 2026-11-08) — the MEASURED deferred-guard cells folded in (kernel session 5; HW-MAP 3928d0e, the DEFERRED GUARD
+# row). Silicon inputs (all MEASURED, production flags; no other silicon claim enters this section):
+#   * trip-free full-pipeline cells (trips 0), t = 1: 945.5 / 3618.8 / 28694.0 us at 32k / 128k / 1M = 142.0 / 148.4 / 149.7 GB/s
+#     (T6_DFR above, carried since PROMPT-6);
+#   * amortized at the real trip-rate premise (0.087-0.22 % of steps): 946.3-947.4 us at 32k = G 141.7-141.8 (T6_AMORT32);
+#   * reference points at 32k t = 1: legacy scan 1514.9 us (2 trips), guard-off 902.9, canonical adversarial 1818.1 (63 trips; it
+#     retries ~100 % of steps — an upper bound, never the fleet cell); at 1M the adversarial canonical 56.0 ms vs the legacy 46.3 ms;
+#   * the fold: "costs -59 us vs the scan (one pass)" (PROMPT-3R6, quoted), trips ~free; HW-MAP: "-558 us vs the legacy scan at real
+#     rates, +42.6 us over unguarded (902.9)"; the session-4 "fold misread" = a test-harness artifact (the identity gate repacked the
+#     shared arenas before the timing cell); the fold is exact at the +8 bound (planted 8.0 -> 0 trips, 8.02 -> exactly 1, cap not binding);
+#   * numerics: the 1M canonical bad-2 (a weightless-outlier row's whole mass in f16 subnormals at the global-m retry, ~1e-2 granularity;
+#     adversarial-only; the exact P path, 8.4M lanes, 100.00 %) and the random-profile out-verify floor (bad 324 at 32k / 65 at 1M,
+#     deferred = legacy = guard-off; worst lanes near-zero wants) — a verification-methodology class, not a kernel defect.
+# Readings this section derives (D): the trip model T(p) = T0 + p R (R = canonical - trip-free; it reproduces the quoted amortized band),
+# the trip-rate breakeven against the legacy scan, the session-5 base shift, E39's resolution against the round-5 target, the per-block
+# legacy-minus-deferred difference (round 5's off-32k scaling rule, tested), the x GEMV / per-layer fractions, the MoE-128k cell, the
+# numerics constants. Every label above keeps printing its value; the [R6-*] labels below are the round-6 cells.
+# =====================================================================================================================================
+import math
+P_TRIP6 = (87, 220)                          # the real trip-rate premise, per 100 000 steps (0.087-0.22 %) (M, HW-MAP)
+TRIPS6 = (2, 63)                             # trips in the 32k legacy cell / in the 32k canonical cell (M)
+CANON1M6, LEG1M6 = 56_000_000, 46_300_000    # 1M: adversarial canonical vs legacy, as quoted to 0.1 ms (M)
+FOLD6_Q, WIN6_Q = 59_000, 558_000            # quoted: the fold vs the scan "one pass" (PROMPT-3R6); the real-rate win vs legacy (HW-MAP)
+MU6, CAP6 = 8, 3072                          # the guard bound (P <= e^mu) and the fold's cap, f16-exact (M)
+PLANT6 = (8.0, 8.02)                         # planted near-bound deltas (ln P): 0 trips / exactly 1 trip, cap not binding (M)
+BAD6_RAND = (324, 65)                        # random-profile out-verify bad counts at 32k / 1M, identical for deferred / legacy / guard-off (M)
+BAD6_CANON1M = 2                             # the 1M canonical bad-2 (M)
+LANES6_1M = (1 << 20) * 8                    # the exact P path's lanes at 1M, t = 1 (rows 8): "8.4M lanes, 100.00 %" (M)
+SIDE5 = NB32 * 1455                          # round 5's batched-guard side-product at the round-4 convention (93 120 ns at 32k)
+T_LAYER_MOE_DIRECT = 2_641_199               # DESIGN-4's MoE layer on the direct-path expert kernel (fleet.lean tw3 moe .directSer; D4 input)
+
+def amort6(T0, R, p): return T0 + p * R // 100_000                      # trip-free + p (per 1e5 steps) x the re-run cost R
+def us1(ns): return f"{(ns + 50) // 1000}.{((ns + 50) // 100) % 10}"   # ns -> us, one decimal, round-half-up
+def pctH6(n, d): return (2 * n * 10_000 + d) // (2 * d)                  # hundredths of a percent, round-half-up
+def h2(x): return f"{x // 100}.{x % 100:02d}"
+def spct(a, b): return ("+" if a >= b else "-") + t10(pct(abs(a - b), b)) + "%"
+def p5(p): return f"{p // 1000}.{(p % 1000) // 10:02d}"                  # per-1e5 -> percent, two decimals (floored)
+
+def main6():
+    print("\n# ---- ROUND 6 (PROMPT-3R6, 2026-11-08; the MEASURED deferred-guard cells, kernel session 5): [R6-*] cells; every label above unchanged ----")
+    g256 = G_SHUF[256 * KiB]
+    D32, D128, D1M = T6_DFR[32768], T6_DFR[131072], T6_DFR[1 << 20]
+    # ---------------------------------------------------------------- the measured cells, against the round-5 readings --------------
+    for L in (32768, 131072, 1 << 20):
+        i = LS5.index(L); T = T6_DFR[L]; nb = nb5(L)
+        print(f"[R6-cells-{LK5[i]}] deferred guard, trip-free (M, session 5): {T} ns = {t10(rateT(L * KV_TOK, T))} GB/s; nb {nb}, {T // nb} ns per block; x GEMV {t10(pct(T, T_GEMV))}%; "
+              f"round-5 readings: fused {fused5(L)} ({spct(T, fused5(L))}), unguarded {ung5(L)} ({'M' if L == 32768 else 'D'}; {spct(T, ung5(L))}), constant-rate 140.0 {rate5(L, 1400)} "
+              f"({spct(T, rate5(L, 1400))}), guarded = the legacy scan (M, session 3) {T5[1][i]} ({spct(T, T5[1][i])})")
+    # ---------------------------------------------------------------- the trip model and the amortized band ------------------------
+    R = T6_CANON32 - D32; am = [amort6(D32, R, p) for p in P_TRIP6]
+    print(f"[R6-amort] trip model T(p) = T0 + p R: R = canonical - trip-free = {T6_CANON32} - {D32} = {R} ns per tripped step (the canonical profile retries ~100 % of steps, "
+          f"{TRIPS6[1]} trips; R = guard-off - {T6_OFF32 - R}: one whole-step re-run costs less than a guard-off step); at p = 0.087 / 0.22 % of steps: {am[0]} / {am[1]} ns "
+          f"-> {us1(am[0])} / {us1(am[1])} us = the quoted band {us1(T6_AMORT32[0])}-{us1(T6_AMORT32[1])} (reproduced to the displayed 0.1 us: the band is an amortization of the two MEASURED cells, not a third measurement); G {t10(rateT(32768 * KV_TOK, T6_AMORT32[0]))} / "
+          f"{t10(rateT(32768 * KV_TOK, T6_AMORT32[1]))} GB/s; the trips add +{T6_AMORT32[0] - D32}-{T6_AMORT32[1] - D32} ns = {h2(pctH6(T6_AMORT32[0] - D32, D32))}-{h2(pctH6(T6_AMORT32[1] - D32, D32))}% of the cell; each 1 % of tripped steps costs R / 100 = {R // 100} ns "
+          f"({h2(pctH6(R // 100, D32))}% of the cell)")
+    R1 = CANON1M6 - D1M; am1 = [amort6(D1M, R1, p) for p in P_TRIP6]
+    print(f"[R6-amort-1M] at 1M with the measured adversarial cell ({CANON1M6} ns, quoted 56.0 ms): R = {R1} ns; IF the 32k trip-rate premise transfers (the rate per (model, L) is "
+          f"UNMEASURED: E35's model half): {am1[0]}-{am1[1]} ns = {t10(rateT((1 << 20) * KV_TOK, am1[0]))}-{t10(rateT((1 << 20) * KV_TOK, am1[1]))} GB/s "
+          f"(+{h2(pctH6(am1[0] - D1M, D1M))}-{h2(pctH6(am1[1] - D1M, D1M))}%): trips stay ~free at 1M")
+    p32 = max(p for p in range(100_001) if 100_000 * D32 + p * R < 100_000 * T6_LEG32)
+    p1m = max(p for p in range(100_001) if 100_000 * D1M + p * R1 < 100_000 * LEG1M6)
+    print(f"[R6-trip-breakeven] the deferred guard beats the legacy scan iff its trip rate p (per 1e5 steps) <= {p32} at 32k ({p5(p32)} %: 100 000 x {D32} + p x {R} < 100 000 x {T6_LEG32}) "
+          f"and <= {p1m} at 1M ({p5(p1m)} %, against the quoted 46.3 ms); the premise (<= 0.22 %) is {p32 // 220}x inside at 32k")
+    print(f"[R6-adversarial] the canonical adversarial profile (an upper bound, never the fleet cell): 32k {T6_CANON32} ns = {t10(rateT(32768 * KV_TOK, T6_CANON32))} GB/s vs the legacy {T6_LEG32} "
+          f"({spct(T6_CANON32, T6_LEG32)}, +{T6_CANON32 - T6_LEG32} ns); 1M {CANON1M6} = {t10(rateT((1 << 20) * KV_TOK, CANON1M6))} GB/s vs {LEG1M6} ({spct(CANON1M6, LEG1M6)}, +{CANON1M6 - LEG1M6} ns): "
+          f"the gap grows with L ({us1(T6_CANON32 - T6_LEG32)} us -> {(CANON1M6 - LEG1M6) // 1_000_000}.{((CANON1M6 - LEG1M6) // 10_000) % 100:02d} ms; no lazy switch amortizes the re-run)")
+    # ---------------------------------------------------------------- the session-5 base, the fold, E39, E35 ----------------------
+    r4 = step4(32768, 1, g256, "lazy", "T")[0]
+    print(f"[R6-base] the session-5 base at 32k t = 1 (guard-off {t10(rateT(32768 * KV_TOK, T6_OFF32))} GB/s, legacy {t10(rateT(32768 * KV_TOK, T6_LEG32))} GB/s): guard-off {T6_OFF32} vs session 3's unguarded {T5_UNG}: -{T5_UNG - T6_OFF32} ns ({spct(T6_OFF32, T5_UNG)}); legacy {T6_LEG32} vs "
+          f"session 3's guarded {T5[1][1]}: +{T6_LEG32 - T5[1][1]} ({spct(T6_LEG32, T5[1][1])}) -- the A/B control reproduces session 3; against the round-4 legs-2 cell {r4}: guard-off "
+          f"{spct(T6_OFF32, r4)} (session 3's unguarded: {spct(T5_UNG, r4)}), inside the {t10(MATCH5)} % line; the session-5 phases are not re-timed (the term split is UNMEASURED)")
+    print(f"[R6-fold] at 32k: legacy - guard-off = {T6_LEG32 - T6_OFF32} ns (the scan on the session-5 base; session 3: {T5[1][1] - T5_UNG} on its own); deferred - guard-off = {FOLD6} ns "
+          f"(fold + end-of-step read = {t10(pct(FOLD6, T6_OFF32))}% of guard-off; split UNMEASURED); the deferred guard removes {T6_LEG32 - D32} ns = {t10(pct(T6_LEG32 - D32, T6_LEG32 - T6_OFF32))}% "
+          f"of the scan's cost trip-free ({T6_LEG32 - T6_AMORT32[1]}-{T6_LEG32 - T6_AMORT32[0]} amortized); quoted: HW-MAP's '-558 us at real rates' ({WIN6_Q}: {T6_LEG32 - T6_AMORT32[1] - WIN6_Q}-"
+          f"{T6_LEG32 - T6_AMORT32[0] - WIN6_Q} ns below the cell differences) and PROMPT-3R6's 'the fold costs -59 us vs the scan (one pass)' ({FOLD6_Q}; the one-pass cell difference is {T6_LEG32 - D32}, "
+          f"{t10(x10r(T6_LEG32 - D32, FOLD6_Q))}x it) -- neither reproduces from the quoted cells; both are carried as given and no cell uses them")
+    f5 = fused5(32768)
+    print(f"[R6-e39] E39 RESOLVED by measurement: the round-5 batched-guard target (unguarded {T5_UNG} + one 20 us crossing = {f5} ns = {t10(rateT(32768 * KV_TOK, f5))} GB/s) vs the shipped deferred "
+          f"guard: {D32} trip-free ({spct(D32, f5)}), {T6_AMORT32[0]}-{T6_AMORT32[1]} amortized ({spct(T6_AMORT32[1], f5)} at worst); round 5's residual X (against {T5_UNG}) = {D32 - T5_UNG} trip-free, "
+          f"{T6_AMORT32[0] - T5_UNG}-{T6_AMORT32[1] - T5_UNG} amortized (DESIGN-4's line: X <= 8 279); against its own base the residual is {FOLD6} ns = {t10(x10r(FOLD6, C5_X[1]))}x the 20 us band top, "
+          f"between the crossing-only {C5_X[1]} and the crossing + side-product {C5_X[1] + SIDE5 // 3} at the measured softmax rate: the target is met because the base moved -{T5_UNG - T6_OFF32} ns "
+          f"-- a net of two terms (residual +{FOLD6 - C5_X[1]} over the modelled crossing, base -{T5_UNG - T6_OFF32})")
+    print(f"[R6-e35] E35's device half CLOSED: zero scalar ops per block on the common path (the vector fold); the deferred guard costs {FOLD6} ns per step over guard-off; a trip costs R = {R} ns "
+          f"(one whole-step re-run), amortized +{T6_AMORT32[0] - D32}-{T6_AMORT32[1] - D32} ns at the premise (M; the model gives +{am[0] - D32}-{am[1] - D32}); the deferred guard beats the legacy scan at every trip rate <= {p5(p32)} % (32k) / {p5(p1m)} % (1M). "
+          f"Open (model half): the trip rate per (model, L) at mu = 8, beta = 3, and at mu = 0 (KV-int8)")
+    e8, e802 = math.exp(MU6), math.exp(PLANT6[1])
+    print(f"[R6-fold-bound] the fold at the +8 bound: e^8 = {e8:.1f} < cap {CAP6} = 3 x 2^10 (f16-exact) -- an untripped lane (P <= e^8) never clamps; planted 8.02: e^8.02 = {e802:.1f} < {CAP6} "
+          f"(the cap binds from ln {CAP6} = {math.log(CAP6):.4f}): the planted lane trips (8.02 > 8) with the cap not yet binding; planted 8.0 = the bound itself: 0 trips (the guard is inclusive); "
+          f"integer check: 2.7183^8 = {27183 ** 8 // 10 ** 31 // 10}.{(27183 ** 8 // 10 ** 31) % 10} < 3072 and 2.7183^8 x 50/49 = {(27183 ** 8 * 50 * 100 // 49 // 10 ** 32 + 5) // 100}.{((27183 ** 8 * 50 * 100 // 49 // 10 ** 32 + 5) // 10) % 10} < 3072 "
+          f"(given e < 2.7183 and e^0.02 <= 1/(1 - 0.02))")
+    # ---------------------------------------------------------------- the per-block rule tested, the fractions, MoE 128k ----------
+    pb = [(T5[1][LS5.index(L)] - T6_DFR[L]) // nb5(L) for L in (32768, 131072, 1 << 20)]
+    s1, s2 = (D128 - D32) // 192, (D1M - D128) // 1792; ic = D32 - 64 * s1; ex = ic + 2048 * s1
+    print(f"[R6-perblock] legacy (M, session 3) - deferred (M, session 5) per block: {pb[0]} / {pb[1]} / {pb[2]} ns at 32k / 128k / 1M (mixed sessions) vs round 5's per-block guard "
+          f"{guard5(32768) // NB32} at every L; the deferred kernel's chord slopes {s1} (32k-128k) / {s2} (128k-1M) ns per block, intercept {ic} ns per step (the 1M cell sits {D1M - ex} ns = "
+          f"{t10(pct(D1M - ex, ex))}% above the 32k-128k chord); the round-5 off-32k readings sit under the measured cells: fused {spct(D128, fused5(131072))} / {spct(D1M, fused5(1 << 20))}, unguarded "
+          f"{spct(D128, ung5(131072))} / {spct(D1M, ung5(1 << 20))} at 128k / 1M -- the per-block rule over-charged the legacy guard off 32k (its 32k reading: {spct(D32, f5)})")
+    print(f"[R6-gemv] x GEMV (398 us unit), MEASURED deferred: {t10(pct(D32, T_GEMV))} / {t10(pct(D128, T_GEMV))} / {t10(pct(D1M, T_GEMV))}% at 32k / 128k / 1M (guarded session 3: "
+          f"{t10(pct(T5[1][1], T_GEMV))} / {t10(pct(T5[1][2], T_GEMV))} / {t10(pct(T5[1][3], T_GEMV))}%); per DESIGN-4 layer: MoE ({T_LAYER_MOE} ns) {t10(pct(D32, T_LAYER_MOE))} / "
+          f"{t10(pct(D128, T_LAYER_MOE))} / {t10(pct(D1M, T_LAYER_MOE))}%, dense ({T_LAYER_DENSE} ns) {t10(pct(D32, T_LAYER_DENSE))} / {t10(pct(D128, T_LAYER_DENSE))}% (dense 1M runs KV-int8 only); "
+          f"against the round-4 legs-2 cells {', '.join(str(step4(L, 1, g256, 'lazy', 'T')[0]) for L in (32768, 131072, 1 << 20))}: "
+          f"{' / '.join(spct(T6_DFR[L], step4(L, 1, g256, 'lazy', 'T')[0]) for L in (32768, 131072, 1 << 20))}")
+    kv128 = 131072 * KV_TOK
+    print(f"[R6-fleet-moe-128k] DESIGN-4's MoE-128k layer on the measured deferred kernel: {D128} vs {T_LAYER_MOE} (anchored): +{D128 - T_LAYER_MOE} ns = {t10(pct(D128 - T_LAYER_MOE, T_LAYER_MOE))}%; "
+          f"vs {T_LAYER_MOE_DIRECT} (direct path): +{D128 - T_LAYER_MOE_DIRECT} = {t10(pct(D128 - T_LAYER_MOE_DIRECT, T_LAYER_MOE_DIRECT))}%; G {t10(rateT(kv128, D128))} against the effective-rate lines "
+          f"{t10(kv128 * 10 // T_LAYER_MOE)} (anchored) / {t10(kv128 * 10 // T_LAYER_MOE_DIRECT)} (direct): attention-bound on both; even the E40 floor F1 {floorF1(131072)} is "
+          f"+{floorF1(131072) - T_LAYER_MOE} = {t10(pct(floorF1(131072) - T_LAYER_MOE, T_LAYER_MOE))}% over the anchored layer")
+    # ---------------------------------------------------------------- the two numerics classes ------------------------------------
+    print(f"[R6-numerics-subnormal] the 1M canonical bad-{BAD6_CANON1M} (MEASURED; adversarial profile only): f16 normals end at 2^-14 = 1/{2 ** 14} (ln {math.log(2.0 ** -14):.3f}); below it the "
+          f"spacing is 2^-24 = 1/{2 ** 24}, so a value's relative granularity reaches 1 % at P <= 100 x 2^-24 = 1/{2 ** 24 // 100} (ln {math.log(100 / 2 ** 24):.2f}) -- a row whose whole surviving "
+          f"mass sits there after the global-m retry's shift is quantised at ~1e-2; the exact P path at 1M = {LANES6_1M} lanes (1 048 576 x rows 8), 100.00 % exact; no fleet cell runs the "
+          f"adversarial profile -- disposition: a documented class, no kernel change")
+    print(f"[R6-numerics-verify] the random-profile out-verify floor (MEASURED): bad {BAD6_RAND[0]} at 32k / {BAD6_RAND[1]} at 1M, the SAME for deferred = legacy = guard-off -- the guard path "
+          f"contributes none of them; the worst lanes have near-zero expected values: a verification-methodology class (a relative tolerance on near-zero wants), not a kernel defect -- "
+          f"disposition: fix the checker's tolerance, not the kernel")
+    # ---------------------------------------------------------------- E40 on the measured cells, the moved cells -------------------
+    e40 = [(T6_DFR[L] - floorF1(L), T6_DFR[L] - floorF2(L, g256)) for L in (32768, 131072, 1 << 20)]
+    print(f"[R6-e40] post-fusion the stage overlap (E40, section 5.1) is the attention-side #1 lever (DESIGN-4 round 6 ranks it): its bound on the measured cells is PROMPT-6's -- "
+          f"32k {e40[0][0]} / {e40[0][1]}, 128k {e40[1][0]} / {e40[1][1]}, 1M {e40[2][0]} / {e40[2][1]} ns (F1 / F2, free end read, phi = 0); on the amortized 32k cell "
+          f"+{T6_AMORT32[0] - D32}-{T6_AMORT32[1] - D32} ns more (the re-run is serial: E40 does not overlap it); gated on phi (E40a); "
+          f"session 3's K+V stream phase ({STREAM5} ns) is {t10(pct(STREAM5, D32))}% of the deferred cell (round 5 unguarded: {t10(pct(STREAM5, T5_UNG))}%)")
+    print(f"[R6-moved] round 5 -> round 6: fused 32k {f5} (D target, E39) -> {D32} trip-free / {T6_AMORT32[0]}-{T6_AMORT32[1]} amortized (M); 128k {fused5(131072)} (D) -> {D128} (M); "
+          f"1M {fused5(1 << 20)} (D) -> {D1M} (M); E39 UNMEASURED -> RESOLVED (M); E35's device half RESOLVED -> CLOSED; the guarded column -> the legacy A/B control ({T6_LEG32} at session 5)")
+
+if __name__ == "__main__":
+    main6()

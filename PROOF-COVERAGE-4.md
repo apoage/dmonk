@@ -502,3 +502,70 @@ clean; 0 axioms / sorry / native_decide — all 4 depend on no axiom). Generated
 | PA4-4 | the placements without a number: x_q in 2 × 32 KiB legs for rows ≥ 2 (#25); bounce removal conditional on an unproven US → S1 route (#20); the V2 protocol (#31 / #26 / #30 / #18 / #28 / #22); the router top-k (#31 / #26); E38 at rows > 1 (#29 / #31); the E33 fallback (#22 / #31 / #20); the guarded column and E39 OBSOLESCENT by the measured deferred guard (round 6 folds it) | — | — | DEFINITION (no cell; ERRATA-IMPACT.md) |
 
 **Coverage, PROMPT-6:** 4 / 4 rows resolved; every `T6f_*` theorem is cited; **0 orphans**. The round-2 … round-5 ledgers above are unchanged.
+
+
+## Round 6 (2026-11-08) — the MEASURED deferred-guard cells are the planner's attention term (PROMPT-3R6; kernel session 5, HW-MAP 3928d0e)
+
+**What this section is.** `proof/fleet.lean` gains a round-6 section after the PROMPT-6 audit: namespace `Measured6F` (the trip-free cells
+945 500 / 3 618 800 / 28 694 000 ns, the amortized 946 300 / 947 400 at 32k, the session-5 legacy 1 514 900 — duplicated from
+`proof/attn.lean`'s `Audit6`, which the fleet file cannot import standalone), namespace `Design6F` (`floorF1F`, `floorF2F` — E40's floors at
+the fleet level — and `rateTF`), and 20 theorems. Every round-6 number DESIGN-4 quotes was first printed by `proof/fleet.py` (`[R6-*]`) and
+then fixed by a theorem generated from the script's own values (scratch `gen_fleet6.py`). The rounds-2 … 5 and PROMPT-6 parts of the file
+are byte-identical (the diff is the appended section).
+
+| Item | Result |
+|---|---|
+| `lean proof/fleet.lean` standalone | **succeeds**, 0 errors, 0 warnings, ≈ 45 s |
+| `cd proof && lake build` | **succeeds** (all six targets) |
+| Theorems in fleet.lean | **334** = 314 (rounds 2–5 + PROMPT-6, unchanged) + **20** round 6 (`T6r_*`) |
+| `axiom` / `sorry` / `native_decide` | 0 / 0 / 0. `#print axioms` over the 20: 13 depend on no axiom, 7 on `propext` + `Quot.sound` only |
+| `decide +kernel` | 2 new (`T6r_spec6_thresholds`, `T6r_spec_dense_thresholds`: 1 001-case α iffs, the round-3 pattern) |
+| `python3 -I proof/fleet.py` | the first 676 output lines **byte-identical**; + 36 lines (34 `[R6-*]` labels); `proof/alt.py` output unchanged |
+| Ledger | **14 / 14 rows resolved** (F6-1 … F6-14), **0 orphans** |
+
+**Inputs (MEASURED, kernel session 5; DESIGN-3 §6.0′ and its ledger rows R6-1 … R6-20):** the trip-free per-layer cells at 32k / 128k / 1M,
+the amortized band at 32k (an amortization of the trip-free and canonical cells, reproduced in DESIGN-3's T6r_amort), the session-5 legacy
+scan at 32k. Carried unchanged from round 5: the guarded (legacy, session 3) cells, the bounce, the stream phase, the step form.
+
+### Corrections and moves (round 5 / PROMPT-6 → round 6)
+
+| # | Claim before | Now | theorem / label |
+|---|---|---|---|
+| 1 | the attention term = round 5's readings (fused 958 800 / 3 573 700 / 27 940 000 ns, D): MoE 32k 1.750, 128k 1.157, 1M 0.278; dense 32k 0.103, 128k 0.091 | the MEASURED deferred cells: **MoE 32k 1.755 trip-free / 1.754 amortized, 128k 1.150, 1M 0.271; dense 32k 0.104, 128k 0.091** (the 128k / 1M cells 1.3 / 2.7 % slower per layer than the readings) | `T6r_attn6`, `T6r_step6_cells`; `[R6-attn-*]`, `[R6-step-*]` |
+| 2 | MoE 32k: guard fusion outranks E29 iff the fused kernel's residual X ≤ 8 279 ns (E39 UNMEASURED) | **a tie ON the line**: ∀ T, fusion > E29 iff T ≤ 947 079 ns (141.7 GB/s, round 5's basis) / 948 379 (141.5, the session-5 legacy); the measured readings straddle the first line (+44 240 / +21 840 / −8 960 ns per token) and sit inside the second | `T6r_tie32k` (∀ T), `T6r_tie32k_cells`; `[R6-tie-32k-*]` |
+| 3 | MoE 128k / 1M: guard fusion first (per-block guard reading) | the realized fusion **3.9× / 31.1× E29**; tie lines 101.6 / 93.9 GB/s against the measured 148.4 / 149.7 — attention wins outright | `T6r_tie_lines` (∀ T), `T6r_tie_lines_cells`, `T6r_realized` |
+| 4 | the lever ranking (round 5): guard fusion first from 32 785–33 297 tokens, E29 first below, E40 ≤ 3.27 / 7.46 / 45.42, bounce last except MoE 1M | post-fusion: **E40 the attention-side #1 on every cell (bound, gated on φ; above the bounce at both ends of its bracket); E29 > E40 > bounce at MoE 32k / 128k; E40 > bounce > E29 at MoE 1M; E40 > bounce on dense; MoE 4k: E29 first for every deferred 4k cell ≤ 213 500 ns** | `T6r_levers6`, `T6r_levers_moe4k` (∀ T); `[R6-levers-*]` |
+| 5 | T_spec_moe_loss: MoE loses iff α ≤ 0.807 (guarded) / 0.854 / 0.853 | **α ≤ 0.854 on every deferred reading** (the line moves 0.807 → 0.854) | `T6r_spec6_steps`, `T6r_spec6_thresholds` (∀ α) |
+| 6 | dense spec 0.211, breakeven α ≥ 0.179 (the legacy verify paired with the legacy t = 1) | the dense verify v on the deferred kernel is UNMEASURED: **T₄(v) = 2 356 301 528 + 120 v; spec beats t = 1 at α = 0.7 iff v ≤ 31 092 727 ns**; cells 0.225 / 0.229 / 0.211 with breakevens 0.146 / 0.130 / 0.201 (fragment-serial / ratio-scaled / the legacy verify) | `T6r_spec_dense_form` (∀ v), `T6r_spec_dense_line` (∀ v), `T6r_spec_dense_cells`, `T6r_spec_dense_thresholds` (∀ α) |
+| 7 | MoE-128k attention-bound by 11.4 % (fused reading) | **by 12.8 % on the measured cell** (37.0 % direct); 148.4 GB/s under both G_eff lines; E40's floor still +2.5 % | `T6r_moe128k6`, `T6r_moe128k6_eff` |
+| 8 | B = 16: 2.240 (fused reading); two instances (PROMPT-6 V3 merge) fused 3.567 / 3.495, dense 0.149 / 0.140 | **B = 16 2.247**; instances **MoE 3.576 / 3.504** (c ≥ 0.978 / 0.998), dense 0.149 / 0.140 (c ≥ 1.402 / 1.483) | `T6r_B16_6`, `T6r_inst6`, `T6r_inst6_c` (∀ c) |
+
+### The round-6 ledger (DESIGN-4.md round-6 blocks: banner, §0‴, §3.7, §4.5, §6.6, §8 / §9 rows, §10‴, Appendix A‴)
+
+| # | claim | theorem(s) in `proof/fleet.lean` | fleet.py | status |
+|---|---|---|---|---|
+| F6-1 | per-layer attention, t = 1: 945 500 (142.0 GB/s) trip-free and 946 300 / 947 400 (141.8 / 141.7) amortized at 32k, 3 618 800 (148.4) at 128k, 28 694 000 (149.7) at 1M; against round 5's fused readings −1.4 / +1.3 / +2.7 %; 4k not measured (round 5's readings stay) | `T6r_attn6` | [R6-attn-*] | INPUT + PROVED |
+| F6-2 | the cells: dense 32k 2 403.24 ms → 0.104 (amortized 0.104 / 0.104), dense 128k 2 724.04 → 0.091; MoE 32k 142.43 → 1.755 (amortized 1.754 / 1.754), 128k 217.28 → 1.150, 1M 919.38 → 0.271; MoE 32k and every dense cell W-bound, MoE 128k / 1M ATTN-bound (46.6 / 87.4 % of the step) | `T6r_step6_cells` (instances of `T5r_step_form`, ∀ a) | [R6-step-*], [R6-headline-*] | PROVED |
+| F6-3 | MoE 128k: +411 081 ns = 12.8 % (anchored), +977 601 = 37.0 % (direct); the step ATTN 101.32 vs W 92.82 ms; 148.4 GB/s ≤ the G_eff lines 167.3 / 203.2; E40's floor F1 = 3 287 200 > the layer (+2.5 %) | `T6r_moe128k6`, `T6r_moe128k6_eff` (instance of `T5r_moe128k_tie_measured`, ∀ G) | [R6-moe-128k] | PROVED |
+| F6-4 | ∀ T ≤ 1 513 600: fusion (legacy → T) > E29 iff T ≤ 947 079 (round 5's basis) and iff T ≤ 948 379 (the session-5 legacy) | `T6r_tie32k` (∀ T) | [R6-tie-32k-s3], [R6-tie-32k-s5] | PROVED ∀ T |
+| F6-5 | the 32k readings on the line: 15 906 800 / 15 884 400 / 15 853 600 ns per token against E29 15 862 560 (+44 240 / +21 840 / −8 960 = 0.28 / 0.14 / −0.06 %); on the session-5 legacy +80 640 / +58 240 / +27 440 (0.51 / 0.37 / 0.17 %); the lines = 141.7 / 141.5 GB/s | `T6r_tie32k_cells` | [R6-tie-32k-*] | PROVED — **the 32k rank is a TIE** |
+| F6-6 | ∀ T: 128k fusion > E29 iff T ≤ 5 286 379 (101.6 GB/s), 1M iff T ≤ 45 747 079 (93.9); the measured cells 1 667 579 / 17 053 079 ns per layer inside; the realized fusion 62 554 800 / 493 348 800 ns per token > 3 / 31 × E29 | `T6r_tie_lines` (∀ T), `T6r_tie_lines_cells` | [R6-tie-128k], [R6-tie-1M] | PROVED ∀ T |
+| F6-7 | the fusion banked per token: dense 68 172 000 / 268 092 000 ns, MoE 15 906 800 / 62 554 800 / 493 348 800; amortized at 32k dense 67 944 000–68 076 000, MoE 15 853 600–15 884 400; on the session-5 legacy 68 328 000 / 15 943 200 | `T6r_realized` | [R6-realized-*] | PROVED |
+| F6-8 | the post-fusion ranking with E40 bracketed (F2 + a 20 µs read .. F1 + a free read): MoE 32k E29 15 862 560 > E40 ≤ 3 463 600 (≥ 2 275 952) > bounce 1 428 000; 128k E29 > E40 ≤ 9 284 800 (≥ 6 214 208) > bounce 5 712 000; 1M E40 ≤ 67 099 200 (≥ 46 454 464) > bounce 45 696 000 > E29; dense 32k E40 ≤ 14 844 000 (≥ 9 754 080) > bounce 6 120 000; dense 128k E40 ≤ 39 792 000 (≥ 26 632 320) > bounce 24 480 000 — each order at both ends | `T6r_levers6` | [R6-levers-*] | PROVED (E40: a bound — reaching it EMPIRICAL, E40a / E40b; the bounce removal needs an unproven US → S1 route, #20) |
+| F6-9 | MoE 4k, ∀ T ≤ 213 500: 28 (T − F1) < E29, 28 (T − F2) < E29, 28 × bounce < E29 (E40 ≤ 3.10 ms, bounce 0.17 ms) | `T6r_levers_moe4k` (∀ T) | [R6-levers-moe-4k] | PROVED ∀ T (the deferred 4k cell: UNMEASURED) |
+| F6-10 | MoE spec (verify = the t = 1 kernel, D transfer) on the three deferred readings: T₄ / T₁ = 456 819 203 / 142 430 899 ns (and the amortized pairs); 1.386 at α = 0.7; loses iff α ≤ 0.854 on every reading | `T6r_spec6_steps`, `T6r_spec6_thresholds` (∀ α) | [R6-spec-moe-loss-*] | PROVED ∀ α — **T_spec_moe_loss survives, line 0.807 → 0.854** |
+| F6-11 | dense spec, ∀ v: T₄(v) = 2 356 301 528 + 120 v; beats t = 1 (2 403 248 669 ns) at α = 0.7 iff v ≤ 31 092 727 (32.8× the t = 1 cell) | `T6r_spec_dense_form` (∀ v), `T6r_spec_dense_line` (∀ v) | [R6-spec-dense-form] | PROVED ∀ v (v on the deferred kernel: **UNMEASURED** — E41) |
+| F6-12 | dense spec cells: v = 3 782 000 → 2 810.14 ms → 0.225 (α ≥ 0.146); 3 355 007 → 0.229 (α ≥ 0.130); 5 370 850 (the legacy verify, M) → 0.211 (α ≥ 0.201) | `T6r_spec_dense_cells`, `T6r_spec_dense_thresholds` (∀ α) | [R6-spec-dense-*] | PROVED (the two D readings of v: transfers, not measurements) |
+| F6-13 | MoE B = 16 (uniform): 1 779 534 803 ns → 2.247 trip-free; 2.246 amortized-hi (round 5 1.966 / 2.251 / 2.240) | `T6r_B16_6` | [R6-B16-moe-32k-*] | PROVED (D(16): EMPIRICAL — H9) |
+| F6-14 | two instances (V3 with the erratum-#19 merge, c = 1.990): MoE 139 096 935 ns → 3.576 (T) / 141 971 051 → 3.504 (C), needs c ≥ 0.978 / 0.998 (0.977 / 0.998 amortized-hi); dense 0.149 (T, c ≥ 1.402) / 0.140 (C, c ≥ 1.483) | `T6r_inst6`, `T6r_inst6_c` (∀ c) | [R6-inst-*] | PROVED ∀ c (H10 hypothesis variable) |
+
+**Hypothesis variables carried, round 6:** the per-layer attention a (unchanged role; now MEASURED at 32k / 128k / 1M), the per-layer cell T
+of the tie theorems (∀ T), the dense verify attention v (∀ v; E41), the acceptance α, the concurrency c (H10), the deferred 4k cell (∀ T ≤
+the guarded 213 500). Resolved: E39's residual X (the fused cells are MEASURED). Unchanged: λ, the expert regime, the int4 share x and the
+overhead `ort`, c_sync, the popularity family. **T_min_dies is untouched** (no attention term enters it).
+
+**Coverage, round 6:** 14 / 14 rows resolved — 14 PROVED (7 universally quantified over T, α, v or c; F6-8's E40 entries are bounds);
+**0 orphans** — every `T6r_*` theorem of fleet.lean is cited in F6-1 … F6-14 (T6r_attn6, T6r_step6_cells, T6r_moe128k6, T6r_moe128k6_eff,
+T6r_tie32k, T6r_tie32k_cells, T6r_tie_lines, T6r_tie_lines_cells, T6r_realized, T6r_levers6, T6r_levers_moe4k, T6r_spec6_steps,
+T6r_spec6_thresholds, T6r_spec_dense_form, T6r_spec_dense_line, T6r_spec_dense_cells, T6r_spec_dense_thresholds, T6r_B16_6, T6r_inst6,
+T6r_inst6_c), every `[R6-*]` label family of fleet.py is cited. The round-2 … round-5 and PROMPT-6 ledgers above are unchanged.

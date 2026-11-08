@@ -1423,3 +1423,134 @@ def main_pa():
 
 if __name__ == "__main__":
     main_pa()
+
+
+# =====================================================================================================================================
+# ROUND 6 (PROMPT-3R6, 2026-11-08) — the MEASURED deferred-guard cells ARE the fleet's attention term now (kernel session 5, HW-MAP
+# 3928d0e; proof/attn.py [R6-*] carries the inputs and the kernel-side readings). Per-layer attention at t = 1 (both shapes run mt = 1,
+# the measured kernel's shape): 945 500 ns trip-free at 32k (946 300-947 400 amortized at the real trip-rate premise — an amortization of
+# the trip-free and canonical cells), 3 618 800 at 128k, 28 694 000 at 1M (trip-free; MEASURED). 4k: no deferred cell — the round-5
+# readings stay, and the 4k lever verdict is proved for every deferred 4k cell up to the guarded one. The guarded column of round 5 is
+# the legacy A/B control now. Post-fusion levers (Pi = 1, the step is a sum): E40 (stage overlap; the bound deferred - floor - end read of
+# DESIGN-3 section 5.1, bracketed F2 + a 20 us read .. F1 + a free read, gated on phi), bounce removal (the measured bounce scaled per
+# block; needs an unproven US -> S1 route, #20), E29 (the direct-path expert kernel, weights side, L-independent). Every label above keeps
+# printing its value; the [R6-*] labels below are the round-6 cells.
+# =====================================================================================================================================
+READ6 = ("trip-free", "amortized-lo", "amortized-hi")
+L6 = {"32k": 32768, "128k": 131072, "1M": 1 << 20}
+def a6(L, rd="trip-free"):
+    """per-layer attention, ns, t = 1: the MEASURED deferred-guard cells (amortized readings exist at 32k only)"""
+    if L == 32768 and rd == "amortized-lo": return A.T6_AMORT32[0]
+    if L == 32768 and rd == "amortized-hi": return A.T6_AMORT32[1]
+    return A.T6_DFR[L]
+def reads6(L): return READ6 if L == 32768 else READ6[:1]
+def e40_6(s, L):
+    """per-token bound of the stage overlap on the measured cell: (low, high) = (F2 floor + a 20 us end read, F1 floor + a free read)"""
+    g = A.G_SHUF[256 * KiB]; n = s["nL"]; T = a6(L)
+    return n * (T - A.floorF2(L, g) - 20_000), n * (T - A.floorF1(L))
+def tie_line6(Tg): return Tg - E29_MOE // 28 - 1       # the largest per-layer cell T with 28 (Tg - T) > E29 (E29 = 28 x 566 520 exactly)
+def d6(x): return f"{x}" if x < 0 else f"+{x}"
+def spct6(a, b): return ("+" if a >= b else "-") + t10(pct(abs(a - b), b)) + "%"   # round-half-up, as attn.py
+def h2_6(x): return f"{x // 100}.{x % 100:02d}"
+
+def main6():
+    D, M = DENSE, MOE
+    print("\n# ---- ROUND 6 (PROMPT-3R6, 2026-11-08; the MEASURED deferred-guard cells, kernel session 5): [R6-*] cells. Every label above unchanged ----")
+    # ------------------------------------------------------------ the per-layer attention (shape-independent at t = 1)
+    for lab, L in L6.items():
+        am = f" / {A.T6_AMORT32[0]}-{A.T6_AMORT32[1]} amortized (M; {t10(A.rateT(L * 4096, A.T6_AMORT32[0]))}-{t10(A.rateT(L * 4096, A.T6_AMORT32[1]))})" if L == 32768 else ""
+        print(f"[R6-attn-{lab}] t = 1 per layer (both shapes, mt = 1): deferred {a6(L)} ns trip-free (M; {t10(A.rateT(L * 4096, a6(L)))} GB/s){am}; round 5: guarded {a5(L, 'guarded')} "
+              f"(M; the legacy A/B control now) / unguarded {a5(L, 'unguarded')} / fused {a5(L, 'fused')} (the measured cell is {spct6(a6(L), a5(L, 'fused'))} against the fused reading); "
+              f"round 4 {attn4_seq(M, L, 1, 1692)[0]}")
+    # ------------------------------------------------------------ the step cells
+    for s in SHAPES:
+        for lab, L in L6.items():
+            if not feasible(s, L): continue
+            cells = []
+            for rd in reads6(L):
+                T, p = step5f(s, L, a6(L, rd)); v = tps_card(1000, T)
+                cells.append(f"{rd} {ms2(T)} ms -> {t3(v)} ({bind5(p)}; ATTN {ms2(p['ATTN'])} ms = {t10(pct(p['ATTN'], T))}%)")
+            r5 = " / ".join(t3(tps_card(1000, step5f(s, L, a5(L, rd))[0])) for rd in READ5)
+            print(f"[R6-step-{s['name']}-{lab}] t = 1 on the measured deferred kernel: " + "; ".join(cells) + f" | round 5 guarded / unguarded / fused {r5}; round 4 {t3(tps_card(1000, step4f(s, L)[0]))}")
+    for s in SHAPES:
+        hd = ", ".join(f"{rd} {t3(tps_card(1000, step5f(s, 32768, a6(32768, rd))[0]))}" for rd in READ6)
+        print(f"[R6-headline-{s['name']}] L = 32k, t = 1 tok/s/card on the measured deferred kernel: {hd} (round 5: guarded {t3(tps_card(1000, step5f(s, 32768, a5(32768, 'guarded'))[0]))} / "
+              f"unguarded {t3(tps_card(1000, step5f(s, 32768, a5(32768, 'unguarded'))[0]))} / fused {t3(tps_card(1000, step5f(s, 32768, a5(32768, 'fused'))[0]))}; round 4 {t3(tps_card(1000, step4f(s, 32768)[0]))})")
+    # ------------------------------------------------------------ MoE 128k: attention-bound on the measured cell
+    Twa, Twd = gemm3_ns(M, 1, "uniform", "anchor"), gemm3_ns(M, 1, "uniform", "direct_ser")
+    a = a6(131072); T, p = step5f(M, 131072, a); f1 = A.floorF1(131072)
+    print(f"[R6-moe-128k] MoE 128k on the measured deferred kernel: {a} ns per layer vs T_w {Twa} (anchored) / {Twd} (direct): ATTN by {t10(pct(a - Twa, Twa))}% / {t10(pct(a - Twd, Twd))}%; "
+          f"G {t10(A.rateT(131072 * 4096, a))} vs the effective-rate lines {131072 * 4096 * 10 // Twa} / {131072 * 4096 * 10 // Twd} tenths -> attention-bound on both kernels; step ATTN {ms2(p['ATTN'])} vs "
+          f"W {ms2(p['W'])} ms ({bind5(p)}); even E40's floor F1 {f1} exceeds the anchored layer by {t10(pct(f1 - Twa, Twa))}%")
+    # ------------------------------------------------------------ the 32k tie: the realized guard fusion against E29
+    for tag, nm, Tg in (("s3", "session-3 legacy, the round-5 basis", A.T5[1][1]), ("s5", "session-5 legacy, the same-session A/B control", A.T6_LEG32)):
+        Ts = tie_line6(Tg); assert E29_MOE < 28 * (Tg - Ts) and not E29_MOE < 28 * (Tg - Ts - 1)
+        ms = "; ".join(f"{rd} {a6(32768, rd)}: fusion {ms2(28 * (Tg - a6(32768, rd)))} ms, {d6(28 * (Tg - a6(32768, rd)) - E29_MOE)} ns per token "
+                       f"({'fusion' if 28 * (Tg - a6(32768, rd)) > E29_MOE else 'E29'} by {h2_6(pctH(abs(28 * (Tg - a6(32768, rd)) - E29_MOE), E29_MOE))}%)" for rd in READ6)
+        print(f"[R6-tie-32k-{tag}] MoE 32k, the realized guard fusion ({nm}: {Tg} -> the deferred cell) vs E29 ({ms2(E29_MOE)} ms per token): fusion >= E29 iff T <= {Ts} ns "
+              f"= {t10(A.rateT(32768 * 4096, Ts))} GB/s (for every T); {ms}")
+    for lab, L in (("128k", 131072), ("1M", 1 << 20)):
+        Tg = A.T5[1][A.LS5.index(L)]; Ts = tie_line6(Tg); fus = 28 * (Tg - a6(L))
+        print(f"[R6-tie-{lab}] MoE {lab}: fusion >= E29 iff T <= {Ts} ns = {t10(A.rateT(L * 4096, Ts))} GB/s (for every T); the measured {a6(L)} ({t10(A.rateT(L * 4096, a6(L)))} GB/s) is inside by "
+              f"{Ts - a6(L)} ns per layer: the realized fusion {ms2(fus)} ms vs E29 {ms2(E29_MOE)} ms ({t10(fus * 10 // E29_MOE)}x) -- attention wins outright")
+    # ------------------------------------------------------------ what the fusion banked, per token
+    for s in SHAPES:
+        cells = []
+        for lab, L in L6.items():
+            if not feasible(s, L): continue
+            Tg = A.T5[1][A.LS5.index(L)]
+            x = f"{lab} {ms2(s['nL'] * (Tg - a6(L)))}"
+            if L == 32768: x += f" (amortized {ms2(s['nL'] * (Tg - A.T6_AMORT32[1]))}-{ms2(s['nL'] * (Tg - A.T6_AMORT32[0]))}; on the session-5 legacy {ms2(s['nL'] * (A.T6_LEG32 - a6(L)))})"
+            cells.append(x)
+        print(f"[R6-realized-{s['name']}] the guard fusion banked per token (legacy, session 3 -> deferred, session 5; Pi = 1): " + ", ".join(cells) + " ms")
+    # ------------------------------------------------------------ the post-fusion lever ranking (T6r_levers)
+    for s in SHAPES:
+        for lab, L in L6.items():
+            if not feasible(s, L): continue
+            n = s["nL"]; lo, hi = e40_6(s, L); b = n * A.bounce5(L)
+            lv = {"E40 stage overlap (bound)": hi, "bounce removal": b}
+            if s["moe"]: lv["E29 direct-path experts"] = E29_MOE
+            order = sorted(lv.items(), key=lambda kv: -kv[1])
+            lo_ord = sorted({**lv, "E40 stage overlap (bound)": lo}.items(), key=lambda kv: -kv[1])
+            same = [k for k, _ in order] == [k for k, _ in lo_ord]; assert same
+            print(f"[R6-levers-{s['name']}-{lab}] post-fusion, per token (ms, Pi = 1): " + " > ".join(f"{k} {ms2(v)}" for k, v in order)
+                  + f" | E40 bracket {ms2(lo)}-{ms2(hi)} (F2 + a 20 us end read .. F1 + a free read; phi = 0): the order is the same at both ends; E40's low end exceeds the bounce removal by {ms2(lo - b)} ms")
+    f14 = A.floorF1(4096)
+    print(f"[R6-levers-moe-4k] MoE 4k (no deferred 4k cell): for EVERY deferred 4k cell T <= the guarded {A.T5[1][0]} ns, E40's bound 28 x (T - F1 {f14}) <= {ms2(28 * (A.T5[1][0] - f14))} ms "
+          f"and the bounce removal {ms2(28 * A.bounce5(4096))} ms stay under E29 {ms2(E29_MOE)} ms: E29 first on every reading")
+    # ------------------------------------------------------------ spec decode at the fused G (T6r_spec*)
+    for rd in READ6:
+        a1 = a6(32768, rd); T1m = step5f(M, 32768, a1)[0]; T4m = step5f(M, 32768, a1, 1, 4)[0]
+        amax = max(x for x in range(1001) if tau_milli(x) * T1m < 1000 * T4m)
+        assert all((tau_milli(x) * T1m < 1000 * T4m) == (x <= amax) for x in range(1001))
+        print(f"[R6-spec-moe-loss-{rd}] MoE spec k=3 (uniform, anchored; verify kernel = the t = 1 kernel, the round-5 D transfer) on the deferred cell {a1}: LOSES to t = 1 iff alpha <= {t3(amax)} "
+              f"(T4 / T1 = {ms2(T4m)} / {ms2(T1m)} ms; alpha 0.7 -> {t3(tps_card(tau_milli(700), T4m))} vs t = 1 {t3(tps_card(1000, T1m))}; round 5: 0.807 guarded / 0.854 unguarded / 0.853 fused)")
+    c4 = step5f(D, 32768, 0, 1, 4)[0]; T1d = step5f(D, 32768, a6(32768))[0]; t7 = tau_milli(700)
+    vmax = (t7 * T1d - 1000 * c4 - 1) // (1000 * 120)
+    assert 1000 * step5f(D, 32768, vmax, 1, 4)[0] < t7 * T1d and not 1000 * step5f(D, 32768, vmax + 1, 1, 4)[0] < t7 * T1d
+    print(f"[R6-spec-dense-form] dense spec k=3: the verify step is affine in the verify kernel's per-layer attention v (the deferred kernel at t >= 4 is UNMEASURED): T4(v) = {c4} + 120 v ns; "
+          f"at alpha = 0.7 it beats t = 1 on the deferred kernel ({ms2(T1d)} ms) iff v <= {vmax} ns per layer ({t10(vmax * 10 // a6(32768))}x the t = 1 cell) -- the dense spec decision holds for any plausible verify kernel")
+    for tag, nm, v in (("serial", "fragment-serial: 4 x the t = 1 deferred cell (D)", 4 * a6(32768)),
+                       ("scaled", "the legacy t = 16 half x deferred / legacy at t = 1 (D)", A.T5[16][1] // 2 * a6(32768) // A.T5[1][1]),
+                       ("legacy", "the legacy verify kernel, half the measured t = 16 cell (M, session 3)", A.T5[16][1] // 2)):
+        T4d = step5f(D, 32768, v, 1, 4)[0]
+        amin = min(x for x in range(1001) if 1000 * T4d < tau_milli(x) * T1d)
+        assert all((1000 * T4d < tau_milli(x) * T1d) == (x >= amin) for x in range(1001))
+        print(f"[R6-spec-dense-{tag}] v = {v} ns ({nm}): {ms2(T4d)} ms -> {t3(tps_card(t7, T4d))} at alpha 0.7 (t = 1 {t3(tps_card(1000, T1d))}); dense spec beats t = 1 iff alpha >= {t3(amin)}")
+    # ------------------------------------------------------------ B = 16 and the two-instance cells at the measured 32k cell
+    for rd in ("trip-free", "amortized-hi"):
+        T, p = step5f(M, 32768, a6(32768, rd), 16, 1)
+        print(f"[R6-B16-moe-32k-{rd}] MoE B = 16 (uniform) on the deferred cell {a6(32768, rd)}: {ms2(T)} ms -> {t3(tps_card(16000, T))} ({bind5(p)}; ATTN {ms2(p['ATTN'])} ms); "
+              f"round 5 guarded / unguarded / fused {' / '.join(t3(tps_card(16000, step5f(M, 32768, a5(32768, r), 16, 1)[0])) for r in READ5)}; round 4 {t3(tps_card(16000, step4f(M, 32768, 16, 1)[0]))}")
+    for s in SHAPES:
+        xs = [min_x(s, p, 32768) for p in range(4)]; a3 = attn3_seq(s, 32768, 1, 1692)[0]
+        cells = []
+        for conv, mg in zip(("T", "C"), MERGE6F):
+            Ti = inst_step3c(s, 32768, xs=xs, cold=T_SLAB_W4 + mg)[0]
+            for rd in ("trip-free", "amortized-hi"):
+                T = Ti - s["nL"] * a3 + s["nL"] * a6(32768, rd); one = tps_card(1000, step5f(s, 32768, a6(32768, rd))[0])
+                cells.append(f"{conv}/{rd} {ms2(T)} ms -> {t3(tps_inst_c(1000, H10_CARD, T))} vs one 8-die instance {t3(one)} (needs c >= {t3(c_min(T, one + 1))})")
+        print(f"[R6-inst-{s['name']}-32k] two 4-die instances (V3 with the erratum-#19 merge, x {xs}; H10's c = 1.990) on the deferred cell: " + "; ".join(cells))
+
+if __name__ == "__main__":
+    main6()
