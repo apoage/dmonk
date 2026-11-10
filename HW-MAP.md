@@ -260,6 +260,20 @@ inherit this — erratum #19).
     deterministic, the combination races. Ship only compositions of
     proven-deterministic components (the production answer: a vector-only
     fold + ONE end-of-step read + whole-step re-run on trip).
+32. **A test harness sharing the kernel's convention validates nothing
+    about that convention**: the attention kernel's causal boundary is
+    EXCLUSIVE-OF-SELF (row r attends [0, L−t+r) — the current token
+    excluded); the test reference implemented the same off-by-one, so every
+    causal matrix cell was self-consistent rather than true-causal. Caught
+    only when an external consumer (the serving loop) applied the
+    inclusive-of-current convention. Rule: references must be derived from
+    the SPEC independently of the implementation's arithmetic.
+33. **llama.cpp measurement traps (this tree)**: `llama-bench` tg cells run
+    at ~18-token context regardless of -p (INVALID for context claims);
+    a transposed-V cache path builds layouts the paged kernel cannot
+    consume (run the non-transposed/FA-style cache); failed builds leave
+    STALE binaries that still run — verify binary mtime + a trace line
+    after every rebuild.
 
 ## Concurrency & runtime behavior (all measured, season h)
 
@@ -302,7 +316,20 @@ inherit this — erratum #19).
   4: the guard's per-block scalar crossing is ELIMINATED on the common path
   (deferred guard — zero scalar ops/block, one end-of-step read, whole-step
   re-run on trip at the observed global max); the lazy switch is retired on
-  this path (needle profile now trips 3/re-switches 0).**
+  this path (needle profile now trips 3/re-switches 0).** **INTEGRATED
+  (serving-loop measurement): end-to-end decode on the 8 GEMV + attention
+  both-kernel stack = 1.31× / 1.80× / 2.00× vs the vendor attention path at
+  ~7.9k / ~23.2k / 31.4k true context (5.2 vs 2.6 tok/s at 31.4k); the
+  replaced vendor cluster = a per-layer f16 K^T/V pair + a 16 MB/layer
+  transposed-V materialization ≈ 9 ms/layer at 32k. Integrated
+  per-layer attention 0.51 ms at 7.9k (guard trips 1-4/step — the
+  license premise holds at production) / 1.45 ms at 23.2k (bridge overhead
+  150-250 µs/layer + retry share — the top follow-up lever). The target
+  model class (qk-norm present, GQA 32q/8kv, d=128) CONFIRMS the E35
+  premise; an MLA-class model (d=512, per-layer kv-head pattern, no
+  qk-norm) is OUTSIDE the kernel's contract and the license — a separate
+  design line. OPEN: the short-context regime (<512 tokens) is gated to
+  the vendor path (single-partial-block divergence, unlicensed cells).**
 - **Same-dst MMA chains: SPACING is the binding variable, not depth** —
   interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
   bidirectionally at depth >= 256 (filler results leak into chain chunks).
