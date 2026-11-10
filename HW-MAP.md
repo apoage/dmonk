@@ -206,7 +206,9 @@ inherit this — erratum #19).
     side). Address every L0 destination by explicit byte-offset tensor
     construction, never by view slicing.
 19. **f16 accumulation into one C chunk corrupts across ANY full pipe
-    barrier or A-operand re-lift** — broken at ≥ 2 accumulations, even
+    barrier or A-operand re-lift** (FIRMWARE-INVARIANT: an older firmware
+    reproduces the identical corruption ladder — same bad-counts, same
+    maxRel at every rung — silicon) — broken at ≥ 2 accumulations, even
     with interleave ≥ 16; a barrier-flag dance alone (no loads) breaks it.
     The i8 tuple tolerates the same pattern (the E21 probe: spacing-8,
     per-tile barriers, depth 8192, exact 20/20). **Consequence: f16
@@ -216,7 +218,7 @@ inherit this — erratum #19).
     (e.g. the ±Q difference branch of the attention drift design) is
     unimplementable on this tuple; fresh-per-block accumulation is
     drift-free by construction.
-20. **Vector SRAM → S1 A-slot plain copy is WRONG** (data changes but ≠
+20. **Vector SRAM → S1 A-slot plain copy is WRONG** (firmware-invariant — same 1-of-3-exact signature on the older firmware) (data changes but ≠
     source; 1-of-3 probe variants exact — cold-pipe-class). An A operand
     built in vector SRAM must ride a DDR bounce (vector out → DDR scratch
     → the proven DDR → S1 staging → loader lift).
@@ -274,6 +276,18 @@ inherit this — erratum #19).
     consume (run the non-transposed/FA-style cache); failed builds leave
     STALE binaries that still run — verify binary mtime + a trace line
     after every rebuild.
+
+**Firmware variants note (fleet A/B, 2026-11-10):** two other firmware
+generations were A/B'd against the reference on a second card: the entire
+errata list above behaves IDENTICALLY (same wrong values, same costs,
+same rates within 1.6 %) — every landmine here is silicon, not firmware.
+The oldest generation tested is COMPUTE-DEAD under the current host stack
+(compatibility NOK; runtime allocation and first launch hang silently on
+all dies; each attempt drives PCIe completer-abort storms — telemetry
+still shows "OK", only the compute plane is dead): old-firmware cards are
+indistinguishable from broken until their firmware is matched to the
+stack. Cross-firmware regression batteries must pin and record card
+identity per run — device enumeration order is NOT the PCIe order.
 
 ## Concurrency & runtime behavior (all measured, season h)
 
@@ -359,10 +373,14 @@ nesting (the zero-copy P·V premise), verified on the full pipeline:
 **MMA shape constraints (measured):** per-call **n caps at 16** — n=256
 silently computes only columns 0–15 (the (16,256,64) design tile is
 impossible; the working loop is a 16-chunk (16,16,128) sequence). k=32 and
-k=128 are correct; **k=64 is nondeterministically wrong** (32/128 reps
-exact — erratum #14) — **an i8×i8-tuple-ONLY anomaly: the f16×f16 sweep
-(128 reps/shape, one-hot k-probes covering every k position, all 8 cores
-redundant) is EXACT at every k ∈ {16,32,64,128}** — so the anomaly is
-neither fragment-count- nor element-count-based (i8-only; open, cause not
-isolated). f16 shapes are unrestricted. The align/init flags in the MMA parameter struct are
+k=128 are correct; **k=64 is wrong (DETERMINISTIC — corrected from
+"nondeterministic": 331 reps/firmware across three launch contexts never
+varied; the raw wrong integers are identical run-to-run) — erratum #14,
+FIRMWARE-INVARIANT (an older firmware reproduces the same wrong integers
+byte-for-byte: 199/199 shared sweep reps + 40/40 partial-product reps
+identical — SILICON, not a firmware bug)** — an i8×i8-tuple-ONLY anomaly:
+the f16×f16 sweep (128 reps/shape, one-hot k-probes covering every k
+position, all 8 cores redundant) is EXACT at every k ∈ {16,32,64,128}** —
+so the anomaly is neither fragment-count- nor element-count-based (i8-only;
+open, cause not isolated). f16 shapes are unrestricted. The align/init flags in the MMA parameter struct are
 ignored on this part.
