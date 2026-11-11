@@ -186,7 +186,15 @@ inherit this — erratum #19).
     the "never stabilizes" verification class) — raw buffer staging +
     full barriers. m=64 across the full 256 KB accumulator WORKS (the
     earlier "exactly-full" hang was an artifact of a 4-sweep structure).
-    k=64 matrix calls are nondeterministically wrong (32/128 exact).
+    k=64 i8 matrix calls are CORRECT (re-characterized by the k64x probe:
+    one-hot operand maps are the identity bijection, fp64-exact x20 at
+    k in {32,64,128}; the historical "k=64 wrong" verdicts traced to a
+    host-side dump-decode offset bug in the sweep reader — every verdict
+    except one cell read another core's dump. No k-shape is locked for
+    the i8 tuple. Caveat kept: a k=32 call ALWAYS consumes A columns
+    0..31 (A-operand offsets ignored), so d=64-as-two-k=32-halves needs
+    per-group A re-staging; a single k=64 call needs none and is 1.75x
+    the grouped two-halves form at matched choreography.)
 16. **Back-to-back same-destination MMA accumulate chains lose updates
     nondeterministically** (probe-pack season, live): a 1024-deep isBias chain
     into one L0C chunk kept ~50 % of its accumulations in one run and ~99 % in
@@ -396,14 +404,25 @@ nesting (the zero-copy P·V premise), verified on the full pipeline:
 **MMA shape constraints (measured):** per-call **n caps at 16** — n=256
 silently computes only columns 0–15 (the (16,256,64) design tile is
 impossible; the working loop is a 16-chunk (16,16,128) sequence). k=32 and
-k=128 are correct; **k=64 is wrong (DETERMINISTIC — corrected from
-"nondeterministic": 331 reps/firmware across three launch contexts never
-varied; the raw wrong integers are identical run-to-run) — erratum #14,
-FIRMWARE-INVARIANT (an older firmware reproduces the same wrong integers
-byte-for-byte: 199/199 shared sweep reps + 40/40 partial-product reps
-identical — SILICON, not a firmware bug)** — an i8×i8-tuple-ONLY anomaly:
-the f16×f16 sweep (128 reps/shape, one-hot k-probes covering every k
-position, all 8 cores redundant) is EXACT at every k ∈ {16,32,64,128}** —
-so the anomaly is neither fragment-count- nor element-count-based (i8-only;
-open, cause not isolated). f16 shapes are unrestricted. The align/init flags in the MMA parameter struct are
-ignored on this part.
+k=128 are correct; and **k=64 is CORRECT TOO — erratum #14 RETRACTED
+(k64x re-characterization): the "wrong k=64" evidence chain was a host-side
+dump-decode offset bug in the parameter-sweep reader (verdict slots decoded
+at 16 KB spacing while the kernel wrote 1 KB chunks — every cell except the
+first read another core's k=32 result on that core's own column slab). The
+observed determinism and the cross-firmware byte-identity were real
+measurements of that deterministic wrong read — both firmwares computed the
+same CORRECT product at the address actually fetched; the offline RNG
+replication reproduces the quoted "wrong integers" exactly from the
+correct-product model. On silicon (one-hot operand characterization through
+an owned dump path): the k=64 operand maps are the IDENTITY bijection
+(1024/1024 in-window bytes nominal, weight 1, nothing dropped/duplicated),
+the response is value-linear, and full random tiles verify fp64-exact x20
+at k ∈ {32,64,128}, all 8 cores byte-identical.** The f16×f16 sweep was
+already exact at every k ∈ {16,32,64,128}. No k-shape is locked on this
+part for either tuple. NEW caveat for two-halves decompositions: a k=32
+MMA call always consumes A columns 0..31 (A-operand offsets are ignored),
+so any split-k scheme must re-stage the A tile between half passes — at
+d=64, a single k=64 call avoids that machinery and measured 1.75x the
+grouped two-halves form at matched choreography (90.2 vs 51.4 GB/s on the
+1 KB-tile diagnostic stream). The align/init flags in the MMA parameter
+struct are ignored on this part.
