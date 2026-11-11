@@ -58,6 +58,10 @@ def cMma : Nat := 15
 def rVecCore : Nat := 432
 /-- HW-MAP data-movement table: ~91 µs launch + queue floor. ns. Enters WALL-CLOCK rows only. -/
 def tLaunch : Nat := 91000
+/-- HW-MAP realized-launch row: per-launch overhead as realized in the serving loop ≤ 36 µs (serving byte
+    accounting: 7.7 ms non-GEMM over ≥ 24 layers × ≥ 9 launches; empty-launch floor 17 µs). Wall-clock rows keep
+    the conservative 91 µs primary. ns. -/
+def tLaunchRealized : Nat := 36000
 /-- HW-MAP hierarchy table: L0A / L0B 64 KB each, L0C 256 KB (measured, raw-MMA probes). Bytes. -/
 def l0aCap : Nat := 65536
 def l0bCap : Nat := 65536

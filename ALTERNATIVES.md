@@ -96,6 +96,11 @@ format with the theorem each one becomes.
    a DDR-flag cross-core sync pays whenever a sync costs ≤ 109 µs (MoE) / 114 µs (dense) — a DDR round trip is µs
    class: MoE 32k +12.5 %, the draft token 18.1 → 9.3 ms (`[ALT-3-*]`). Combined with (2): MoE 32k +29.3 %;
    with (1) and (2): **+134 %** (`[ALT-2+3-moe-32k]`).
+   **Adjudicated (realized-launch bound)**: the serving byte accounting caps realized per-launch cost at
+   ≤ 36 µs (HW-MAP realized-launch row — a serialised 91 µs floor is incompatible with the measured 7.7 ms
+   non-GEMM share), so the launch-savings prize shrinks to **≤ 0.4 % dense / ≤ 2.7 % MoE** net of 20 µs
+   crossings (`T_alt_mega_savings_realized`); the family's case now rests on the measured sub-µs cross-core
+   sync, not on launch serialization, and launch-pipelining should be measured before the megakernel is built.
 4. **The production chain's f16 → i8 pass is RESOLVED (HW-MAP 0915e22, applied by the proof round)**: the cast
    exists (rint-half-even, saturating ±127) and the on-device pass measures 43.7 µs; charged four times per layer it
    costs **174.8 µs per layer = 0.9 % dense (0.105 → 0.104), 3.5 % MoE (1.867 → 1.801), +23 % on the draft**

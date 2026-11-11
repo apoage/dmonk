@@ -103,7 +103,8 @@
 > inputs this plan carried as assumptions or as PROBLEM-3 branches are now measured, and three partition variants are
 > first-class: (1) **the host bounce is 12.2 / 12.1 µs per direction** (bounce 23.8–24.6 µs, unchanged under a saturating
 > D2D load on die 0) — 7.5× below the 91 µs anchor round 2 borrowed from the kernel-launch floor, which is a *different*
-> quantity and stands at 91 µs; every λ-anchored cell is re-instantiated (T_x = 236 / 220 µs per token, 0.01 % / 0.16 % of
+> quantity and stands at 91 µs as the conservative primary (adjudicated: the serving byte accounting bounds the
+> REALIZED per-launch cost at ≤ 36 µs — HW-MAP realized-launch row; serialized-launch readings are upper bounds); every λ-anchored cell is re-instantiated (T_x = 236 / 220 µs per token, 0.01 % / 0.16 % of
 > the dense / MoE step; the T8 lines move to λ ≥ 16.6 ms / 960 µs for a 10 % share, 1 358× / 78× above the measurement).
 > (2) **The KV read rate is measured per page size** (E21: 169.2 GB/s at 256 KiB, 167.0 at 64 KiB shuffled, 153.8 at 16 KiB —
 > the attention choreography streams 3.2 % under the W8 kernel's 174.6) and **the softmax op set is measured** (E22), so the
