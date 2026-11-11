@@ -13,7 +13,13 @@ MMA(dstC, A, B, {m, n, k, initVal, alignK, ...})
 ```
 - Native fragment m=16; n and k take wider per-call values (library evidence:
   n=256, k=64 ran on this part — but that is library-internal, not a raw-MMA
-  proof; sweep it yourself, content-checking every shape).
+  proof; sweep it yourself, content-checking every shape). MEASURED (k64x
+  probe, owned dump path): raw i8 (16,16,k) is fp64-exact x20 at every
+  k ∈ {32,64,128} with identity operand maps — no k-shape locked. Per-call
+  n still caps at 16 (see HW-MAP), and a k=32 call always consumes A
+  columns 0..31 — validate any dump reader with a one-hot identity control
+  before trusting its verdicts (the original "k=64 wrong" was a reader
+  offset bug, not silicon).
 - `initVal`: first-k-tile zero-init vs accumulate — get it backwards and you
   keep only the last k-tile's product. A single-k-tile test CANNOT detect the
   inversion; always test with ≥2 k-tiles.
