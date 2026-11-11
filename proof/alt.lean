@@ -44,6 +44,11 @@ def rUsS1 : Nat := 2500
 def rVecCore : Nat := 432
 /-- HW-MAP: ~91 µs launch + queue floor. ns. -/
 def tLaunch : Nat := 91000
+/-- HW-MAP realized-launch row: per-launch overhead as the serving loop REALIZES it ≤ 36 µs (the serving
+    byte accounting bounds the whole non-GEMM share at 7.7 ms over ≥ 24 layers × ≥ 9 launches; empty-launch
+    floor 17 µs; device-dispatch route 2.9 µs scan + 6.2 µs host build + 35.4 µs H2D per step corroborate).
+    The 91 µs primary stays as the conservative wall-clock bound (bracket 10/500 covers 36). ns. -/
+def tLaunchRealized : Nat := 36000
 /-- HW-MAP hierarchy: 86 GB usable DDR per die; S1 ~1 MB (PRIOR). -/
 def dieMemGB : Nat := 86
 def s1Prior : Nat := 1000000
@@ -801,6 +806,13 @@ theorem T_alt_mega_savings : savedPerLayer dense = 455000 ∧ dense.nL * savedPe
     reductionBytes 1 4096 = 335872 ∧ redNs moe 1 = 3846 ∧ moe.nL * redNs moe 1 = 107688 ∧
     dense.nL * syncsPerLayer dense = 480 ∧ moe.nL * syncsPerLayer moe = 140 ∧
     ms2 54600000 = 5460 ∧ ms2 15288000 = 1528 ∧ ms2 1846560 = 184 ∧ ms2 107688 = 10 := by decide
+/-- Realized-launch adjudication: the megakernel's launch savings at tLaunchRealized = 36 µs — dense 180 µs per
+    layer (21.60 ms per token), MoE 216 µs (6.048 ms). Net of 20 µs crossings + reduction traffic the prize is
+    +10.15 ms dense (0.44 % of the 2319 ms step) / +3.15 ms MoE (2.6 % of 121.46 ms): the megakernel case rests
+    on the measured sub-µs cross-core sync, not on launch serialization. -/
+theorem T_alt_mega_savings_realized :
+    (dense.nlaunch - 1) * tLaunchRealized = 180000 ∧ dense.nL * ((dense.nlaunch - 1) * tLaunchRealized) = 21600000 ∧
+    (moe.nlaunch - 1) * tLaunchRealized = 216000 ∧ moe.nL * ((moe.nlaunch - 1) * tLaunchRealized) = 6048000 := by decide
 /-- T_megakernel: the megakernel pays iff c_sync ≤ 109 903 ns (dense; a TIE at exactly 109 903 — the strict form is
     ≤ 109 902) / 108 430 ns (MoE) net of the reduction traffic — both directions, for every c_sync -/
 theorem T_megakernel_dense (c : Nat) :

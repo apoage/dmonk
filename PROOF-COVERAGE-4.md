@@ -136,10 +136,10 @@ errata #11/#12 as INPUT (KV die-local, no P2P, no tensor-split, int8 residency; 
 | host links 27.6 / 27.3, 13.9 / 19.0; P2P refused; D2D 10.7 | Measured.h2d0 … d2h1, rD2D | H2D, D2H, R_D2D | INPUT |
 | T_slab 122 979 ns serial, 97 015 pp = (784 118 − 8 000)/8 rounded, F = 8 µs | Measured.tSlabSer, tPpStep, tSlabPP (T0_kv proves 97 015), fMoe | T_SLAB_SER, T_SLAB_PP, F_MOE | D2 (moe.lean T_piece_expert, T1_pp); F: DESIGN-2 ASSUMPTION |
 | D(t): uniform min(8t, 256); Zipf(1.0) 8/25/68, Zipf(1.5) 8/20/45 | Design.dOf, Measured.dZipf10/15 | D_TAB, D_of | DEFINITION (uniform) / EMPIRICAL — DESIGN-2 generator, H9 |
-| c_mma 15 ns; R_vec 345.6 G lane-ops/s per die = 8 × 43.2; T_launch 91 µs | Measured.cMma, rVecCore, tLaunch; T0_kv (rVecDie = 3456) | C_MMA, R_VEC_DIE, T_LAUNCH | INPUT + PROVED unit conversion |
+| c_mma 15 ns; R_vec 345.6 G lane-ops/s per die = 8 × 43.2; T_launch 91 µs (realized bound ≤ 36 µs — `tLaunchRealized`, the serving-accounting derivation, HW-MAP realized-launch row) | Measured.cMma, rVecCore, tLaunch; T0_kv (rVecDie = 3456) | C_MMA, R_VEC_DIE, T_LAUNCH | INPUT + PROVED unit conversion |
 | 86 GB per die, 8 dies = 688 GB; 141 W / 150 W | Measured.dieMemGB, cards, diesPerCard, pSustain, pTdp; T0_kv, T_power | DIE_MEM, DIES, P_SUSTAIN, P_TDP | INPUT |
 | G: stream 174.6 / gather3x 58.2; c_E native 4 / poly 16 | Design.gStream, gGather3x (T0_kv: 582), cNative, cPoly | G_BR, C_EXP | UNMEASURED — PROBLEM-3 E-gather / E-exp (both branches proved everywhere) |
-| λ 91 µs primary, bracket 10 / 500 | Design.lamLo/Mid/Hi | LAMBDA | ASSUMPTION — H3 (every λ-dependent theorem also ∀ λ in the bracket) |
+| λ 91 µs primary, bracket 10 / 500 | Design.lamLo/Mid/Hi | LAMBDA | ASSUMPTION — H3 (every λ-dependent theorem also ∀ λ in the bracket); the launch term's realized bound ≤ 36 µs sits inside the bracket (HW-MAP realized-launch row) |
 | O_rt 2 GiB, WS 64 MiB | Design.oRt, ws | O_RT, WS | ASSUMPTION — H8 (hypothesis variable `ort`) |
 | α 0.5 / 0.7 / 0.9; k = 3 | theorem variable `a`; Design.kDraft | ALPHA, K_DRAFT | ASSUMPTION — fleet-only H9 |
 | Π = 1 measured; 8 is the what-if | model structure (stepNs vs dieBlock) | — | INPUT / EMPIRICAL — H4 |
