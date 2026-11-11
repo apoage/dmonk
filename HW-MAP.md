@@ -277,7 +277,14 @@ inherit this — erratum #19).
     causal matrix cell was self-consistent rather than true-causal. Caught
     only when an external consumer (the serving loop) applied the
     inclusive-of-current convention. Rule: references must be derived from
-    the SPEC independently of the implementation's arithmetic.
+    the SPEC independently of the implementation's arithmetic. COROLLARY
+    (decode-bias round): an oracle whose DATA PROFILE makes the failure
+    output indistinguishable from correct (dropped-cell underflow to exact
+    zero on wide-spread scores) is blind to that failure regardless of
+    reference quality — verify on profiles where the failure mode is
+    visible, not only where it is convenient. The harness-deception class
+    has four members (pattern-aliasing, arena-coincidence, dump-reader
+    offsets, shared-page-table clobber).
 33. **llama.cpp measurement traps (this tree)**: `llama-bench` tg cells run
     at ~18-token context regardless of -p (INVALID for context claims);
     a transposed-V cache path builds layouts the paged kernel cannot
@@ -363,12 +370,22 @@ identity per run — device enumeration order is NOT the PCIe order.
   (the compact harness arena coincided with the derivation; static spans
   masked the per-step paths); fixed, the integration output path is now
   EXACT at L=100…32768. Multi-slot serving ENGAGES (per-stream spans,
-  absolute page tables with content-hash upload-skip, device-side Q
-  packing inside the append launch — ~85 µs/span all-in): fleet cells
-  np4×32k/slot 0.749 vs 0.540 t/s = 1.39× aggregate (~3× per sequence),
-  np8×8k/slot 1.11× (decode is weight-bound at 8k — the win scales with
-  slots × context exactly as the model predicts). Guard retries 10-15 % of
-  attention ms at 32k (the near-bound margin is the knob). The target
+  per-span page tables, device-side Q packing inside the append launch —
+  ~85 µs/span all-in): fleet cells on CORRECT attention —
+  np4×32k/slot 0.753 vs 0.538 t/s = **1.40× aggregate (~3× per
+  sequence)**, np8×8k/slot 5.08 vs 3.662 = **1.39×** (the first np
+  measurement's outputs were wrong — one shared page table meant every
+  span attended the last slot's context; speeds stood). DECODE-BIAS
+  ROOT-CAUSED + FIXED: the kernel truncated the attended extent to a
+  multiple of 16 — 14 of 16 decode steps dropped the last 1-14 cells
+  including the just-appended token; every static test was double-blind
+  (the harness reference shared the truncation at 7 sites — erratum 32
+  class — and the integer-oracle data profile masks dropped cells via
+  underflow to exact zero). Post-fix: decode-step compares exact at every
+  residue (0.75k/2.3k/8k/32k, 1-2 devices), text A/B clean at 32k, and
+  the serving bridge is now the DEFAULT path (opt-out to vendor for A/B).
+  Guard retries 10-15 % of attention ms at 32k (the near-bound margin is
+  the knob). The target
   model class (qk-norm present, GQA 32q/8kv, d=128) CONFIRMS the E35
   premise; an MLA-class model (d=512, per-layer kv-head pattern, no
   qk-norm) is OUTSIDE the kernel's contract and the license — a separate
