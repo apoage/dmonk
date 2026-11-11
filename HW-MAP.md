@@ -276,6 +276,18 @@ inherit this — erratum #19).
     consume (run the non-transposed/FA-style cache); failed builds leave
     STALE binaries that still run — verify binary mtime + a trace line
     after every rebuild.
+34. **Arena consumers must take the stride from the ALLOCATION, not the
+    span**: an arena spanning a full cache indexed per-span produced
+    cross-head page reads on 6 of 8 cores — exact in the compact test
+    harness (arena == span there) and wrong at every production context.
+    Related measurement traps: a queue re-enqueue without intervening work
+    is a silent no-op; a depth-1 queue consumed twice dead-waits; a test
+    reading a buffer the kernel also uses lies (snapshot, don't share);
+    blocked-copy block lengths are in 32-BYTE units, not elements.
+35. **Prefill-class attention (batch = hundreds of rows) is outside the
+    paged kernel's t ≤ 16 contract** — serving cells are decode-dominated;
+    prefill rode the vendor path on both sides of every A/B and dominates
+    wall time at long context.
 
 **Firmware variants note (fleet A/B, 2026-11-10):** two other firmware
 generations were A/B'd against the reference on a second card: the entire
@@ -335,15 +347,26 @@ identity per run — device enumeration order is NOT the PCIe order.
   both-kernel stack = 1.31× / 1.80× / 2.00× vs the vendor attention path at
   ~7.9k / ~23.2k / 31.4k true context (5.2 vs 2.6 tok/s at 31.4k); the
   replaced vendor cluster = a per-layer f16 K^T/V pair + a 16 MB/layer
-  transposed-V materialization ≈ 9 ms/layer at 32k. Integrated
-  per-layer attention 0.51 ms at 7.9k (guard trips 1-4/step — the
-  license premise holds at production) / 1.45 ms at 23.2k (bridge overhead
-  150-250 µs/layer + retry share — the top follow-up lever). The target
+  transposed-V materialization ≈ 9 ms/layer at 32k. CORRECTION
+  (integration session 2): those SPEED cells stand, but the long-context
+  OUTPUTS behind them were WRONG — two integration bugs (an arena-stride
+  head-indexing error and an unfenced f32 output write shipping pre-op
+  values, erratum #15 class), both invisible to the kernel-side battery
+  (the compact harness arena coincided with the derivation; static spans
+  masked the per-step paths); fixed, the integration output path is now
+  EXACT at L=100…32768. Multi-slot serving ENGAGES (per-stream spans,
+  absolute page tables with content-hash upload-skip, device-side Q
+  packing inside the append launch — ~85 µs/span all-in): fleet cells
+  np4×32k/slot 0.749 vs 0.540 t/s = 1.39× aggregate (~3× per sequence),
+  np8×8k/slot 1.11× (decode is weight-bound at 8k — the win scales with
+  slots × context exactly as the model predicts). Guard retries 10-15 % of
+  attention ms at 32k (the near-bound margin is the knob). The target
   model class (qk-norm present, GQA 32q/8kv, d=128) CONFIRMS the E35
   premise; an MLA-class model (d=512, per-layer kv-head pattern, no
   qk-norm) is OUTSIDE the kernel's contract and the license — a separate
-  design line. OPEN: the short-context regime (<512 tokens) is gated to
-  the vendor path (single-partial-block divergence, unlicensed cells).**
+  design line. OPEN: a residual decode-step bias (~10-20 % on small lanes,
+  inputs audited exact, kernel standalone-exact — a bridge/per-step
+  dynamics defect, under isolation); short-L (<512) stays vendor-gated.**
 - **Same-dst MMA chains: SPACING is the binding variable, not depth** —
   interleave >= 16 is exact at every depth 64..1024; spacing-0 corrupts
   bidirectionally at depth >= 256 (filler results leak into chain chunks).
