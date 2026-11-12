@@ -3774,3 +3774,70 @@ theorem T6r_inst6_c : (∀ c, 1756 ≤ tpsInst 1000 c 139096935 ↔ 978 ≤ c) �
     (∀ c, 105 ≤ tpsInst 1000 c 3528827593 ↔ 1483 ≤ c) := by
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
   · intro c; unfold tpsInst; rw [Nat.le_div_iff_mul_le (by decide)]; constructor <;> intro h <;> omega
+
+
+/-! ## ROUND 7 (2026-11-12) — the measured-anchor re-grounding (`[R7-*]`, fleet.py main7)
+
+M0 anchors the expert slab: the D2-derived serial anchor (`tSlabSer`) is retired and E29 is
+BANKED at `e29M0` = 14 642 880 ns per MoE token (7.7 % under the derived promise `e29`).
+The MEASURED retry share amortizes the deferred cell — 8.0 % / 5.5 % of launches at
+cap 3072 / 61440 vs break-even 0.19 % (the round-6 premise pair 0.087–0.22 % was stale
+~30–40×). The realized serialized launch bound ≤ 36 µs prices the launch term (91 µs stays
+the conservative primary; the bracket theorems cover every λ). The 32k tie is settled:
+E29 #1 on BOTH caps — the wide cap closes to 1 576 ns/layer of the line without crossing.
+MoE 32k t = 1: 1.755 → 1.956 trip-free → 1.926 at the measured retry share → 2.103 with
+the realized launch; 128k 1.233; 1M 0.276; two instances at the measured card-scale 2.0×:
+3.853. Dense is unchanged by construction (its W term was already the measured 174.6). -/
+def rM0 : Nat := 1658
+def rM0T4 : Nat := 1702
+def tSlabM0 : Nat := 2 * MiB * 80 / rM0
+def tSlabM0T4 : Nat := 2 * MiB * 80 / rM0T4
+def tLaunch7 : Nat := 36000
+def amCap3072F : Nat := dfrF32 + 80 * 873000 / 1000
+def amCap61440F : Nat := dfrF32 + 55 * 873000 / 1000
+def e29M0 : Nat := moe.nL * moe.slabs * 8 * (tSlabSer - tSlabM0)
+/-- the round-7 step: the round-5 step with the expert slab anchored on the measured M0
+    (E29 banked; dense subtracts nothing — its W term is already the measured 174.6 kernel) -/
+def step7F (s : Shape) (B t : Nat) (b : Br3) (a lam : Nat) : Nat :=
+  step5F s B t b a lam - (if s.moe then e29M0 else 0)
+
+theorem T7r_inputs : tSlabM0 = 101189 ∧ tSlabM0T4 = 98573 ∧
+    amCap3072F = 1015340 ∧ amCap61440F = 993515 ∧ e29M0 = 14642880 ∧ e29 = 15862560 ∧
+    e29M0 < e29 ∧ e29 - e29M0 = 1219680 ∧
+    (dense.nL * dense.nlaunch + 2) * (91000 - tLaunch7) = 39710000 ∧
+    (moe.nL * moe.nlaunch + 2) * (91000 - tLaunch7) = 10890000 := by decide
+
+theorem T7r_step_cells :
+    step7F moe 1 1 br3 dfrF32 lam3 = 127788019 ∧ tpsCard 1000 127788019 = 1956 ∧
+    step7F moe 1 1 br3 amCap3072F lam3 = 129743539 ∧ tpsCard 1000 129743539 = 1926 ∧
+    step7F moe 1 1 br3 amCap61440F lam3 = 129132439 ∧ tpsCard 1000 129132439 = 1935 ∧
+    step7F moe 1 1 br3 dfrF128 lam3 = 202640419 ∧ tpsCard 1000 202640419 = 1233 ∧
+    step7F moe 1 1 br3 dfrF1M lam3 = 904746019 ∧ tpsCard 1000 904746019 = 276 ∧
+    step7F dense 1 1 br3 dfrF32 lam3 = 2403248669 ∧ tpsCard 1000 2403248669 = 104 ∧
+    step5F moe 1 1 br3 dfrF32 lam3 = 142430899 ∧
+    142430899 - e29M0 = 127788019 := by decide
+
+/-- the realized-launch reading of the round-7 primary (the measured retry share at the shipped cap) -/
+theorem T7r_step_realized :
+    step7F moe 1 1 br3 amCap3072F lam3 - (moe.nL * moe.nlaunch + 2) * (91000 - tLaunch7) = 118853539 ∧
+    tpsCard 1000 118853539 = 2103 ∧
+    tpsCard 1000 (2403248669 - (dense.nL * dense.nlaunch + 2) * (91000 - tLaunch7)) = 105 := by decide
+
+/-! ### The 32k tie, settled on the measured retry share: E29 #1 on both caps
+    (fusion ≥ E29 iff the fused per-layer cell ≤ the line 991 939 ns = 135.3 GB/s; the wide-cap
+    amortized cell 993 515 misses it by 1 576 ns/layer — licensed but it does not cross). -/
+theorem T7r_tie32k :
+    28 * (1514900 - amCap3072F) = 13987680 ∧ 13987680 < e29M0 ∧ e29M0 - 13987680 = 655200 ∧
+    28 * (1514900 - amCap61440F) = 14598780 ∧ 14598780 < e29M0 ∧ e29M0 - 14598780 = 44100 ∧
+    1514900 - e29M0 / 28 - 1 = 991939 ∧ 991939 < amCap61440F ∧ amCap61440F < amCap3072F := by decide
+
+theorem T7r_tie32k_iff : ∀ T ≤ 1514900,
+    (e29M0 ≤ 28 * (1514900 - T) ↔ T ≤ 991940) ∧ (e29M0 < 28 * (1514900 - T) ↔ T ≤ 991939) := by
+  intro T hT
+  have he : e29M0 = 14642880 := by decide
+  rw [he, Nat.mul_sub]
+  refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩⟩ <;> intro h <;> omega
+
+/-- two instances at the MEASURED card-scale gain (2.0× full solo speed; the intra-card
+    two-die ratio 1.001 and the die-scale c = 1.990 say no interference at either level) -/
+theorem T7r_inst : tpsInst 1000 2000 129743539 = 3853 ∧ tpsInst 1000 1990 129743539 = 3834 := by decide

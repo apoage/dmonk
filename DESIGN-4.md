@@ -167,6 +167,16 @@ die, *t* the query tokens per sequence per step (t = k + 1 for a verify batch wi
 B·t ≤ 16 (the flat regime). **tokens/s per card = fleet tokens/s ÷ 4** — one model instance spans the fleet.
 L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 
+> **ROUND-7 STATUS (2026-11-12 — the measured-anchor re-grounding, `[R7-*]` / `T7r_*`)**: the expert
+> slab's ANCHOR is now the MEASURED kernel (M0 165.8 GB/s t = 1, 170.2 at t ≥ 4; 99.2 % of the design
+> target) — the D2-derived serial anchor retires and **E29 is BANKED at 14.64 ms per MoE token** (7.7 %
+> under the derived promise). The deferred-guard cell amortizes at the MEASURED retry share (τ = 8 % /
+> 5.5 % of launches at cap 3072 / 61440 vs break-even 0.19 % — the round-6 premise was stale ~30–40×),
+> and **the 32k tie is settled: E29 #1 on both caps** (the wide cap misses the line by 1 576 ns/layer).
+> Headline MoE 32k t = 1: 1.755 → **1.956 trip-free / 1.926 measured-amortized / 2.103 at the realized
+> launch bound (≤ 36 µs)**; 128k 1.233; 1M 0.276; two instances at the measured card-scale 2.0× = 3.853.
+> All round ≤ 6 cells keep their printed values as history.
+
 ## Constants used
 
 | Symbol | Value | Status / origin |

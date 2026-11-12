@@ -1552,5 +1552,89 @@ def main6():
                 cells.append(f"{conv}/{rd} {ms2(T)} ms -> {t3(tps_inst_c(1000, H10_CARD, T))} vs one 8-die instance {t3(one)} (needs c >= {t3(c_min(T, one + 1))})")
         print(f"[R6-inst-{s['name']}-32k] two 4-die instances (V3 with the erratum-#19 merge, x {xs}; H10's c = 1.990) on the deferred cell: " + "; ".join(cells))
 
+
+
+
+# =====================================================================================================================================
+# ROUND 7 (2026-11-12) — the measured-anchor re-grounding: M0 anchors the expert slab, the MEASURED retry share amortizes the
+# deferred cell, the realized launch bound prices the launch term, and three new measured inputs enter the model. [M] sources:
+#   expert kernel full-dispatch M0 = 165.8 GB/s t = 1 (170.2-172.8 t >= 4, the skew sweep), silicon 20/20 — the direct-path slab was
+#   previously DERIVED from the dense 174.6 cell (the round-3 T_B_DIRECT); the serving retry share tau = 8 % / 5.5 % of launches at
+#   cap 3072 / 61440 -> amortized 1015.34 / 993.515 us per layer at 32k (break-even tau = 0.19 %; the 0.087-0.22 % premise of round 6
+#   was stale ~30-40x); realized serialized launch <= 36 us (the serving accounting bound; the 91 us primary stays the conservative
+#   bracket); K-int8 d=64 score stream 87.6 GB/s (2.13x same-extent vs the silicon-legal f16 form); intra-card intra-process two-die
+#   concurrency ratio 1.001 of solo-sum; two instances on disjoint CARDS = 2.0x full solo speed (the instance partition measured at
+#   card scale). Every label above keeps printing its value; the [R7-*] labels below re-derive the load-bearing cells.
+# =====================================================================================================================================
+R_M0      = 1658          # expert kernel M0 full dispatch, tenths GB/s, t = 1 [M]
+R_M0_T4   = 1702          # t >= 4 cells, tenths GB/s (the skew-sweep floor of 170.2-172.8) [M]
+T_SLAB_M0 = 2 * MiB * 80 // R_M0    # 101 186 ns: the direct-path slab at the MEASURED M0 (was T_B_DIRECT + A_LIFT = 99 374 derived)
+T_LAUNCH7 = 36_000        # realized per-launch overhead, ns (serving accounting; 91 000 stays the conservative primary) [M]
+TAU7      = (80, 55)      # measured retry share, thousandths of launches, cap 3072 / 61440 [M]
+T7_AMORT32 = tuple(A.T6_DFR[32768] + tau * 873_000 // 1000 for tau in TAU7)   # (1 015 340, 993 515) ns — amortized = trip-free + tau x re-run [M: the serving remeasure]
+R_KI8     = 876           # K-int8 d=64 score stream incl. dequant, tenths GB/s of own-K bytes (f16 fresh+merge arm 82.3) [M]
+def a7(L, rd="trip-free"):
+    """per-layer attention, ns, t = 1: round 6 trip-free cells with the MEASURED amortization at 32k (supersedes the premise pair)"""
+    if L == 32768 and rd == "amort-cap3072": return T7_AMORT32[0]
+    if L == 32768 and rd == "amort-cap61440": return T7_AMORT32[1]
+    return a6(L, "trip-free")
+def step7(s, L, rd="trip-free", launch="primary", **kw):
+    """the round-6 step with (a) the expert slab anchored on M0, (b) the measured amortization, (c) the realized launch reading."""
+    T, p = step5f(s, L, a7(L, rd), **kw)
+    d_slab = -s["nL"] * s.get("slabs", 0) * D_of("uniform", 1) * (T_SLAB_SER - T_SLAB_M0)   # THE ANCHOR MOVES TO THE MEASURED M0: the anchor slab was the D2-derived serial regime (122 979); the built kernel measures 101 189 -> the step drops by exactly E29-at-M0 (banked; dense W was already the measured 174.6 kernel)
+    T += d_slab; p = dict(p); p["W"] = p["W"] + d_slab
+    if launch == "realized":
+        dl = (s["nL"] * s["nlaunch"] + 2) * (T_LAUNCH - T_LAUNCH7)
+        T -= dl; p = dict(p); p["LAUNCH"] = p["LAUNCH"] - dl; p["W"] = p["W"]  # unchanged
+    return T, p
+
+def main7():
+    D, M = DENSE, MOE
+    print("\n# ---- ROUND 7 (2026-11-12; M0 anchors the expert slab, the MEASURED retry share amortizes the deferred cell, the realized launch bound): [R7-*] cells. Every label above is unchanged ----")
+    print(f"[R7-inputs] M0 {t10(R_M0)} GB/s t=1 ({t10(R_M0_T4)} at t>=4) -> slab {T_SLAB_M0} ns vs the derived {T_SLAB3['direct_ser']} ({t10(pct(T_SLAB_M0 - T_SLAB3['direct_ser'], T_SLAB3['direct_ser']))}% slower); "
+          f"amortized 32k {T7_AMORT32[0]} / {T7_AMORT32[1]} ns (tau {TAU7[0] / 10}% / {TAU7[1] / 10}% of launches, break-even 0.19%; the round-6 premise pair was {A.T6_AMORT32}); "
+          f"launch realized {T_LAUNCH7} ns (primary stays {T_LAUNCH}); K-i8 d=64 {t10(R_KI8)} GB/s; two-die intra-card concurrency 1.001; card-scale instance gain 2.0x [M]")
+    # ---- the slab + E29 re-derived at M0
+    print(f"[R7-slab] the ANCHOR slab moves to the measured kernel: {T_SLAB_SER} (D2-derived serial) -> {T_SLAB_M0} (M0 165.8, t=1) / {2 * MiB * 80 // R_M0_T4} (t>=4 floor 170.2); "
+          f"per-layer MoE gemm {ms2(gemm3_ns(M, 1, 'uniform', 'anchor'))} -> {ms2(gemm3_ns(M, 1, 'uniform', 'anchor') - M['slabs'] * D_of('uniform', 1) * (T_SLAB_SER - T_SLAB_M0))} ms — E29 is BANKED at M0")
+    E29_M0 = M["nL"] * M["slabs"] * D_of("uniform", 1) * (T_SLAB_SER - T_SLAB_M0)
+    print(f"[R7-e29] E29 BANKED at M0: the lever's realized gain = {E29_M0} ns per MoE token (the derived promise was {E29_MOE}, {t10(pct(E29_MOE - E29_M0, E29_MOE))}% smaller); "
+          f"M0 = {t10(pct(1671 - R_M0, 1671))}% under the 167.1 design target (99.2 % of it, met)")
+    # ---- the 32k tie at the MEASURED amortization: E29 first on every reading
+    for rd, cap in (("amort-cap3072", "cap 3072 (shipped)"), ("amort-cap61440", "cap 61440 (licensed, unflipped)")):
+        T = a7(32768, rd); fus = 28 * (A.T6_LEG32 - T)
+        Ts = A.T6_LEG32 - E29_M0 // 28 - 1
+        assert fus < E29_M0 and E29_MOE > fus, (rd, fus, E29_M0)
+        print(f"[R7-tie-32k-{rd}] MoE 32k at the MEASURED retry share ({cap}): fused {T} ns = {t10(A.rateT(32768 * 4096, T))} GB/s; fusion gain {ms2(fus)} ms vs E29-at-M0 {ms2(E29_M0)} ms -> "
+              f"E29 #1 by {h2_6(pctH(E29_M0 - fus, E29_M0))}% ({E29_M0 - fus} ns per token); fusion >= E29 iff T <= {Ts} ns = {t10(A.rateT(32768 * 4096, Ts))} GB/s — the wide cap closes to "
+              f"{T - Ts} ns per layer of the line but does not cross it (the round-6 premise tie is settled: E29 outright)")
+    # ---- the step/headline on the measured anchors
+    for s in (D, M):
+        cells = []
+        for rd in ("trip-free", "amort-cap3072", "amort-cap61440"):
+            if rd != "trip-free" and s["moe"] is False: continue
+            T, p = step7(s, 32768, rd); Tl, pl = step7(s, 32768, rd, launch="realized")
+            cells.append(f"{rd} {ms2(T)} ms -> {t3(tps_card(1000, T))} ({bind5(p)}; launch realized {t3(tps_card(1000, Tl))})")
+        r6 = " / ".join(t3(tps_card(1000, step5f(s, 32768, a6(32768, r))[0])) for r in reads6(32768))
+        print(f"[R7-step-{s['name']}-32k] M0 slab + measured amortization: " + "; ".join(cells) + f" | round 6 (derived slab, premise amortization): {r6}")
+        T, p = step7(M if s["moe"] else s, 32768, "trip-free")
+    for lab, L in L6.items():
+        T, p = step7(M, L, "trip-free"); Tl, _ = step7(M, L, "trip-free", launch="realized")
+        print(f"[R7-moe-{lab}] trip-free on the measured anchors: {ms2(T)} ms -> {t3(tps_card(1000, T))} ({bind5(p)}; launch realized {t3(tps_card(1000, Tl))}; round 6 {t3(tps_card(1000, step5f(M, L, a6(L, 'trip-free'))[0]))})")
+    # ---- the launch reading, isolated
+    for s in (D, M):
+        d = (s["nL"] * s["nlaunch"] + 2) * (T_LAUNCH - T_LAUNCH7)
+        T0, _ = step7(s, 32768, "trip-free")
+        print(f"[R7-launch-{s['name']}] the serialized-launch term at 91 vs 36 us: {ms2(d)} ms of the step ({t10(pct(d, T0))}%) -> {t3(tps_card(1000, T0))} -> {t3(tps_card(1000, T0 - d))} tok/s/card "
+              f"(the conservative primary stays; bracket theorems cover every lambda)")
+    # ---- K-int8 pricing + the concurrency rows
+    print(f"[R7-ki8] the K-int8 KV lever's silicon leg: K bytes halve -> time ratio 2.13x measured at d=64 ({t10(R_KI8)} GB/s own-K incl. ~3 % dequant vs the f16 fresh+merge arm 82.3) — the i8 attention "
+          f"readings' K-side premise holds; the round-4/PA i8 cells keep their values (the 2.13x is the measured confirmation, not a re-derivation input)")
+    xs = [min_x(M, p, 32768) for p in range(4)]
+    T1, _ = step7(M, 32768, "amort-cap3072")
+    print(f"[R7-inst-moe-32k] two instances on disjoint cards at the measured card-scale gain (2.0x full solo speed): 1 x {t3(tps_card(1000, T1))} -> 2 x {t3(tps_card_inst(1000, T1))} "
+          f"(card-scale measured ceiling 2.0x; the die-scale c = 1.990 and the intra-card two-die ratio 1.001 say no interference at either level)")
+
+
 if __name__ == "__main__":
-    main6()
+    main7()

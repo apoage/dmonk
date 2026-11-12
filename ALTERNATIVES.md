@@ -91,7 +91,10 @@ format with the theorem each one becomes.
 2. **DESIGN-2 streams experts through the wrong path.** It is anchored to the S1-staged serial loader (135.3);
    the dense kernel's production path (DDR → L0B direct, 174.6 flat) carries the same per-core expert slices at
    **167.1 GB/s (A lift serialised) / 172.8 (overlapped)**, +23.5 % / +27.7 %, with every rate measured
-   (`[ALT-1-*]`); fleet MoE 32k +13.4 %.
+   (`[ALT-1-*]`); fleet MoE 32k +13.4 %. **MEASURED since (round 7)**: the built kernel's full-dispatch
+   M0 = 165.8 GB/s t = 1 (99.2 % of the design target) / 170.2–172.8 at t ≥ 4 — the family is BANKED,
+   the fleet anchor rides it, and E29's realized gain is 14.64 ms per MoE token (7.7 % under the
+   derived promise; the 32k tie settled — E29 #1 at both guard caps).
 3. **The 91 µs launch floor is a megakernel problem, not a runtime problem.** One persistent launch per layer with
    a DDR-flag cross-core sync pays whenever a sync costs ≤ 109 µs (MoE) / 114 µs (dense) — a DDR round trip is µs
    class: MoE 32k +12.5 %, the draft token 18.1 → 9.3 ms (`[ALT-3-*]`). Combined with (2): MoE 32k +29.3 %;
