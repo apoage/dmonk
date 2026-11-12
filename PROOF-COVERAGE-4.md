@@ -569,3 +569,15 @@ overhead `ort`, c_sync, the popularity family. **T_min_dies is untouched** (no a
 T6r_tie32k, T6r_tie32k_cells, T6r_tie_lines, T6r_tie_lines_cells, T6r_realized, T6r_levers6, T6r_levers_moe4k, T6r_spec6_steps,
 T6r_spec6_thresholds, T6r_spec_dense_form, T6r_spec_dense_line, T6r_spec_dense_cells, T6r_spec_dense_thresholds, T6r_B16_6, T6r_inst6,
 T6r_inst6_c), every `[R6-*]` label family of fleet.py is cited. The round-2 … round-5 and PROMPT-6 ledgers above are unchanged.
+
+## ROUND 7 (2026-11-12) — the measured-anchor re-grounding (`proof/fleet.py` main7, `[R7-*]`; `proof/fleet.lean` T7r_*)
+
+| # | claim | model says | status | tags | theorems |
+|---|---|---|---|---|---|
+| R7.1 | inputs: M0 165.8 t=1 / 170.2 t≥4 → slab 101 189 / 98 573; amortized 32k = 1 015 340 / 993 515 (τ 8.0 %/5.5 %, break-even 0.19 %); realized launch 36 µs; e29M0 = 14 642 880 < e29 = 15 862 560 (Δ 1 219 680) | as quoted, MEASURED (the expert-kernel dispatch cells, the serving remeasure, the serving accounting; HW-MAP rows) | PROVED | [R7-inputs] [R7-e29] | T7r_inputs |
+| R7.2 | the MoE step on the measured anchors: 32k 127.788 ms → 1.956 trip-free / 1.926 at the measured retry share / 2.103 realized-launch; 128k 1.233; 1M 0.276; dense UNCHANGED (2 403.248 669 → 0.104 — its W term was already the measured 174.6) | as quoted | PROVED | [R7-step-*] [R7-moe-*] | T7r_step_cells, T7r_step_realized |
+| R7.3 | THE 32k TIE SETTLED: E29 #1 on BOTH caps — fusion gain 13.988 / 14.599 ms vs e29M0 14.643 (by 655 200 / 44 100 ns per token); fusion ≥ E29 iff T ≤ 991 939 ns = 135.3 GB/s; the wide-cap cell misses the line by 1 576 ns/layer | as quoted, ∀ T (iff form) | PROVED | [R7-tie-*] | T7r_tie32k, T7r_tie32k_iff |
+| R7.4 | two instances at the measured card-scale gain (2.0× full solo speed): 2 × 1.926 = 3.853; intra-card two-die ratio 1.001 + die-scale c = 1.990 | as quoted | PROVED | [R7-inst] | T7r_inst |
+| R7.5 | E29 is BANKED at M0: the anchor slab (D2-derived serial, 122 979) retires; the model's W term IS the measured kernel (101 189) — every E29-dependent earlier round keeps its value as history | model-only restructure | WRITTEN | [R7-slab] | T7r_inputs (the slab identity) |
+
+Every round-2..6 label keeps printing its historical value (the fleet.py change is append-only + the `__main__` switch; lean sections untouched above ROUND 7). K-i8 (87.6 GB/s, 2.13× same-extent) enters as a measured confirmation of the i8 readings' K-side premise — the round-4/PA i8 cells are NOT re-derived (their arm was the un-halved one).
