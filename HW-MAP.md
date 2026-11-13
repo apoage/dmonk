@@ -389,7 +389,15 @@ identity per run — device enumeration order is NOT the PCIe order.
   np4×32k/slot 0.753 vs 0.538 t/s = **1.40× aggregate (~3× per
   sequence)**, np8×8k/slot 5.08 vs 3.662 = **1.39×** (the first np
   measurement's outputs were wrong — one shared page table meant every
-  span attended the last slot's context; speeds stood). DECODE-BIAS
+  span attended the last slot's context; speeds stood). The bridge now
+  ALSO ENGAGES 4-kv-head GQA-8 models (the two 8-kv-head gates were the
+  blocker; a bridge-only fix, the kernel untouched — 4 launch blocks
+  with idle cores at v1): the both-kernel serving cell = **+28%** over
+  the all-vendor arm at a ~10k span, decode-exact every step with a
+  perfectly diagonal GQA head map at g=8; BELOW ~8-12k span the
+  per-layer bridge overhead (~0.33 ms) exceeds vendor attention —
+  engage-gate tuning is the follow-up (the host-side Q-pack lever).
+  DECODE-BIAS
   ROOT-CAUSED + FIXED: the kernel truncated the attended extent to a
   multiple of 16 — 14 of 16 decode steps dropped the last 1-14 cells
   including the just-appended token; every static test was double-blind
