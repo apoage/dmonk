@@ -392,11 +392,17 @@ identity per run — device enumeration order is NOT the PCIe order.
   span attended the last slot's context; speeds stood). The bridge now
   ALSO ENGAGES 4-kv-head GQA-8 models (the two 8-kv-head gates were the
   blocker; a bridge-only fix, the kernel untouched — 4 launch blocks
-  with idle cores at v1): the both-kernel serving cell = **+28%** over
-  the all-vendor arm at a ~10k span, decode-exact every step with a
-  perfectly diagonal GQA head map at g=8; BELOW ~8-12k span the
-  per-layer bridge overhead (~0.33 ms) exceeds vendor attention —
-  engage-gate tuning is the follow-up (the host-side Q-pack lever).
+  with idle cores at v1): the both-kernel serving ladder (single-variable,
+  cross-arm prefill parity 6.3 t/s): **0.82× below moe-only at ~2.5k
+  span, +28% at ~10k, 3.32× over the all-vendor arm at a TRUE ~32k
+  span** (decode-exact every step, diagonal GQA head map at g=8; the
+  earlier both-arms-zero-tokens "length edge" was a cell-timeout ×
+  CLI-signal artifact, not the stack); BELOW ~8-12k span the per-layer
+  bridge overhead (~0.33 ms) exceeds vendor attention — engage-gate
+  tuning is the follow-up. NOTE at 4-kv heads the launch maps 4 of 8
+  cores per die (each active core streams the whole KV layer): the
+  split-KV-token core map (4×2 = 8 active) is the measured ~40 ms/step
+  lever on the ~32k cell.
   DECODE-BIAS
   ROOT-CAUSED + FIXED: the kernel truncated the attended extent to a
   multiple of 16 — 14 of 16 decode steps dropped the last 1-14 cells
