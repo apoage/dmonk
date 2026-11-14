@@ -402,7 +402,11 @@ identity per run — device enumeration order is NOT the PCIe order.
   tuning is the follow-up. NOTE at 4-kv heads the launch maps 4 of 8
   cores per die (each active core streams the whole KV layer): the
   split-KV-token core map (4×2 = 8 active) is the measured ~40 ms/step
-  lever on the ~32k cell.
+  lever on the ~32k cell. PREFILL now rides the expert kernel too
+  (128-row chunks, one fused GEMM per chunk per layer): 6.6 → 101-127
+  tok/s (15-19× the vendor prefill path), first-token latency −94%
+  (382 → 20 s at ~2.5k span; 1 552 → 101 s at ~10k) at unchanged decode
+  — the earlier "prefill rides the vendor path" state is retired.
   DECODE-BIAS
   ROOT-CAUSED + FIXED: the kernel truncated the attended extent to a
   multiple of 16 — 14 of 16 decode steps dropped the last 1-14 cells
