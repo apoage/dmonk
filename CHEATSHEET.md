@@ -6,7 +6,9 @@ transform/codec theory) plus an INDEPENDENT roofline derivation of this
 machine; (2) a 40-finding sweep of LLM inference techniques (quantization,
 KV compression, lossless codecs, speculative decoding, MoE compression).
 Raw reports archived outside this repo; this file is the graded
-distillation against OUR constants (HW-MAP + the round-7 anchors).
+distillation against OUR constants (HW-MAP + the round-7 anchors). The
+arithmetic behind every guardrail and row is stated source-free and
+machine-checked in `CHEAT-MATH.md` (`proof/cheat.lean`).
 
 ## 0. The external roofline VALIDATES our measured corpus
 

@@ -32,7 +32,9 @@ spec sheets; every claim stands on its own measurement or proof.
 | 5 | Cross-problem search for alternative solution families | `ALTERNATIVES.md` | `proof/alt.lean` | `PROOF-COVERAGE-5.md` |
 
 `ERRATA-IMPACT.md` audits all five designs against the later silicon errata (#18–#31), with the corrections applied in place
-(marked **audit**) and ranked.
+(marked **audit**) and ranked. `CHEATSHEET.md` grades the external technique landscape against this machine's
+measured constants; `CHEAT-MATH.md` is its arithmetic layer — condensed, source-free statements, machine-checked
+in `proof/cheat.lean`.
 
 `PROBLEM*.md` state each problem. Each design and proof round was handed to an external AI assistant
 session for adversarial review — the `PROMPT*.md` files are those briefs, and the round sections in

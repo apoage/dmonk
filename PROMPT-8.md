@@ -1,5 +1,10 @@
 # PROMPT-8 — RAW research sweep: compute & bandwidth tricks for LLM inference on a bandwidth-walled part
 
+> STAGE-2 NOTE (2026-11-15): the distillation of this sweep landed as
+> `CHEATSHEET.md`, and its arithmetic layer as `CHEAT-MATH.md`
+> (`proof/cheat.lean`) — both deliberately source-free. This brief
+> stays verbatim below.
+
 You are a RESEARCH session with web access. Pure sweep: find what's out
 there, report it faithfully with sources. You are NOT grading against any
 local corpus — a separate distillation step does that later. Your output

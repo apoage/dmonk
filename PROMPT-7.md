@@ -18,8 +18,10 @@ nothing is an acceptable outcome only if the re-derivations actually ran.
    later rounds supersede earlier bodies, banners say what moved) →
    `PROOF-COVERAGE*.md` (every claim maps to a theorem and a status word)
    → the `proof/*.lean` + `proof/*.py` pair.
-3. `ALTERNATIVES.md` + `ERRATA-IMPACT.md` last — they are the cross-problem
-   views.
+3. `CHEATSHEET.md` + `CHEAT-MATH.md` (the graded technique landscape and
+   its machine-checked arithmetic layer — source-free by design), then
+   `ALTERNATIVES.md` + `ERRATA-IMPACT.md` last — they are the
+   cross-problem views.
 
 ## Mission A — the review protocol
 
