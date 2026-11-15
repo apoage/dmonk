@@ -287,8 +287,11 @@ inherit this — erratum #19).
     zero on wide-spread scores) is blind to that failure regardless of
     reference quality — verify on profiles where the failure mode is
     visible, not only where it is convenient. The harness-deception class
-    has four members (pattern-aliasing, arena-coincidence, dump-reader
-    offsets, shared-page-table clobber).
+    has five members (pattern-aliasing, arena-coincidence, dump-reader
+    offsets, shared-page-table clobber, probe-baseline cross-head
+    aliasing — an A/B probe whose baseline arm aliased the measured arm
+    across heads compared the arm to itself; its premise stood until an
+    independent measurement superseded it).
 33. **llama.cpp measurement traps (this tree)**: `llama-bench` tg cells run
     at ~18-token context regardless of -p (INVALID for context claims);
     a transposed-V cache path builds layouts the paged kernel cannot
