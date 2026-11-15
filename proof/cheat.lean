@@ -33,21 +33,29 @@ theorem preadd_widen2 (a b c d : Int)
     (hc : -128 ≤ c) (hc' : c ≤ 127) (hd : -128 ≤ d) (hd' : d ≤ 127) :
     -512 ≤ (a + b) + (c + d) ∧ (a + b) + (c + d) ≤ 508 := by omega
 
-/- §B — roofline arithmetic on the stated engine constants
-  (one 16×16×16 int8 block per cycle = 8192 OPs, 170 B/ns stream,
-  40 vector lanes/cycle). -/
+/- §B — roofline arithmetic at DIE level (round-4 C-15 correction: the
+  earlier 48–49 paired ONE core's 8 192 OPs/cycle with the whole die's
+  170 B/ns — a unit mix. The die MEASURES 17.8 T-OP/s against 173.8 GB/s,
+  both die-level: ridge strictly between 102 and 103 OPs/byte, in
+  G-OPs per G-B units 178 000 / 1 738. Vector budget 8 × 43.2 =
+  345.6 G lane-ops/s per die.) -/
 
-theorem ridge_bounds : 48 * 170 < 8192 ∧ 8192 < 49 * 170 := by decide
+theorem ridge_die_bounds : 102 * 1738 < 178000 ∧ 178000 < 103 * 1738 := by decide
 
-/-- Arithmetic intensity reaches the ridge at ~24 concurrent rows (2
-OPs/byte-weight, W8-class) or ~12 (4 OPs/byte-weight, W4-class); one row
-past each crosses it. -/
-theorem free_rows :
-    2 * 24 < 49 ∧ 4 * 12 < 49 ∧ 2 * 25 ≥ 49 ∧ 4 * 13 ≥ 49 := by decide
+/-- Arithmetic intensity reaches the die ridge at ~51 concurrent rows
+(2 OPs/byte-weight, W8-class) or ~25 (4 OPs/byte-weight, W4-class); one
+row past each crosses. -/
+theorem free_rows_die :
+    2 * 51 ≤ 102 ∧ 4 * 25 ≤ 102 ∧ 2 * 52 > 102 ∧ 4 * 26 > 102 := by decide
 
-/-- A 16-row verification tree rides free on the 2-OPs/byte format but
-NOT on the 4-OPs/byte one. -/
-theorem tree16 : 2 * 16 < 49 ∧ 4 * 16 ≥ 49 := by decide
+/-- A 16-row verification tree rides free on BOTH formats at the die
+ridge (the earlier "not on 4-bit" was the unit-mix ridge). -/
+theorem tree16_die : 2 * 16 ≤ 102 ∧ 4 * 16 ≤ 102 := by decide
+
+/-- The vector lane budget (8 × 43.2 = 345.6 G lane-ops/s, in tenths
+345.6) cannot exceed the 4-bit stream's 347.6 G elem/s: at most one
+lane-op per element. -/
+theorem lane_budget : 8 * 432 < 3476 := by decide
 
 /-- KV bytes per decoded token, 8B-class shape (32 layers, 8 KV heads,
 d = 128, f16): exactly 128 KiB. -/
@@ -58,16 +66,19 @@ theorem kv_per_token : 2 * 8 * 128 * 2 * 32 = 131072 := by decide
 theorem parity_ctx : 4294967296 / 131072 = 32768 := by decide
 
 /-- A 256-cube int8 prefill step moves 128 KiB of operands for 33.5 M
-OPs: 256 OPs/byte, 5.33× the 48.2 ridge — prefill is compute-bound. -/
-theorem prefill_intensity : 33554432 / 131072 = 256 ∧ 256 = 5 * 48 + 16 := by decide
+OPs: 256 OPs/byte = between 2.49× and 2.50× the die ridge — prefill
+stays compute-bound. -/
+theorem prefill_intensity :
+    33554432 / 131072 = 256 ∧ 249 * 178000 < 25600 * 1738 ∧ 25600 * 1738 < 250 * 178000 := by decide
 
 /-- A 16×16 output tile needs ceil(256/40) = 7 epilogue cycles per
 1-cycle MAC block, so k ≥ 7 × 16 = 112 hides it; the rule is k ≥ 128. -/
 theorem epilogue : 256 = 40 * 6 + 16 ∧ 7 * 16 = 112 ∧ 112 ≤ 128 := by decide
 
-/-- Per-element vector unpacking (40 G elem/s) against the W4 stream
-supply (340 G elem/s): under 12% of the wall. -/
-theorem dequant_cap : 40 * 25 < 340 * 3 := by decide
+/-- MEASURED 5-pass unpack (round-4 C-15 correction of the earlier
+"< 12 %"): 42 GB/s = 84 G elem/s against the 4-bit stream's 347.6
+G elem/s — between 24 % and 25 % of the wall. -/
+theorem unpack_share : 24 * 3476 < 84 * 1000 ∧ 84 * 1000 < 25 * 3476 := by decide
 
 /- §C — fixed-plane packing.
 
@@ -108,11 +119,14 @@ theorem orth2 :
   wide product. At ~8 bits per modulus, 16 moduli cover 128 bits ≥ 123
   (the wide-product bound) and 15 do not. -/
 
-theorem crt_15_16 :
-    (List.range 240).all (fun x =>
-      (List.range 240).all (fun y =>
-        !(x % 15 == y % 15) || !(x % 16 == y % 16) || (x == y))) = true := by
-  native_decide
+/-- Residues mod 15 and mod 16 (coprime, product 240) determine every
+value below 240: a pair of exact int8-GEMMs per modulus recovers the
+wide product. (Round-4 C-16 fix: the earlier List.all restatement
+closed by `native_decide` — an axiom under the kernel-compilation
+rule; kernel `decide` on it exceeds recursion depth. The implication
+below is the same content, closed by omega.) -/
+theorem crt_15_16 (x y : Nat) (hx : x < 240) (hy : y < 240)
+    (h15 : x % 15 = y % 15) (h16 : x % 16 = y % 16) : x = y := by omega
 
 theorem moduli_bits : 15 * 8 = 120 ∧ 16 * 8 = 128 ∧ 120 < 123 ∧ 123 ≤ 128 := by decide
 

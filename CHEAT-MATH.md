@@ -18,21 +18,26 @@ Each fast-bilinear pre-addition level widens operands one bit
 (int8 → int9 → int10). Grounds CHEATSHEET G5; the kernel-side reason the
 wide-cap fold and i32 accumulation are shaped as they are.
 
-## B. Roofline arithmetic (MATH — `Cheat.ridge_bounds … dequant_cap`)
+## B. Roofline arithmetic at DIE level (MATH — `Cheat.ridge_die_bounds … `unpack_share`)
 
-One 16×16×16 int8 block/cycle = 8192 OPs vs 170 B/ns → **ridge strictly
-between 48 and 49 OPs/byte**. Arithmetic intensity is 2M OPs/B (8-bit
-weights) or 4M (4-bit): rows ride free to **M = 24 / 12**, one past
-crosses; a **16-row tree is free on 8-bit but not 4-bit** weights — the
-shape behind CHEATSHEET #8 and our measured m ≤ 16 flat region. KV for an
-8B-class shape is exactly **128 KiB/token** (2·8·128·2·32), reaching
-parity with a 4 GiB weight set at **2^15 = 32 Ki tokens** (≈30 k at real
-sizes) — the CHEATSHEET #3/#5/#7 regime flip. A 256-cube prefill step is
-**256 OPs/byte = 5.33× the ridge** (compute-bound); a 16×16 output tile
-needs **k ≥ 112** (rule: 128) to hide its epilogue at 40 lanes; and
-per-element vector unpacking caps at **< 12% of the 4-bit stream wall**
-(40 vs 340 G elem/s) — the single constraint behind G6 and the
-packed/fused mandate of #1/#4.
+The die's MEASURED 17.8 T-OP/s against its 173.8 GB/s stream → **ridge
+strictly between 102 and 103 OPs/byte** (round-4 C-15 correction: the
+earlier 48–49 paired ONE core's 8 192 OPs/cycle with the whole die's
+bytes — a unit mix). Arithmetic intensity is 2M OPs/B (8-bit weights)
+or 4M (4-bit): rows ride free to **M = 51 / 25**, one past crosses; a
+**16-row tree is free on BOTH** formats (64 ≤ 102) — the shape behind
+CHEATSHEET #8 and our measured m ≤ 16 flat region, without the
+artificial 4-bit cliff. The vector lane budget (8 × 43.2 = 345.6 G
+lane-ops/s) sits just under the 4-bit stream's 347.6 G elem/s — **at
+most one lane-op per element**; the MEASURED 5-pass unpack (42 GB/s =
+84 G elem/s) is **24 % of the stream wall** (not "< 12 %" — that was
+the unit-mix number). KV for an 8B-class shape is exactly **128
+KiB/token** (2·8·128·2·32), reaching parity with a 4 GiB weight set at
+**2^15 = 32 Ki tokens** (≈30 k at real sizes) — arithmetic only:
+whether a regime flips at any context is a per-shape measured question,
+not this identity. A 256-cube prefill step is **256 OPs/byte ≈ 2.5×
+the die ridge** (compute-bound); a 16×16 output tile needs **k ≥ 112**
+(rule: 128) to hide its epilogue at 40 lanes.
 
 ## C. Fixed-plane packing (MATH — `Cheat.bitplanes_recombine`)
 

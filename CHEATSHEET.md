@@ -10,16 +10,21 @@ distillation against OUR constants (HW-MAP + the round-7 anchors). The
 arithmetic behind every guardrail and row is stated source-free and
 machine-checked in `CHEAT-MATH.md` (`proof/cheat.lean`).
 
-## 0. The external roofline VALIDATES our measured corpus
+## 0. The external roofline vs our measured corpus (round-4 corrected)
 
-The audit's independent derivation (before reading our numbers): int8
-ridge ≈ **48 OPs/byte** against the ~170 GB/s wall → batch-1 decode at
-**4–8 % of compute peak, hard-bound by weight bytes**; per-element vector
-dequant caps any unpacked format at **~12 %** of the W4 stream rate;
-**≤ 12–24 concurrent rows ride free** (our measured m ≤ 16 flat region);
-KV traffic reaches parity with W4 weights at **~30 k tokens** (our
-measured attention-bound flip at 32k). Four independent agreements with
-HW-MAP — the wall is real, measured twice, once by us.
+The audit's independent derivation, re-graded against OUR errata
+(round-4 C-15/C-17: the earlier "four independent agreements" counted
+our own inlined constants three times and paired one core's OP rate
+with the die's bytes): the die-level ridge is **102 OPs/byte**
+(17.8 T-OP/s ÷ 173.8 GB/s) → batch-1 decode at the MEASURED **12.5 %**
+of compute peak, hard-bound by weight bytes; per-element vector unpack
+is the MEASURED **24 %** of the 4-bit stream rate (one lane-op per
+element is the whole budget); **≤ 51 / 25 concurrent rows ride free**
+(8-bit / 4-bit; our measured m ≤ 16 flat region sits well inside);
+KV-parity with W4 weights at **2^15 tokens** is arithmetic, and whether
+a regime flips at any context is a per-shape measured question (our
+32k MoE cell is weights-bound). The wall is real and measured — once,
+by us, at die level.
 
 ## 1. Guardrails (kills — do not re-litigate)
 
@@ -41,7 +46,8 @@ HW-MAP — the wall is real, measured twice, once by us.
   k = 1 full-range); f32 exact only to k ≤ 1 024; int32 exact to
   k ≤ 2^17. (Matches our i32-saturation rows.)
 - **G6** No variable-length entropy decode (Huffman/rANS) on the vector
-  unit in the decode path: per-element decode = ~12 % of the wall. Any
+  unit in the decode path: per-element decode = the MEASURED 24 % of
+  the 4-bit wall (one lane-op per element is the entire budget). Any
   compressed format must be consumed natively by the matrix unit,
   unpacked with ≥ 4–8 elements per lane-op, or fused into the load path.
 - **G7** QJL-style 1-bit residual at ≤ 3 bits: softmax convexity turns
@@ -54,10 +60,10 @@ HW-MAP — the wall is real, measured twice, once by us.
 
 | # | technique | class | gain arithmetic vs our anchors | exactness | status here | first probe |
 |---|---|---|---|---|---|---|
-| 1 | **ZipServ-class triple-bitmap lossless weight packing** — f16 tiles → 3 aligned bitmaps + base-exponent, branch-free unpack | B/T, EXACT | ~30 % off EVERY f16 stream = ~1.4× effective wall; also KV-f16 and capacity (a 333 GB-class model → ~235 GB) | **bit-exact** | NEW — the only exact-class byte cut | encode our f16 streams; unpack rate in the scratchpad vs the 40-lane budget (must meet G6: packed, branch-free) |
+| 1 | **ZipServ-class triple-bitmap lossless weight packing** — f16 tiles → 3 aligned bitmaps + base-exponent, branch-free unpack | B/T, EXACT | round-4 re-grade (C-17): HERE the weight streams are int8 (no exponent field); a vector-side unpack emits f16 at ≈ 1.0× the wall and the loader caps at 212 GB/s ≤ 1.25× even with a free unpack; the only f16 stream (KV) is dominated by the MEASURED K-int8 (2.13×) — capped ≈ 1.0–1.25× on this machine (the packing identity itself is TRUE — CHEAT-MATH §C) | **bit-exact** | CAPPED HERE — exact-class byte cut only where f16 streams exist | host kill-check FIRST (a clean kill is the deliverable); only then any die time |
 | 2 | **Block-16 Hadamard rotations (QuaRot/SpinQuant class)** — outlier smoothing, offline-fusable into weights; online cost lands on activations only | B/T enabler | turns W4/W2 from quality-lossy into near-neutral; multiplies with every weight lever below | transform exact, quant bounded | NEW — folds into the (existing) requant seat | rotate + requant a real tensor set; measure outlier tails before/after |
-| 3 | **KIVI-class KV 2–4 bit, asymmetric (K per-channel, V per-token) + f16 rolling tail (R≈128)** | B/T | KV term ×2–4 beyond our KV-int8 readings; the audit's KV-parity-at-30k arithmetic says this is THE lever past 32k | quality-loss (2-bit hurts long-CoT reasoning — Kitty); 4-bit near-neutral | EXTENDS our KV-int8 cells | 4-bit first: extend the fused attention kernel's KV intake; PPL + our exactness battery |
-| 4 | **W4A8 co-design (QServe/QoQ class)** — progressive group quant, unpack fused/packed, KV4 | B/T | proven 3.5× on a GDDR-walled part (L40S); our W4 anti-quant route is this class | quality-loss, small | CUT (running queue) — this validates the route + adds the activation-side recipe | the standing W4 gate |
+| 3 | **KIVI-class KV 2–4 bit, asymmetric (K per-channel, V per-token) + f16 rolling tail (R≈128)** | B/T | round-4 re-grade (C-17): erratum 12 — no i4 path on this part; a 4-bit KV unpacked at the ~42 GB/s int4 aggregate costs ≈ 1.04× KV-int8's time per extent, not ×2–4 — capped ≈ 1.04× HERE unless a native 4-bit intake is ever measured; the KV-parity-at-2^15 arithmetic itself stands | quality-loss (2-bit hurts long-CoT reasoning — Kitty); 4-bit near-neutral | EXTENDS our KV-int8 cells — RE-PRICE before it takes a card | 4-bit first: extend the fused attention kernel's KV intake; PPL + our exactness battery |
+| 4 | **W4A8 co-design (QServe/QoQ class)** — progressive group quant, unpack fused/packed, KV4 | B/T | proven 3.5× on a GDDR-walled part (L40S); round-4 re-grade (C-17): HERE W4 rides as int8 at load — no stream-byte cut (2× memory) — ≈ 1× until the cube path lands; the activation-side recipe still attaches | quality-loss, small | CUT (running queue) — the standing W4 gate is the decider, not this row | the standing W4 gate |
 | 5 | **Quest/DuoAttention query-aware page selection** — bounding-box pages, retrieval vs streaming heads | B/T at long ctx | our per-span page tables + 256 KiB pages are the substrate; 2–5× on the attention term at ≥ 32k | near-lossless | NEW — rides the existing page infra | per-page score histograms on real traces → selectable fraction |
 | 6 | **MoE expert compression (D2-MoE / delta-vs-shared / dedup class)** | B@R + B/T | expert bytes 1.5–2× on top of W4; hot/cold tiers already modeled (our two-tier cells) | quality-loss, small | NEW — pairs with the expert kernel's arena | expert-similarity census on the A3B-class + GLM-class checkpoints |
 | 7 | **MiniCache adjacent-layer KV merge** | B/T | KV ×~5 at 4-bit, near-lossless; changes the cache contract (merge at load? at serve?) | near-lossless | NEW | offline merge quality sweep first (no kernel work until quality holds) |
@@ -67,15 +73,16 @@ HW-MAP — the wall is real, measured twice, once by us.
 
 ## 3. What the sweep changes about our ranking
 
-- The **exact class exists**: lossless bitmap packing (#1) is the only
-  candidate that cuts bytes with ZERO quality debate — it stacks under
-  W4 (pack the int4 streams? the codec is exponent-targeted; probe) and
-  on KV-f16 arms.
-- The **W4 route we already cut is the sweep's #4** — independently
-  validated, with the activation-side recipe (progressive groups,
-  smooth-attention) attached for the implementation season.
-- Past 32k the lever ranking flips to **KV-side** (#3, #5, #7) — our own
-  measured regime boundary, now with three independent techniques aimed
-  at it.
+- The **exact class exists as arithmetic** — the packing identity is
+  machine-checked TRUE (CHEAT-MATH §C) — but on THIS machine its byte
+  cut is capped ≈ 1.0–1.25× (row #1 re-grade): no f16 weight streams,
+  loader-capped unpack, KV-f16 dominated by measured K-int8.
+- The **W4 route we already cut is the sweep's #4** — same class, with
+  the activation-side recipe (progressive groups, smooth-attention)
+  attached for the implementation season; here its byte cut rides
+  entirely on the standing W4 cube-path gate.
+- At long context the lever ranking leans **KV-side** (#3, #5, #7) —
+  the 1M cells are the measured long-context anchors; the 2^15
+  KV-parity arithmetic frames where the term starts to dominate.
 - Speculative decoding (#8) is the only OVERLAP-class lever and our flat
   region was measured for it before we knew the literature agreed.

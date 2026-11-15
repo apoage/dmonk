@@ -171,10 +171,15 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 > slab's ANCHOR is now the MEASURED kernel (M0 165.8 GB/s t = 1, 170.2 at t ≥ 4; 99.2 % of the design
 > target) — the D2-derived serial anchor retires and **E29 is BANKED at 14.64 ms per MoE token** (7.7 %
 > under the derived promise). The deferred-guard cell amortizes at the MEASURED retry share (τ = 8 % /
-> 5.5 % of launches at cap 3072 / 61440 vs break-even 0.19 % — the round-6 premise was stale ~30–40×),
-> and **the 32k tie is settled: E29 #1 on both caps** (the wide cap misses the line by 1 576 ns/layer).
+> 5.5 % of launches at cap 3072 / 61440 vs the BANKED-E29 break-even 5.32 % — margins +2.7 pt / +0.18 pt
+> of launch share, the wide cap a measurement-resolution tie; round-4 C-1: the 0.19 % quoted the retired
+> pre-M0 E29),
+> and **the 32k tie is settled at the measured rates: E29 #1 on both caps** (the wide cap misses the line by 1 576 ns/layer).
 > Headline MoE 32k t = 1: 1.755 → **1.956 trip-free / 1.926 measured-amortized / 2.103 at the realized
-> launch bound (≤ 36 µs)**; 128k 1.233; 1M 0.276; two instances at the measured card-scale 2.0× = 3.853.
+> launch bound (≤ 36 µs)**; 128k 1.233; 1M 0.276; two instances at the measured card-scale 2.0× ≈ **3.52**
+> (corrected round-4 C-3: the printed 3.853 ran the 8-die x=0 step for the 4-die instance — xs computed,
+> never passed; corrected 3.519 / 3.449 tok/s/card at c = 2.000 / 1.990, replication > 1.926 survives for
+> c ≥ ~1.1 — see `[R7F-inst-moe-32k]`).
 > All round ≤ 6 cells keep their printed values as history.
 
 ## Constants used

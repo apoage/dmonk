@@ -1636,5 +1636,26 @@ def main7():
           f"(card-scale measured ceiling 2.0x; the die-scale c = 1.990 and the intra-card two-die ratio 1.001 say no interference at either level)")
 
 
+def main7f():
+    # ---- ROUND 7F (2026-11-15; steering corrections, double-confirmed by the round-4 challenge arms) ----
+    # (a) C-3: the [R7-inst-moe-32k] cell above ran the 8-die x=0 chain step (T1 = 129 743 539 ns) on the
+    #     4-die instance -- xs = [182, 170, 170, 182] (min_x) was computed and never passed. The corrected
+    #     4-die instance step with the mandatory W4 cold tier xs, the erratum-19 merged cold slabs
+    #     (206 157 / 230 458 ns) and the measured amort attention (1 015 340 ns/layer) is
+    #     142 055 807 / 144 929 937 ns (theorem-checked in the round-4 arms): 3.519 / 3.449 tok/s/card
+    #     at c = 2.000 (3.502 / 3.432 at 1.990) -- the printed 3.853 overstated by +0.334..+0.404.
+    #     The replication verdict > 1.926 survives iff c >= 1.095 / 1.118.
+    # (b) C-1: the "break-even 0.19 %" in [R7-inputs] quotes the RETIRED pre-M0 E29. At the BANKED E29
+    #     the 32k break-even retry share is 5.32 % of launches: measured tau 8.0 % clears by 2.7 pt
+    #     (cap 3072), 5.5 % by 0.18 pt (cap 61440) -- a measurement-resolution tie at the wide cap.
+    print("[R7F-inst-moe-32k] CORRECTED two instances: 142055807 / 144929937 ns -> "
+          f"{t3(tps_card_inst(1000, 142_055_807))} / {t3(tps_card_inst(1000, 144_929_937))} tok/s/card at c = 2.000 "
+          f"({t3(1000 * 199 * 10**7 // (4 * 142_055_807))} / {t3(1000 * 199 * 10**7 // (4 * 144_929_937))} at c = 1.990); "
+          "replication > 1.926 iff c >= 1.095 / 1.118 (the 3.853 print ran the 8-die x=0 step: +0.334..+0.404 over)")
+    print("[R7F-breakeven-banked] at the BANKED E29 the 32k break-even retry share = 5.32 % of launches: measured tau 8.0 % / 5.5 % "
+          "-> cap 3072 clears +2.7 pt, cap 61440 +0.18 pt (measurement-resolution tie; the [R7-inputs] 0.19 % / 42x quoted the retired E29)")
+
+
 if __name__ == "__main__":
     main7()
+    main7f()
