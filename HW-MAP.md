@@ -406,7 +406,12 @@ identity per run — device enumeration order is NOT the PCIe order.
   (128-row chunks, one fused GEMM per chunk per layer): 6.6 → 101-127
   tok/s (15-19× the vendor prefill path), first-token latency −94%
   (382 → 20 s at ~2.5k span; 1 552 → 101 s at ~10k) at unchanged decode
-  — the earlier "prefill rides the vendor path" state is retired.
+  — the earlier "prefill rides the vendor path" state is retired. And a
+  dead vendor V-materialization the serving hook had been LEAVING IN the
+  long-context graph (4.5 GiB/step at ~32k, skipped late = still
+  computed) was pre-skipped: single-sequence two-die 32k decode
+  6.2 → 9.7 tok/s (+56 %) bit-identical text — long-context cells
+  measured before that removal are conservative on the kernel arm.
   DECODE-BIAS
   ROOT-CAUSED + FIXED: the kernel truncated the attended extent to a
   multiple of 16 — 14 of 16 decode steps dropped the last 1-14 cells
