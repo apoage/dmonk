@@ -2,7 +2,7 @@
 # `lake build` compiles model.lean, smoke.lean, moe.lean, fleet.lean, attn.lean, alt.lean and cheat.lean; all compile standalone
 # with `lean <file>.lean` since they import nothing beyond Init.
 name = "dmonkproof"
-defaultTargets = ["Model", "Smoke", "Moe", "Fleet", "Attn", "Alt", "Cheat"]
+defaultTargets = ["Model", "Smoke", "Moe", "Fleet", "Attn", "Alt", "Cheat", "Check"]
 
 [[lean_lib]]
 name = "Model"
@@ -31,3 +31,7 @@ roots = ["alt"]
 [[lean_lib]]
 name = "Cheat"
 roots = ["cheat"]
+
+[[lean_lib]]
+name = "Check"
+roots = ["check"]

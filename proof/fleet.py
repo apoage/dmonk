@@ -1638,3 +1638,75 @@ def main7():
 
 if __name__ == "__main__":
     main7()
+
+
+# =====================================================================================================================================
+# PROMPT-7 (2026-11-15) — Challenge Round & Mission B Fork (`DESIGN-FORK-1.md`):
+#   1. [CHK-*] Corrected Round-7 4-die instance step (`[R7-inst-moe-32k]` on line 1635 used `T1 = 129 743 539 ns`, the 8-die `x = 0`
+#      step, instead of applying `xs = [182, 170, 170, 182]` from line 1633): with `hot = T_SLAB_M0 = 101 186 ns` (or `101 189 ns`),
+#      `cold = 206 157 ns` (T) / `230 458 ns` (C), and `amort-cap3072 = 1 015 340 ns`, the true 4-die instance step is `142 055 807 ns`
+#      (T) / `144 929 937 ns` (C) -> `3.519 / 3.449 tok/s/card` at `c = 2.000` (`3.502 / 3.432` at `c = 1.990`), vs the overstated `3.853`.
+#      Also: megakernel (`V2`) re-scored under the realized launch bound (`36 us` / `26.7 us` vs `91 us`).
+#   2. [FORK-*] Hybrid `K-int8 / V-f16` + Wide-Cap (`61 440`) Deferred-Guard Attention (`DESIGN-FORK-1.md`) on the 8-die chain and
+#      4-die instance fleet (`kv_tok = 3 072 B/tok`, `a_fork = A.AMORT_K8_32K[1] = 798 656 ns` at 32k, `2 880 000 ns` at 128k,
+#      `22 783 600 ns` at 1M), plus the zero-crossing 8-die Dense-1M W4 tier (`6 436.38 ms -> 0.038 tok/s/card` vs `0.027` rowmax KV-int8).
+# =====================================================================================================================================
+def min_x_k8(s, pos, L, B=1, ort=O_RT):
+    room = DIE_MEM - ort - WS - LAYERS4[s["name"]][pos] * 3072 * L * B
+    if inst_die_weights(s, pos, 1000) > room: return None
+    if inst_die_weights(s, pos, 0) <= room: return 0
+    lo, hi = 0, 1000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if inst_die_weights(s, pos, mid) <= room: hi = mid
+        else: lo = mid + 1
+    return lo
+
+def inst_r7_step(xs, th, tc, a):
+    exp_tot = sum(LAYERS4[MOE["name"]][p] * ((24 * (1000 - xs[p]) * th + 24 * xs[p] * tc) // 1000) for p in range(4))
+    return 33_214_179 + 28 * a + exp_tot
+
+def main_fork():
+    D, M = DENSE, MOE
+    print("\n# ---- PROMPT-7 (2026-11-15; challenge round & DESIGN-FORK-1.md): [CHK-*] and [FORK-*] cells; every label above unchanged ----")
+    xs = [min_x(M, p, 32768) for p in range(4)]
+    T_r7_T = inst_r7_step(xs, T_SLAB_M0, T_SLAB_W4 + MERGE6F[0], T7_AMORT32[0])
+    T_r7_C = inst_r7_step(xs, T_SLAB_M0, T_SLAB_W4 + MERGE6F[1], T7_AMORT32[0])
+    T1_8die = step7(M, 32768, "amort-cap3072")[0]
+    print(f"[CHK-r7-inst-moe-32k] corrected Round-7 4-die instance step (applying xs={xs}, hot={T_SLAB_M0}, amort-cap3072={T7_AMORT32[0]}): "
+          f"T={ms2(T_r7_T)} ms -> {t3(tps_card_inst(1000, T_r7_T))} at c=2.000 / {t3(tps_inst_c(1000, H10_CARD, T_r7_T))} at c=1.990 (needs c >= {t3(c_min(T_r7_T, tps_card(1000, T1_8die) + 1))}); "
+          f"C={ms2(T_r7_C)} ms -> {t3(tps_card_inst(1000, T_r7_C))} at c=2.000 / {t3(tps_inst_c(1000, H10_CARD, T_r7_C))} at c=1.990 (needs c >= {t3(c_min(T_r7_C, tps_card(1000, T1_8die) + 1))}); "
+          f"[R7-inst-moe-32k] printed {t3(tps_card_inst(1000, T1_8die))} by evaluating tps_card_inst on the 8-die x=0 step {ms2(T1_8die)} ms (+{tps_card_inst(1000, T1_8die) - tps_card_inst(1000, T_r7_T)} / +{tps_card_inst(1000, T1_8die) - tps_card_inst(1000, T_r7_C)} overstatement)")
+    sav_91 = 28 * (5 * 91_000 - (5 * 20_000 + 3581))
+    sav_36 = 28 * (5 * 36_000 - (5 * 20_000 + 3581))
+    sav_267 = 28 * (5 * 26_700 - (5 * 20_000 + 3581))
+    sav_d36 = 120 * (4 * 36_000 - (4 * 20_000 + 15388))
+    sav_d267 = 120 * (4 * 26_700 - (4 * 20_000 + 15388))
+    print(f"[CHK-mega-realized] megakernel (V2, c_sync=20 us) net savings under realized launch bound: MoE 91 us -> {ms2(sav_91)} ms, 36 us -> {ms2(sav_36)} ms (+1.8 %), "
+          f"26.7 us -> {ms2(sav_267)} ms (+0.7 %); Dense 36 us -> {ms2(sav_d36)} ms (+0.25 %), 26.7 us -> {ms2(sav_d267)} ms (+0.06 %); c_sync break-even: MoE <= 35283 / 25983 ns, Dense <= 32153 / 22853 ns")
+    for s in (M, D):
+        for lab, L in L6.items():
+            if not feasible(s, L): continue
+            a_f = A.AMORT_K8_32K[1] if L == 32768 else A.DFR_K8[L]
+            rd_base = "amort-cap3072" if (L == 32768 and s["moe"]) else "trip-free"
+            Tb, _ = step7(s, L, rd_base); Tf = Tb - s["nL"] * a7(L, rd_base) + s["nL"] * a_f
+            Tfl = Tf - (s["nL"] * s["nlaunch"] + 2) * (T_LAUNCH - T_LAUNCH7)
+            print(f"[FORK-step-{s['name']}-{lab}] K-int8 / V-f16 + cap 61440: {ms2(Tf)} ms -> {t3(tps_card(1000, Tf))} ({spc(pcs(tps_card(1000, Tf), tps_card(1000, Tb)))} vs R7 {ms2(Tb)} ms -> {t3(tps_card(1000, Tb))}; "
+                  f"launch realized {ms2(Tfl)} ms -> {t3(tps_card(1000, Tfl))})")
+    xs_f32 = [min_x_k8(M, p, 32768) for p in range(4)]
+    xs_f128 = [min_x_k8(M, p, 131072) for p in range(4)]
+    xs_f1m = [min_x_k8(M, p, 1 << 20) for p in range(4)]
+    xs_fd32 = [min_x_k8(D, p, 32768) for p in range(4)]
+    T_fk_inst = inst_r7_step(xs_f32, T_SLAB_M0, T_SLAB_W4 + MERGE6F[0], A.AMORT_K8_32K[1])
+    print(f"[FORK-inst-fit] 4-die minimal x under K-int8 / V-f16 (3072 B/tok): MoE 32k {xs_f32} (was {xs}), MoE 128k {xs_f128}, MoE 1M {xs_f1m}, Dense 32k {xs_fd32}; "
+          f"MoE 32k 2-instance step {ms2(T_fk_inst)} ms -> {t3(tps_card_inst(1000, T_fk_inst))} at c=2.000 / {t3(tps_inst_c(1000, H10_CARD, T_fk_inst))} at c=1.990")
+    w_605 = D["w_layer"] * 10 * (1000 - 605) // (1000 * 1746) + D["w_layer"] * 10 * 605 // (1000 * 800)
+    w_567 = D["w_layer"] * 10 * (1000 - 567) // (1000 * 1746) + D["w_layer"] * 10 * 567 // (1000 * 800)
+    w_517 = D["w_layer"] * 10 * (1000 - 517) // (1000 * 1746) + D["w_layer"] * 10 * 517 // (1000 * 800)
+    T_d1m_k8 = 30 * w_605 + 15 * w_567 + 75 * w_517 + (2_289_788_669 - 120 * (D["w_layer"] * 10 // 1746)) + 120 * A.DFR_K8[1 << 20]
+    T_d1m_det = 9_024_300_749
+    print(f"[FORK-dense-1M] 8-die Dense 1M on K-int8 / V-f16 (zero per-block crossings) + W4 weights x=[605, 567, 517..517, 605] at R_W4=80.0 GB/s: "
+          f"{ms2(T_d1m_k8)} ms -> {t3(tps_card(1000, T_d1m_k8))} tok/s/card vs deterministic rowmax KV-int8 {ms2(T_d1m_det)} ms -> {t3(tps_card(1000, T_d1m_det))} (+40.7 %)")
+
+if __name__ == "__main__":
+    main_fork()

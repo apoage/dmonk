@@ -1143,3 +1143,58 @@ def main6():
 
 if __name__ == "__main__":
     main6()
+
+
+# =====================================================================================================================================
+# PROMPT-7 (2026-11-15) — Challenge Round & Mission B Fork (`DESIGN-FORK-1.md`):
+#   1. [CHK-*] Real-model serving trip rates (`tau = 8.0 %` at cap 3072, `5.5 %` at cap 61440) vs Round 6's synthetic premise
+#      (`0.087-0.22 %`): amortized 32k moves to `1 015 308 / 993 493 ns` (using `R = 872 600`) or `1 015 340 / 993 515 ns` (using
+#      `R = 873 000`), settling the 32k tie in favor of E29 on both caps.
+#   2. [FORK-*] Hybrid `K-int8 / V-f16` + Wide-Cap (`61 440`) Deferred-Guard Attention (`DESIGN-FORK-1.md`):
+#      * KV stream = `3 072 B/tok/layer` (`3/4` of f16's `4 096 B`); `V` and `P` stay `f16`, so the kernel runs on the zero-crossing
+#        deferred guard at `mu = 8` with `cap = 61 440 = 15 x 2^12` (`tau = 5.5 %`), avoiding both `T4r_i8` (lazy x full KV-int8
+#        saturation) and `T6a_rowmax_det` (Erratum-#31's `17.6 us/block` rowmax crossing).
+#      * Score MMA uses single-call `(16, 16, 128)` `i8 x i8 -> i32` (`32 x 15 = 480 ns/block`, 1 `C_s` chunk set = `32 KiB` in `L0C`;
+#        and at `d = 64`, single-call `k = 64` per the retracted Erratum #14, `90.2 vs 51.4 GB/s` = `1.75x`, `K-int8` at `87.6 GB/s` = `2.13x`).
+#      * On the measured Session-5/7 K+V phase decomposition (`STREAM5 = 770 800 ns` at 32k -> half-K stream `192 700 ns` minus `8 000 ns`
+#        measured ~3 % dequant delta = `184 700 ns` net saved per 64 blocks = `2 885 ns/block`):
+#        32k trip-free `760 800 ns` (`798 656 ns` amortized at cap 61440, `-21.3 %` vs shipped f16 `1 015 340 ns`),
+#        128k `2 880 000 ns` (`-20.4 %`), 1M `22 783 600 ns` (`-20.6 %`).
+# =====================================================================================================================================
+KV_TOK_K8 = 3072
+SAV_K8_32K = STREAM5 // 4 - 8_000                                 # 192 700 - 8 000 = 184 700 ns saved per 64 blocks (32k)
+DFR_K8 = {
+    32768:   T6_DFR[32768]   - SAV_K8_32K,                        # 760 800 ns
+    131072:  T6_DFR[131072]  - 4 * SAV_K8_32K,                    # 2 880 000 ns
+    1 << 20: T6_DFR[1 << 20] - 32 * SAV_K8_32K,                   # 22 783 600 ns
+}
+RERUN_K8_32K = 873_000 - SAV_K8_32K                               # 688 300 ns per tripped step at 32k
+AMORT_K8_32K = (
+    DFR_K8[32768] + 80 * RERUN_K8_32K // 1000,                    # 815 864 ns (cap 3072, tau = 8.0 %)
+    DFR_K8[32768] + 55 * RERUN_K8_32K // 1000,                    # 798 656 ns (cap 61440, tau = 5.5 %)
+)
+
+def ddr4_block_k8(G, mt=1, legs=2):
+    return tn((BL_of(mt) * 384 + bounce_bytes(mt, legs)) * 8, G)
+
+def main_fork():
+    g256 = G_SHUF[256 * KiB]
+    R = T6_CANON32 - T6_DFR[32768]
+    print("\n# ---- PROMPT-7 (2026-11-15; challenge round & DESIGN-FORK-1.md): [CHK-*] and [FORK-*] cells; every label above unchanged ----")
+    print(f"[CHK-trip-32k] measured production retry share tau = 8.0 % (cap 3072) / 5.5 % (cap 61440) vs round-6 synthetic 0.087-0.22 %: "
+          f"amortized 32k = {amort6(T6_DFR[32768], R, 8000)} / {amort6(T6_DFR[32768], R, 5500)} ns (R={R}) or {T6_DFR[32768] + 80 * 873_000 // 1000} / "
+          f"{T6_DFR[32768] + 55 * 873_000 // 1000} ns (R=873000); softmax-phase delta 624000 - 565000 = {624_000 - 565_000} ns (explains HW-MAP's '-59 us')")
+    print(f"[FORK-block-k8] K-int8 / V-f16 block (512 tok, mt=1, g=8, d=128): KV 192 KiB + bounce 32 KiB = 224 KiB/core -> DDR {ddr4_block_k8(g256, 1, 2)} ns at 169.2 GB/s "
+          f"(vs f16 {ddr4_block_ns(g256, 1, 2)} ns); vec lazy-T + K-scale {vec4_ns(512, 1, 'lazy', 'T') + 388} ns < DDR; MMA 32 x 15 = {32 * 15} ns (single-call k=128 i8, "
+          f"L0C 1x32+8x8 = 96 KiB < 128 KiB); 0 per-block scalar crossings on wide cap 61440 = 15 x 2^12 (< 65504, > e^11)")
+    for lab, L in (("32k", 32768), ("128k", 131072), ("1M", 1 << 20)):
+        T0, Tk = T6_DFR[L], DFR_K8[L]
+        extra = f"; amort cap61440 (5.5 %): {AMORT_K8_32K[1]} ns ({spct(AMORT_K8_32K[1], 1_015_340)} vs shipped f16 1015340, {spct(AMORT_K8_32K[1], 2_065_200)} vs rowmax KV-i8 2065200)" if L == 32768 else ""
+        print(f"[FORK-cells-{lab}] K-int8 / V-f16 + cap 61440 deferred guard: trip-free {Tk} ns ({spct(Tk, T0)} vs f16 {T0}; f16-eq {t10(rateT(L * KV_TOK, Tk))} GB/s, "
+              f"own-bytes {t10(rateT(L * KV_TOK_K8, Tk))} GB/s){extra}")
+    s4_128k = 256 * ddr4_block_k8(g256, 1, 2) + 19_328
+    print(f"[FORK-moe128k-analytical] analytical step4 K-int8 / V-f16 at 128k (legs=2, 169.2 GB/s): {s4_128k} ns vs T_w anchored {T_LAYER_MOE} ns -> "
+          f"flips analytical MoE-128k (anchored) back to WEIGHTS-bound by {T_LAYER_MOE - s4_128k} ns/layer")
+
+if __name__ == "__main__":
+    main_fork()
