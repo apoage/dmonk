@@ -31,6 +31,12 @@ spec sheets; every claim stands on its own measurement or proof.
 | 4 | Fleet partition planner: 4 cards × 2 dies, no P2P | `DESIGN-4.md` | `proof/fleet.lean` | `PROOF-COVERAGE-4.md` |
 | 5 | Cross-problem search for alternative solution families | `ALTERNATIVES.md` | `proof/alt.lean` | `PROOF-COVERAGE-5.md` |
 
+`PROOF-COVERAGE-CHECK.md` is the fresh-eyes challenge round (PROMPT-7): 59 independent re-derivations in `proof/check.lean` (namespace
+`Chk`, model `proof/check.py`), a taint ranking, the list of unmeasured variables that flip a decision, the dominated-alternatives table
+re-scored, and the corrections it applied in place (marked **challenge:**). `DESIGN-FORK-PIPE.md` is the fork that round drafted —
+host-scheduled sequence pipelining on the unchanged int8 chain (`proof/fork.lean`, `proof/fleet.py` `[FORK-*]`); it does not rank until
+its first experiment runs.
+
 `ERRATA-IMPACT.md` audits all five designs against the later silicon errata (#18–#31), with the corrections applied in place
 (marked **audit**) and ranked. `CHEATSHEET.md` grades the external technique landscape against this machine's
 measured constants; `CHEAT-MATH.md` is its arithmetic layer — condensed, source-free statements, machine-checked
@@ -56,7 +62,7 @@ The Lean files use **core Lean 4 only** (no Mathlib, no Batteries; closed by `de
 ```sh
 # toolchain: leanprover/lean4:v4.35.0 (via elan)
 cd proof
-lake build                 # all targets: Model, Smoke, Moe, Fleet, Attn, Alt
+lake build                 # all targets: Model, Smoke, Moe, Fleet, Attn, Alt, Cheat, Check, Fork
 lean alt.lean              # or any single file, standalone
 
 python3 alt.py             # print the labelled numbers a design quotes
@@ -67,9 +73,9 @@ python3 alt.py             # print the labelled numbers a design quotes
 ```
 HW-MAP.md, ISA.md          measured hardware + primitives
 PROBLEM*.md                problem statements
-DESIGN*.md, ALTERNATIVES.md designs
+DESIGN*.md, ALTERNATIVES.md designs (DESIGN-FORK-*.md: fork drafts, unranked)
 ERRATA-IMPACT.md           errata #18–#31 audit of the designs
-PROOF-COVERAGE*.md         claim → theorem ledgers
+PROOF-COVERAGE*.md         claim → theorem ledgers (-CHECK: the challenge round)
 PROMPT*.md                 design / proof round prompts
 proof/                     *.lean theorems, *.py models, lakefile
 ```

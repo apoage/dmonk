@@ -1659,3 +1659,97 @@ def main7f():
 if __name__ == "__main__":
     main7()
     main7f()
+
+
+# =====================================================================================================================================
+# FORK (PROMPT-7 challenge round, 2026-11-15) — DESIGN-FORK-PIPE.md: sequence pipelining of the UNCHANGED int8 8-die chain, built in the
+# host from per-die workers instead of waited for as a runtime capability (H4). Premise rows [M]: two instances on disjoint dies at full
+# solo speed (1.99x), one process / two threads on both dies of a card at 1.000-1.001 of solo-sum, two instances on disjoint cards at
+# 2.0x, the host bounce unchanged under a saturating D2D load. UNMEASURED: concurrency beyond pairs, the per-die worker itself, the
+# bounce with Pi transfers in flight. Model: with Pi sequences staggered along the chain each die serves one sequence at a time, so
+# fleet tokens/s = min(c(Pi) / T_step, 1 / max block) -- T_step and the blocks are the round-7 step's own terms, nothing new is priced.
+# Labels [FORK-*]; every label above keeps printing its value (append-only). Theorems: proof/fork.lean (namespace Fork).
+# =====================================================================================================================================
+def layer7_ns(s, L, rd="trip-free", launch="primary"):
+    """one layer of the round-7 step: GEMM (MoE: the expert slabs at the measured M0) + attention + launches + the quant passes"""
+    tl = T_LAUNCH if launch == "primary" else T_LAUNCH7
+    g = gemm3_ns(s, 1, "uniform", "anchor") - (s["slabs"] * D_of("uniform", 1) * (T_SLAB_SER - T_SLAB_M0) if s["moe"] else 0)
+    return g + a7(L, rd) + s["nlaunch"] * tl + quant_ns(s, 1, "fixed")
+def die_block7(s, pos, L, rd="trip-free", launch="primary"):
+    """the time die `pos` holds one sequence: its layers, the lm_head on the last die, and its two bounce halves (as die_block3)"""
+    tl = T_LAUNCH if launch == "primary" else T_LAUNCH7
+    T = s["layers"][pos] * layer7_ns(s, L, rd, launch)
+    if pos == DIES - 1: T += tn(s["w_head"], R_GEMM) + 2 * tl
+    act = s["d"] * 2
+    if pos > 0: T += tn(act, H2D[POS[pos][1]]) + LAM3
+    if pos < DIES - 1: T += tn(act, D2H[POS[pos][1]]) + LAM3
+    else: T += tn(s["vocab"] * 4, D2H[POS[pos][1]]) + LAM3
+    return T
+def pipe7(Pi, T, bmax, c=None):
+    """tokens/s per card (thousandths) with Pi staggered sequences at aggregate concurrency c (thousandths of one stream; default Pi)"""
+    c = 1000 * Pi if c is None else c
+    return min(1000 * c * 10 ** 6 // (4 * T), 10 ** 12 // (4 * bmax))
+
+def main_fork():
+    D, M = DENSE, MOE
+    print("\n# ---- FORK (PROMPT-7 challenge round, 2026-11-15; DESIGN-FORK-PIPE.md): [FORK-*] cells -- host-built sequence pipelining of the unchanged int8 chain. Every label above is unchanged ----")
+    rd = {"moe": "amort-cap3072", "dense": "trip-free"}
+    cells = {}
+    for s in (M, D):
+        T, _ = step7(s, 32768, rd[s["name"]])
+        bl = [die_block7(s, p, 32768, rd[s["name"]]) for p in range(DIES)]
+        assert sum(bl) + LAM3 == T, (s["name"], sum(bl) + LAM3, T)
+        cells[s["name"]] = (T, bl)
+        print(f"[FORK-blocks-{s['name']}-32k] per-die blocks {[ms2(b) for b in bl]} ms; sum + lambda = {sum(bl) + LAM3} ns = the round-7 step exactly; max block {max(bl)} ns; "
+              f"collision-free up to Pi = {T // max(bl)} (Pi x max block <= T_step), block-bound at Pi = 8")
+        print(f"[FORK-pi-{s['name']}-32k] tokens/s/card at Pi = 1 / 2 / 4 / 8 staggered sequences (c = Pi): " + " / ".join(t3(pipe7(Pi, T, max(bl))) for Pi in (1, 2, 4, 8))
+              + f" ; at the measured pair concurrency c = 1.990: Pi = 2 -> {t3(pipe7(2, T, max(bl), 1990))} ; a balanced split would give {t3(8 * 10 ** 12 // (4 * T))} at Pi = 8")
+        Tl, _ = step7(s, 32768, rd[s["name"]], launch="realized"); bll = [die_block7(s, p, 32768, rd[s["name"]], "realized") for p in range(DIES)]
+        assert sum(bll) + LAM3 == Tl
+        print(f"[FORK-pi-{s['name']}-32k-realized] the same at the realized launch bound (36 us): " + " / ".join(t3(pipe7(Pi, Tl, max(bll))) for Pi in (1, 2, 4, 8)))
+    # ---- V3 (two 4-die instances) recomputed BY THE MODEL at the round-7 anchors -- [R7F-inst-moe-32k] is a hard-coded print
+    xs = [min_x(M, p, 32768) for p in range(4)]; xd = [min_x(D, p, 32768) for p in range(4)]
+    a3m = attn3_seq(M, 32768, 1, 1692)[0]; a3d = attn3_seq(D, 32768, 1, 1692)[0]
+    T_SLAB3["m0"] = T_SLAB_M0
+    v3m = [inst_step3c(M, 32768, xs=xs, hot="m0", cold=T_SLAB_W4 + mg)[0] - M["nL"] * a3m + M["nL"] * a7(32768, "amort-cap3072") for mg in MERGE6F]
+    del T_SLAB3["m0"]
+    v3d = [inst_step3c(D, 32768, xs=xd, cold=T_SLAB_W4 + mg)[0] - D["nL"] * a3d + D["nL"] * a7(32768) for mg in MERGE6F]
+    Tm, Td = cells["moe"][0], cells["dense"][0]
+    print(f"[FORK-v3-moe-32k] V3 by the model at the round-7 anchors (x {xs}, hot slab {T_SLAB_M0}, merged cold slabs {T_SLAB_W4 + MERGE6F[0]} / {T_SLAB_W4 + MERGE6F[1]}): "
+          f"{v3m[0]} / {v3m[1]} ns -> {t3(tps_card_inst(1000, v3m[0]))} / {t3(tps_card_inst(1000, v3m[1]))} tok/s/card at c = 2.000 "
+          f"(the [R7F-inst-moe-32k] print carries 142055807 / 144929937: {v3m[0] - 142_055_807} / {v3m[1] - 144_929_937} ns under the model -- it used a 101 186 ns slab; cells equal at three decimals)")
+    print(f"[FORK-vs-v3-moe-32k] the same two sequences: Pi = 2 on the chain {t3(pipe7(2, Tm, 1))} vs V3 {t3(tps_card_inst(1000, v3m[0]))} / {t3(tps_card_inst(1000, v3m[1]))} "
+          f"({spc(pcs(pipe7(2, Tm, 1), tps_card_inst(1000, v3m[0])))} / {spc(pcs(pipe7(2, Tm, 1), tps_card_inst(1000, v3m[1])))}) at ANY equal c (T_step {Tm} < T_inst {v3m[0]}); "
+          f"per-sequence latency {ms2(Tm)} vs {ms2(v3m[0])} ms; no int4 tier, no cold chain (E30), no megabyte fit (H11); "
+          f"Pi = 2 clears the single chain iff c >= {t3(c_min(Tm, tps_card(1000, Tm) + 1))} (V3: {t3(c_min(v3m[0], tps_card(1000, Tm) + 1))} / {t3(c_min(v3m[1], tps_card(1000, Tm) + 1))})")
+    print(f"[FORK-vs-v3-dense-32k] Pi = 2 on the chain {t3(pipe7(2, Td, 1))} vs V3 {t3(tps_inst_c(1000, H10_CARD, v3d[0]))} / {t3(tps_inst_c(1000, H10_CARD, v3d[1]))} (c = 1.990) ; "
+          f"two rows BATCHED on the chain (weights read once): {t3(tps_card(2000, step5f(D, 32768, a7(32768), B=2)[0]))} -- dense V3 loses to plain batching at every c <= 2")
+    Tb2 = step5f(M, 32768, a7(32768, 'amort-cap3072'), B=2)[0] - M["nL"] * M["slabs"] * D_of("uniform", 2) * (T_SLAB_SER - T_SLAB_M0)
+    print(f"[FORK-vs-batch-moe-32k] MoE, two rows batched (16 distinct experts, M0 slab): {ms2(Tb2)} ms -> {t3(tps_card(2000, Tb2))} -- batching does not rescue MoE "
+          f"(distinct experts scale with rows); staggering does ({t3(pipe7(2, Tm, 1))})")
+    # ---- memory: Pi contexts per die on the full-int8 8-die partition
+    for s in (M, D):
+        room = min((DIE_MEM - O_RT - WS - die_weights(s, p)) // (s["layers"][p] * s["kv_tok"]) for p in range(DIES))
+        slack = min(DIE_MEM - die_total(s, p, 32768, 8) for p in range(DIES))
+        print(f"[FORK-mem-{s['name']}] context budget per die: L x Pi <= {room} tokens (f16 KV) -> Pi = 8 up to L = {room // 8}, Pi = 2 up to {room // 2}, 1M only at Pi = {room // (1 << 20)}; "
+              f"at 32k with 8 contexts the tightest die keeps {gb1(slack)} GB free (V3: 24.5 MB before the page-waste term, negative after it)")
+    # ---- beyond 32k (trip-free cells; tau unmeasured off 32k)
+    for lab, L in (("128k", 131072),):
+        T, _ = step7(M, L, "trip-free"); bl = [die_block7(M, p, L, "trip-free") for p in range(DIES)]
+        print(f"[FORK-pi-moe-{lab}] trip-free: " + " / ".join(t3(pipe7(Pi, T, max(bl))) for Pi in (1, 2, 4, 8)) + " at Pi = 1 / 2 / 4 / 8 (Pi = 8 needs L <= 240 727: feasible)")
+    # ---- member S: one layer step split across the 8 dies by the HOST (N-split / head-split custom launches, gathered through the host) --
+    # the model is DESIGN-4's own "tensor-split worked" what-if (step_tsplit3) on the round-7 anchors; its stated blocker is the RUNTIME's
+    # op-split fault (erratum 11) -- independent custom launches per die are not that op. UNMEASURED: same-step launches on several dies.
+    for s in (M, D):
+        out = []
+        for lr in ("primary", "realized"):
+            tl = T_LAUNCH if lr == "primary" else T_LAUNCH7
+            T0 = step7(s, 32768, rd[s["name"]], launch=lr)[0]
+            g = (tn(s["w_attn"], 8 * R_GEMM) + 2 * F_MOE + s["slabs"] * D_of("uniform", 1) * T_SLAB_M0 // 8) if s["moe"] else tn(s["w_layer"], 8 * R_GEMM)
+            T = s["nL"] * (g + a7(32768, rd[s["name"]]) // 8) + tn(s["w_head"], 8 * R_GEMM) + (s["nL"] * s["nlaunch"] + 2) * tl \
+                + s["nL"] * quant_ns(s, 1, "fixed") + s["nL"] * 2 * t_reduce(LAM3, 1, s["d"])
+            out.append(f"{T} ns = {ms2(T)} ms -> {t3(tps_card(1000, T))} ({T0 * 10 // T / 10}x the chain at the same launch reading, launches {t10(pct((s['nL'] * s['nlaunch'] + 2) * tl, T))}% of the step) at the {lr} launch")
+        print(f"[FORK-split-{s['name']}-32k] ONE sequence, every layer step on all 8 dies (1/8 of each layer resident per die = {gb1(total_resident(s) // 8)} GB): " + " ; ".join(out))
+
+if __name__ == "__main__":
+    main_fork()

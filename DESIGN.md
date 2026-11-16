@@ -19,6 +19,15 @@
 > rows ≥ 2 — and HW-MAP already measures m ≥ 24 at 81 / 59 / 43 GB/s on the realised kernel, so both are pre-measurement cells.
 > Corrected #3: the "errata-3 limit" citations are hygiene — no cell paid for them.
 
+> **challenge: (PROMPT-7, 2026-11-15)** three statements in the banners below are stale as current. (1) The R3 kernel is MEASURED at
+> **174.6 GB/s flat m = 1..16** (HW-MAP: DDR → L0B direct load); 137.8 / 138.9 is its serial fallback. (2) The k = 64 anomaly is
+> RETRACTED (erratum #14: a host dump-decode offset bug; k = 64 is exact). (3) "No f16 → i8 cast" is superseded — the on-device
+> quantization pass is measured (43.7 µs). Against the PROBLEM's targets: W8 ≥ 120 at m ≤ 16 is MET by measurement; **flat m = 1..64 is
+> NOT met on silicon** (m ≥ 24: 81 / 59 / 43 GB/s) and m = 64 sits above the low-figure compute ridge in any case (Chk.N2_fragment_time);
+> W4 ≥ 120 is unreachable (erratum #12); and the numerics gate ("relerr ≤ 1e-3 class") is certified only against a reference that
+> shares the activation quantizer — rint to 127 levels gives a relative rms error of crest/440, i.e. 3.9·10⁻³ on a uniform row and
+> ~10⁻² on Gaussian rows (Chk.R1_quantizer). PROOF-COVERAGE-CHECK.md carries the ledger.
+
 > **SILICON UPDATE (post-round-2, measured)**: three of this document's
 > hypotheses are now SETTLED by measurement, and they change the ranking:
 > (1) **f16×i8 does not exist at the raw matrix level** (errata #13) — the

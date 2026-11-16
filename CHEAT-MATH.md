@@ -20,7 +20,10 @@ wide-cap fold and i32 accumulation are shaped as they are.
 
 ## B. Roofline arithmetic at DIE level (MATH — `Cheat.ridge_die_bounds … `unpack_share`)
 
-The die's MEASURED 17.8 T-OP/s against its 173.8 GB/s stream → **ridge
+The die's MEASURED 17.8 T-OP/s [**challenge:** the LOW end of HW-MAP's 17.8–26.6 TFLOPS range, and numerically 128 FLOP/byte × 80 % of
+the stream — what a stream-bound 128-row GEMM delivers; the other two rows give a ridge of 153 (26.6 at n = 2k) and 201 (15 ns per
+(16,16,128) call): free rows 51 / 25 are the lowest of three readings, 76 / 38 and 100 / 50 the others — Chk.Y1_ridge_readings, O1_ridge]
+against its 173.8 GB/s stream → **ridge
 strictly between 102 and 103 OPs/byte** (round-4 C-15 correction: the
 earlier 48–49 paired ONE core's 8 192 OPs/cycle with the whole die's
 bytes — a unit mix). Arithmetic intensity is 2M OPs/B (8-bit weights)
