@@ -1,5 +1,14 @@
 # DESIGN-2 — MoE grouped quant-GEMM decode kernel (one die, 8 cores)
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `proof/check.lean` `Chk.*`, `PROOF-COVERAGE-CHECK.md` §2).** Every quantitative cell
+> re-derived matches (headline 135.3 / 171.2, the Z7 set, Z8, Z10, the overflow bound, the pack bijection, §8.1). Marked: C-14 the
+> region-difference exactness license assumes wrap semantics and zero prior content against the measured saturation with nondeterministic
+> L0C content; C-2 the measured expert kernel M0 = 165.8 / 170.2 GB/s that anchors DESIGN-4 has no HW-MAP row (harness, shape, D, reps
+> unrecorded); C-21 Z8's (4,32) and (16,68) margins flip to K-split at the realized 36 µs launch (S-G2 still wins every cell), the F = 8 µs
+> assumption is contradicted by the measured t = 1 / t ≥ 4 pair (implied ~28 µs), erratum 16's spacing is unlicensed at N_e = 512 without
+> G = 4, `T_Z7_no_s_threshold` is `Iff.rfl`, and the i4×i4 route is still "EMPIRICAL — E19" against erratum 12. Nothing ranked moves.
+
+
 > **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; `proof/moe.py` `[PA-*]`,
 > `proof/moe.lean` `T6m_*` (2 new theorems, 191 total, 0 axioms / sorry / native_decide; `lake build` clean); PROOF-COVERAGE-2 rows
 > PA2-1, PA2-2; all five designs in ERRATA-IMPACT.md).** No new silicon; moe.py's first 72 output lines are byte-identical; every
@@ -263,7 +272,10 @@ step end: Cast_f32→f16(y_acc rows < t) ; COPY t × 1 KiB → y[τ, c·N_c ..]
 ```
 Exactness (Lean targets): **P2** the difference is exact whatever the region held before, in modular i32
 arithmetic, iff |S_e| < 2³¹ where S_e is the true per-expert sum; |S_e| ≤ 127²·K = 66 064 384 (K=4096).
-**P3** overflow never occurs (so wrap-vs-saturate semantics are irrelevant) if each region is used at most
+**challenge (round 4, C-14):** HW-MAP measured SILENT SATURATION with nondeterministic L0C prior content b, so P2's modular reading does not
+apply and P3 needs |b| + U·66 064 384 < 2³¹ — U_max is 16 at an f32-1.0 pattern (0x3F800000, what the preceding attention kernel's chunks
+hold) and 0 at b ≥ 0x7F000000 (`Chk.challenge_overflow_prior_content`); the license as written ("exact whatever the region held before")
+is false — a bounded-b contract or a per-launch region reset (≤ 1 041 constant-tile MMA calls = 15.6 µs per region) restores it. **P3** overflow never occurs (so wrap-vs-saturate semantics are irrelevant) if each region is used at most
 U_max = ⌊(2³¹−1)/(127²·K)⌋ times per launch (the operand bound |a|, |b| ≤ 127 is a requirement on the quantizers:
 if −128 can occur, 128²·4096·32 = 2³¹ exactly and U_max drops to 31 at K = 4096 — 6 regions still cover
 D ≤ 186 ≥ 128; K = 7168 is unchanged at 18 — T_overflow_m128): U_max = 32 at K = 4096 → 6 regions cover D ≤ 192; at K = 7168,

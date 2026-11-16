@@ -1,8 +1,11 @@
 # dmonk proof package: core Lean 4 only (no Mathlib, no Batteries).
-# `lake build` compiles model.lean, smoke.lean, moe.lean, fleet.lean, attn.lean, alt.lean and cheat.lean; all compile standalone
-# with `lean <file>.lean` since they import nothing beyond Init.
+# `lake build` compiles model.lean, smoke.lean, moe.lean, fleet.lean, attn.lean, alt.lean, cheat.lean and check.lean; all compile
+# standalone with `lean <file>.lean` since they import nothing beyond Init.
+# challenge (round 4, 2026-11-15): cheat.lean's `crt_15_16` closes by `native_decide` (an axiom — `#print axioms` lists
+# `Cheat.crt_15_16._native.native_decide.ax_1_1`); every other file is axiom-free. check.lean (namespace Chk) holds the
+# independent re-derivations of the challenge round, including a core-Lean proof of the same CRT fact (`Chk.crt_15_16_core`).
 name = "dmonkproof"
-defaultTargets = ["Model", "Smoke", "Moe", "Fleet", "Attn", "Alt", "Cheat"]
+defaultTargets = ["Model", "Smoke", "Moe", "Fleet", "Attn", "Alt", "Cheat", "Check"]
 
 [[lean_lib]]
 name = "Model"
@@ -31,3 +34,7 @@ roots = ["alt"]
 [[lean_lib]]
 name = "Cheat"
 roots = ["cheat"]
+
+[[lean_lib]]
+name = "Check"
+roots = ["check"]

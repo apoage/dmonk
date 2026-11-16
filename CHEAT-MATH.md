@@ -1,5 +1,12 @@
 # CHEAT-MATH — the arithmetic layer of CHEATSHEET (2026-11-15)
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `PROOF-COVERAGE-CHECK.md` §2).** §B's roofline mixes one core's compute with one die's
+> bandwidth (C-15, marked in place); `Cheat.crt_15_16` closes by `native_decide` and so carries the axiom
+> `Cheat.crt_15_16._native.native_decide.ax_1_1` — the file is not "kernel-decided" as its header says (C-16; `Chk.crt_15_16_core` proves the
+> same fact by `omega`, and `decide +kernel` closes the original); the "⟺" of §A are bounds on k·2¹⁴, not exactness; §E / §F's identities
+> (15·8 = 120, 4^(b+1) = 4·4^b, 256 = 5·48 + 16) are weaker than the prose attributes to them. No design cell consumes a CHEAT-MATH number.
+
+
 Provenance: the same two research stashes CHEATSHEET grades (a
 primary-source mathematics audit + an inference-technique sweep, both
 archived outside this repo). This file is deliberately **source-free**:
@@ -20,7 +27,11 @@ wide-cap fold and i32 accumulation are shaped as they are.
 
 ## B. Roofline arithmetic (MATH — `Cheat.ridge_bounds … dequant_cap`)
 
-One 16×16×16 int8 block/cycle = 8192 OPs vs 170 B/ns → **ridge strictly
+**challenge (round 4, C-15):** the 8 192 OPs/cycle below is ONE core's fragment rate (and HW-MAP measures 3.7 ns per fragment per core,
+0.27 of that) against the DIE's 170 B/ns; the die's measured ridge is 102 OPs/byte (17.8 TFLOPS / 173.8 GB/s), free rows ≤ 51 on W8,
+a 16-row tree is free on 4-bit too, and the lane budget is 8 × 43.2 = 345.6 G lane-ops/s against 347.6 G elem/s — one op per element,
+so the MEASURED 5-pass unpack (42 GB/s = 84 G elem/s) is 24 % of the stream, not "< 12 %" (`Chk.challenge_ridge_units`). The theorems
+below prove their stated inequalities; the pairing is the PRIOR. One 16×16×16 int8 block/cycle = 8192 OPs vs 170 B/ns → **ridge strictly
 between 48 and 49 OPs/byte**. Arithmetic intensity is 2M OPs/B (8-bit
 weights) or 4M (4-bit): rows ride free to **M = 24 / 12**, one past
 crosses; a **16-row tree is free on 8-bit but not 4-bit** weights — the

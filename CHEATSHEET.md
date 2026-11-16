@@ -1,5 +1,14 @@
 # CHEATSHEET — distilled compute & bandwidth witchery for this machine (2026-11-14)
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `PROOF-COVERAGE-CHECK.md` §2).** §0's validation claim is BROKEN (C-15, marked below); rows
+> #1 / #3 / #4 are graded without the errata (C-17): #1's "~30 % off EVERY f16 stream" — the weight streams here are int8 (no exponent field),
+> a vector-side unpack emits f16 at ≈ 1.0× the wall and the S1→L0B loader caps at 212 GB/s ≤ 1.25×, while the only f16 stream (KV) is dominated
+> by the measured K-int8 (2.13×); #3's "KV 2–4 bit ×2–4 beyond KV-int8" — erratum 12 leaves no i4 path, a 4-bit KV unpacked at ~42 GB/s int4
+> costs ≈ 1.04× KV-int8's time; #4's "W4A8 3.5× validates our W4 route" — W4 rides as int8 at load here (no stream-byte cut, 2× memory).
+> `proof/cheat.lean`'s `crt_15_16` closes by `native_decide` — an axiom, against README's rule and the "0 axiom" build claim (C-16; the core
+> proof is `Chk.crt_15_16_core`). No shipped decision reads a CHEATSHEET number.
+
+
 Provenance: a two-stage research round — (1) a primary-source audit of the
 2025–26 mathematics landscape (the ω ≤ 9/4 line, finite bilinear schemes,
 transform/codec theory) plus an INDEPENDENT roofline derivation of this
@@ -11,6 +20,14 @@ arithmetic behind every guardrail and row is stated source-free and
 machine-checked in `CHEAT-MATH.md` (`proof/cheat.lean`).
 
 ## 0. The external roofline VALIDATES our measured corpus
+
+> **challenge (round 4, C-15):** it does not. The research session had the machine profile inlined (PROMPT-8), so the derivation was
+> arithmetic on our own constants; and three of the four "agreements" are not agreements: the 48 OPs/byte ridge pairs ONE core-cycle's
+> 8 192 OPs with the DIE's 170 B/ns (the die's measured ridge is 102 OPs/byte: 17.8 TFLOPS / 173.8 GB/s); HW-MAP's decode occupancy is
+> 12.5 %, not 4–8 %; the "~12 %" dequant cap is one core's lanes against the die's stream — the die's lane budget is one op per element and
+> the MEASURED 5-pass unpack is 24 % of the stream; "KV parity ~30k = our 32k attention-bound flip" — MoE 32k is weights-bound (attention
+> 18.6 %), the flip is at ~97–131k tokens, and the 2^15 parity is an 8B-class shape. The fourth (free rows ≤ 24 vs the measured m ≤ 16) is a
+> coincidence: the m ≥ 24 cliff is strips, not a ridge (`Chk.challenge_ridge_units`, `challenge_rows_cliff_strips`).
 
 The audit's independent derivation (before reading our numbers): int8
 ridge ≈ **48 OPs/byte** against the ~170 GB/s wall → batch-1 decode at

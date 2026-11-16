@@ -1638,3 +1638,204 @@ def main7():
 
 if __name__ == "__main__":
     main7()
+
+
+# ============================================================ PROMPT-7 challenge round 4 (2026-11-15): [CHK-*] and [FORK-EP-*] =====
+# Independent re-derivations (proof/check.lean, namespace Chk) and the DESIGN-FORK-EP8 cells. Every label above this line prints
+# unchanged (the first 692 lines of the output are byte-identical to the ROUND-7 state). Nothing here feeds a round-7 label.
+def main_chk():
+    from fractions import Fraction as Fr
+    from math import comb
+    slabM0 = 16 * MiB * 10 // 1658; slabM0T4 = 16 * MiB * 10 // 1702
+    gemm_moe = 41943040 * 10 // 1746 + 2 * 8000 + 24 * 122979
+    gemm_dense = 3187671040 * 10 // 1746
+    head_moe = 4096 * 128256 * 10 // 1746; head_dense = 16384 * 128256 * 10 // 1746
+    base_moe = 28 * gemm_moe + head_moe + (28 * 7 + 2) * 91000 + 28 * 4 * 43700 + (24367 + 16 * 12200)
+    base_dense = 120 * gemm_dense + head_dense + (120 * 6 + 2) * 91000 + 120 * 4 * 43700 + (41107 + 16 * 12200)
+    e29b = 28 * 24 * (122979 - slabM0); e29d = 28 * 24 * (122979 - 99374)
+    step7 = base_moe - e29b + 28 * 945500
+    print(f"\n# ---- PROMPT-7 challenge round 4 (2026-11-15): [CHK-*] re-derivations (proof/check.lean Chk.*) ----")
+    print(f"[CHK-step-form] rebuilt from components: MoE base {base_moe} (= T5r_step_form 115956899: {base_moe == 115956899}); dense {base_dense} (2289788669: {base_dense == 2289788669}); "
+          f"MoE gemm/layer {gemm_moe} = tn(attn) 240223 + 2 F 16000 + 24 x 122979; dense {gemm_dense}; heads {head_moe} / {head_dense} [D]")
+    print(f"[CHK-r7] slab M0 {slabM0} / {slabM0T4}; E29 banked {e29b} vs derived {e29d}; step7 trip-free {step7} -> {t3(tps_card(1000, step7))}; amortized {945500 + 80 * 873} / {945500 + 55 * 873} [D]")
+    line_b = 1514900 - e29b // 28; line_d6 = 1513600 - e29d // 28
+    pb = Fr(line_b - 945500, 873000); pd = Fr(line_d6 - 945500, 872600)
+    print(f"[CHK-tie-breakeven] fusion >= E29 iff T <= {line_b} ns (banked E29) -> break-even trip rate {float(pb) * 100:.2f}% of launches "
+          f"(53 in 0.1%-units); the quoted 0.19% is the round-6 line {line_d6} (derived E29): {float(pd) * 100:.2f}%; measured 8.0 / 5.5% are "
+          f"{8.0 / (float(pb) * 100):.2f}x / {5.5 / (float(pb) * 100):.2f}x over the banked line (NOT 42x / 29x) [D] — challenge C-1")
+    print(f"[CHK-spec] MoE loss line at round-6 inputs a <= 854; with E29 banked on BOTH sides (t>=4 slab {slabM0T4}: {28 * 32 * 3 * (122979 - slabM0T4)} ns) a <= 823; "
+          f"the verify step prices attention at the t = 1 cell (E41 t = 4 deferred cell UNMEASURED) -> the line is a lower bound on the loss region [D] — challenge C-7")
+    tw7 = gemm_moe - 24 * (122979 - slabM0)
+    print(f"[CHK-moe128k-anchor] MoE layer GEMM at the banked anchor {tw7} ns; measured 128k cell 3618800 over it by {(3618800 - tw7) * 1000 // tw7} per mille (12.8% on the retired anchor); "
+          f"attention-bound iff G <= {23592960 // ((tw7 - 19328 + 255) // 256)} tenths — above the DDR roof: unconditional [D] — challenge C-9")
+    # instance family under the Chk definitions
+    def tn_(b, r): return b * 10 // r
+    xch = (tn_(8192, 190) + tn_(8192, 276)) + (tn_(8192, 273) + tn_(8192, 139)) + (tn_(8192, 190) + tn_(8192, 276)) + tn_(128256 * 4, 273) + tn_(4, 139) + 8 * 91000
+    def wl(x, Th, Tc): return 240223 + 16000 + 24 * (Th * (1000 - x) + Tc * x) // 1000
+    def S(Tc): return 2 * 7 * (wl(182, 99374, Tc) + 768715 + 7 * 91000) + 2 * 7 * (wl(170, 99374, Tc) + 768715 + 7 * 91000) + head_moe + 2 * 91000 + xch
+    print(f"[CHK-inst-breakeven] instance step re-implemented: S(197844) = {S(197844)} ({S(197844) // 10000 / 100:.2f} ms, 2 instances {t3(2 * 10**12 // (4 * S(197844)))}); "
+          f"S < 2 T0 iff Tc <= 1371366; by the floored tps criterion iff Tc <= 1371124 (= the printed line) [D]")
+    print(f"[CHK-mindies] int8 residency forces 5 dies (30 layers x 3.19 GB = 95.6 > 86; 7 x 12.93 = 90.5); at the int4 SOURCE size three dies hold either shape's weights "
+          f"({386723217408 // 2 / 1e9:.1f} / {363002331136 // 2 / 1e9:.1f} GB vs 258 GB) — the verdict stands on erratum 12 measured once, pre-#18/#25 [D] — challenge C-10")
+    print(f"[CHK-cheat] CHEAT-MATH ridge pairs one core-cycle (8192 OPs) with the die's 170 B/ns; measured die ridge 17.8 TFLOPS / 173.8 GB/s = {17800 / 173.8:.0f} OPs/B; "
+          f"lane budget 8 x 43.2 = 345.6 G lane-ops/s vs the 4-bit stream 347.6 G elem/s -> 1 op/elem; measured int4 unpack 42 GB/s = 84 G elem/s = {84 / 347.6 * 100:.0f}% (not < 12%) [D] — challenge C-15")
+    print(f"[CHK-e40] prize bound 945500 - 821800 = 123700 (13.1%) / - 844216 = 101284; phi gates 1687 (F1, end 10 us, V 1594, k 1) / 635 (F2, 20 us, V 1438, k 2); "
+          f"at V = 565000/64 = 8828 ns/block (HW-MAP's softmax phase) E40 cannot beat the deferred kernel at k <= 2 for any phi; k = 8 gate 241 ns [D] — challenge C-12")
+    print(f"[CHK-mega-realized] megakernel pays iff c_sync <= 109903 (dense) / 108430 (MoE) at 91 us launches; at the realized 36 us: {(120 * 5 * 36000 - 120 * 15388) // 480} / "
+          f"{28 * 6 * 36000 // 140} ns (launch-only MoE); the 20 us crossing still pays [D]")
+    # ---- FORK-EP
+    def pmax_le(n, m, bins=8):
+        dp = [0] * (n + 1); dp[0] = 1
+        for _ in range(bins):
+            nd = [0] * (n + 1)
+            for j in range(n + 1):
+                if dp[j] == 0: continue
+                for k in range(0, min(m, n - j) + 1): nd[j + k] += dp[j] * comb(n - j, k)
+            dp = nd
+        return dp[n]
+    def emax(n):
+        tot = 8 ** n; E = Fr(0)
+        for m in range(1, n + 1): E += Fr(tot - pmax_le(n, m - 1), tot)
+        return E
+    E8 = emax(8)
+    print(f"\n# ---- DESIGN-FORK-EP8 cells ([FORK-EP-*]; proof/check.lean Chk.ForkEP) ----")
+    print(f"[FORK-EP-emax] 8 active experts over 8 dies (uniform placement): E[max load] = {E8} = {float(E8):.3f} experts (exact: 43574336 / 8^8); "
+          f"P(max >= 2/3/4) = {float(1 - Fr(pmax_le(8, 1), 8**8)):.3f} / {float(1 - Fr(pmax_le(8, 2), 8**8)):.3f} / {float(1 - Fr(pmax_le(8, 3), 8**8)):.3f}; "
+          f"at B rows (D = 8B experts): E[max] = {float(emax(16)):.3f} / {float(emax(32)):.3f} / {float(emax(64)):.3f} at B = 2 / 4 / 8 (vs chain loads 16 / 32 / 64) [D, uniform routing = A]")
+    sync = 2 * 2 * 12200 + 2 * 36000
+    expChain = 24 * slabM0; expEP = int(E8 * 3 * slabM0)
+    print(f"[FORK-EP-sync] per-layer orchestration on the critical path = 2 host rounds (D2H + H2D at the measured 12.2 us) + 2 launch latencies at the realized 36 us = {sync} ns [A]; "
+          f"bracket top 500000 ns; EP-A beats the chain iff sync < {expChain - expEP} ns per layer ({(expChain - expEP) // sync}x the assumption)")
+    cells = {}
+    for lab, a in (("4k", 213500), ("32k", 945500), ("128k", 3618800), ("1M", 28694000)):
+        chain = base_moe - e29b + 28 * a
+        for s in (sync, 500000):
+            epA = chain - 28 * expChain + 28 * expEP + 28 * s
+            epB = epA - 28 * a + 28 * (a // 8) - 28 * 240223 + 28 * (240223 // 8) - head_moe + head_moe // 8
+            cells[(lab, s)] = (chain, epA, epB)
+        c, A1, B1 = cells[(lab, sync)]; _, A2, B2 = cells[(lab, 500000)]
+        print(f"[FORK-EP-{lab}] MoE t=1: chain {ms2(c)} ms -> {t3(tps_card(1000, c))}; EP-A (experts placed, attention on the chain) {ms2(A1)} ms -> {t3(tps_card(1000, A1))} "
+              f"(sync 500 us: {t3(tps_card(1000, A2))}); EP-B (+ one KV head per die, U) {ms2(B1)} ms -> {t3(tps_card(1000, B1))} ({t3(tps_card(1000, B2))}); "
+              f"worst routing (8 experts on one die) {t3(tps_card(1000, c + 28 * sync))} [D]")
+    for B in (2, 4, 8):
+        E = emax(8 * B)
+        chain = base_moe - e29b + 28 * 24 * (B - 1) * slabM0 + 28 * B * 945500
+        epA = chain - 28 * 24 * B * slabM0 + 28 * int(E * 3 * slabM0) + 28 * sync
+        print(f"[FORK-EP-batch-B{B}] {B} rows at 32k (D = {8 * B} experts, attention x{B}): chain {ms2(chain)} ms -> {t3(B * 10**12 // (4 * chain))} tok/s/card; "
+              f"EP-A {ms2(epA)} ms -> {t3(B * 10**12 // (4 * epA))} (E[max] {float(E):.2f} of {8 * B}) [D]")
+    expert_bytes_die = 28 * 32 * 3 * 16 * MiB
+    print(f"[FORK-EP-mem] per die: 32 experts x 3 slabs x 16 MiB x 28 layers = {expert_bytes_die / 1e9:.1f} GB of expert slabs; + the chain's attention weights for its 3-4 layers, "
+          f"embed/head, KV/8 at 1M ({28 * 4096 * (1 << 20) / 8 / 1e9:.1f} GB) + 2 GiB + 64 MiB = {(expert_bytes_die + 4 * 41943040 + 2 * 4096 * 128256 + 28 * 4096 * (1 << 20) // 8 + 2 * GiB + 64 * MiB) / 1e9:.1f} GB <= 86: no int4 tier, no #19 merge, no E30 [D]")
+    print(f"[FORK-EP-gates] UNMEASURED: (EP-1) 8 dies streaming concurrently from one host process (measured: 2 dies/card 1.000-1.001, 2 cards 2.0x); (EP-2) the host all-reduce round at 8 participants "
+          f"(measured: one 4 KiB leg 12.2 us); (EP-3) the expert kernel at 1-4 experts per launch (M0 measured at 8/launch); (EP-4) the routing max-load on real traces (E[max] above is uniform); "
+          f"(EP-5) EP-B's 1-head/8-core token split (the 4-kv-head split-KV map is the measured ~40 ms/step lever on the serving model)")
+
+
+if __name__ == "__main__":
+    main_chk()
+
+
+# ============================================================ PROMPT-7 round 4, Mission B (2026-11-15): [CHK-B-*], [FORK-EP-S/P/TP-*] =====
+# The gate decided in arithmetic, the corrected cells per flip-list row, EP-S (spec decode on EP), EP-P (pipelined EP), TP-8 dense,
+# the K-int8 lever, the erratum-12 counterfactual, the packing door. Append-only; every earlier label prints unchanged.
+def main_chk_b():
+    from fractions import Fraction as Fr
+    from math import comb
+    import random
+    slabM0 = 16 * MiB * 10 // 1658; slabT4 = 16 * MiB * 10 // 1702
+    gemm_moe = 41943040 * 10 // 1746 + 16000 + 24 * 122979; head_moe = 4096 * 128256 * 10 // 1746
+    base = 28 * gemm_moe + head_moe + 198 * 91000 + 28 * 4 * 43700 + (24367 + 16 * 12200)
+    e29b = 28 * 24 * (122979 - slabM0); a32 = 945500
+    step7 = lambda a: base - e29b + 28 * a
+    def pmax_le(n, m, bins=8):
+        dp = [0] * (n + 1); dp[0] = 1
+        for _ in range(bins):
+            nd = [0] * (n + 1)
+            for j in range(n + 1):
+                if dp[j] == 0: continue
+                for k in range(0, min(m, n - j) + 1): nd[j + k] += dp[j] * comb(n - j, k)
+            dp = nd
+        return dp[n]
+    def emax(n):
+        tot = 8 ** n; E = Fr(0)
+        for m in range(1, n + 1): E += Fr(tot - pmax_le(n, m - 1), tot)
+        return E
+    E8 = emax(8); expChain = 24 * slabM0; expEP = int(E8 * 3 * slabM0)
+    sync = 2 * 2 * 12200 + 2 * 36000; sync_ser = 16 * 12200 + 2 * 91000
+    print(f"\n# ---- Mission B (2026-11-15): the gate decided in arithmetic; EP-S / EP-P / TP-8; the corrected cells ([CHK-B-*], [FORK-EP-*]) ----")
+    SA = step7(a32) - 28 * expChain + 28 * expEP + 28 * sync_ser
+    print(f"[FORK-EP-gate] every leg of both host rounds serialized (16 x 12.2 us) + both launches at the 91 us floor = {sync_ser} ns per layer; "
+          f"the line is {expChain - expEP} ns ({(expChain - expEP) / sync_ser:.1f}x above): EP-A at that reading {ms2(SA)} ms -> {t3(tps_card(1000, SA))} vs the chain 1.956 (+38%) — "
+          f"S1 is the measured 1.000-1.001 row's own class (one process, two dies, weight-streaming); S2 at 8 participants fully serialized = 195 us per round; "
+          f"the gate can only fail on a host-stack serialization that would also contradict the card-scale 2.0x row [D]")
+    # EP-S
+    def tau(a, k): return sum(a ** i * 1000 ** (k - i) for i in range(k + 1)) // 1000 ** (k - 1)
+    draft = 22129841; E32 = emax(32)
+    exp4_chain = 32 * 3 * slabT4
+    T4c = 28 * (41943040 * 10 // 1746 + 16000 + exp4_chain) + head_moe + 198 * 91000 + 28 * 4 * 43700 + (97484 + 16 * 12200) + 3 * draft + 28 * a32
+    T1A = step7(a32) - 28 * expChain + 28 * expEP + 28 * sync
+    T4A = T4c - 28 * exp4_chain + 28 * int(E32 * 3 * slabT4) + 28 * sync
+    T4Al = T4A - 28 * a32 + 28 * 2695600
+    amin = min(a for a in range(1001) if 1000 * T4A <= tau(a, 3) * T1A); aminl = min(a for a in range(1001) if 1000 * T4Al <= tau(a, 3) * T1A)
+    print(f"[FORK-EP-S] MoE spec decode (k = 3) on EP-A: T1 {ms2(T1A)} ms, verify step {ms2(T4A)} ms (E[max of 32 experts over 8 dies] = {float(E32):.3f} -> "
+          f"{int(E32 * 3 * slabT4)} ns per layer vs the chain's {exp4_chain}); gain iff alpha >= {amin / 1000:.3f} (chain: loss iff alpha <= 0.823); at alpha = 0.7: "
+          f"{t3(tau(700, 3) * 10 ** 9 // (4 * T4A))} vs {t3(tps_card(1000, T1A))} t = 1 (+{(tau(700, 3) * 10 ** 9 // (4 * T4A) - tps_card(1000, T1A)) * 1000 // tps_card(1000, T1A) / 10}%); "
+          f"with the verify attention at the legacy t = 4 cell (2 695 600): gain iff alpha >= {aminl / 1000:.3f} — E41's deferred t = 4 cell decides it [D]")
+    # EP-B batched + EP-P
+    for B in (1, 2, 4, 8, 16):
+        n = min(8 * B, 256); E = emax(n)
+        chain = base - e29b + 28 * 24 * (B - 1) * slabM0 + 28 * B * a32
+        epA = chain - 28 * 24 * B * slabM0 + 28 * int(E * 3 * slabM0) + 28 * sync
+        epB = epA - 28 * B * a32 + 28 * (B * a32 // 8) - 28 * 240223 + 28 * (240223 // 8) - head_moe + head_moe // 8
+        print(f"[FORK-EP-B{B}] {B} row(s) at 32k: chain {t3(B * 10 ** 12 // (4 * chain))}; EP-A {t3(B * 10 ** 12 // (4 * epA))}; EP-B {t3(B * 10 ** 12 // (4 * epB))} tok/s/card "
+              f"(E[max] {float(E):.2f} of {n}; the t <= 16 contract; EP-B's head split U) [D]")
+    pdA = 28 * 3 * slabM0 + 4 * a32; pdB = 28 * 3 * slabM0 + 28 * (a32 // 8) + 28 * (240223 // 8)
+    print(f"[FORK-EP-P] pipelined EP (sequences interleaved so one sequence's attention overlaps another's expert phase): fleet tokens/s <= 1 / max_die(DDR time per token) = "
+          f"1 / {pdA} ns = {10 ** 9 / pdA:.1f} ({10 ** 9 / pdA / 4:.1f} per card) on EP-A, {10 ** 9 / pdB:.1f} ({10 ** 9 / pdB / 4:.1f}) on EP-B — above the Pi = 8 stage ring's 13.41 per card at a fraction of its latency; a BOUND, not a cell [D]")
+    # K-int8
+    for lab, nb, e40 in (("32k", 64, 3.46), ("128k", 256, 9.28), ("1M", 2048, 67.09)):
+        stream = 770800 * nb // 64; K = stream // 2; save = K - K * 100 // 213
+        print(f"[CHK-B-ki8-{lab}] K-int8-only (MEASURED 2.13x on the K half, exact x20): saves {save} ns per layer = {28 * save / 1e6:.2f} ms per MoE token vs E40's bound {e40} ms and E29's 14.64 — "
+              f"the attention-side #1 at every L, above E40 (DESIGN-4 section 10''' ranks E40 first) [D]")
+    print(f"[CHK-B-ki8-tie] the K-int8 deferred cell at 32k ~ {a32 - (385400 - 385400 * 100 // 213)} ns; fusion + K-i8 vs E29 at the measured retry share: 28 x (1514900 - 810878) = "
+          f"{28 * (1514900 - 810878)} ns > 14642880 — fusion + K-i8 #1 on both caps [D]")
+    # erratum-12 counterfactual
+    slabW4 = 8 * MiB * 10 // 1746
+    print(f"[CHK-B-w4alive] if erratum 12 fell (W4 streams at the W8 kernel's per-byte rate): MoE 32k {t3(tps_card(1000, step7(a32)))} -> "
+          f"{t3(tps_card(1000, step7(a32) - 28 * 24 * slabM0 + 28 * 24 * slabW4))}; dense 32k 0.104 -> 0.192; minimum dies 5 -> 3 (193.4 / 181.5 GB over 258); "
+          f"the V3 int4 tier is dominated by plain W4 — the half-day re-probe (one-hot operand maps, #18/#25-safe addressing) is the highest-value silicon hour [D]")
+    print(f"[CHK-B-nibble] two nibbles per byte through the i8 MMA: C = 16 S_hi + S_lo with |S_lo| <= 127 x 15 x 128 = {127 * 15 * 128} >> 16 — (0, 16) and (1, 0) collide: not separable by any second call; "
+          f"the vector route keeps pace only at 1 lane-op/element (345.6 vs 347.6 G/s) and the measured 5-pass unpack is 24%: the exact-class byte cut on the weight stream is capped at ~1/5 of the wall — door closed [D]")
+    # TP-8 dense
+    for tl in (36000, 91000):
+        s_ = 2 * 2 * 12200 + 2 * tl
+        T = 120 * (18256993 // 8 + a32 + s_ + 4 * 43700) + 12035202 // 8 + 2 * tl + (41107 + 16 * 12200)
+        print(f"[FORK-TP8-dense-{tl // 1000}us] dense 32k with every GEMM column-split 8-way (W/8 per die), attention die-local, launch {tl // 1000} us: {ms2(T)} ms -> "
+              f"{t3(tps_card(1000, T))} tok/s/card (chain 0.104; x{tps_card(1000, T) / 104:.1f}); with head-split attention {t3(tps_card(1000, T - 120 * a32 + 120 * (a32 // 8)))}; "
+              f"gate: the 1024-column / 256 KiB-per-core slab regime is UNMEASURED [D]")
+    # placement under Zipf (Monte Carlo)
+    random.seed(0); E_ = 256; N = 20000
+    for s_exp in (0.0, 1.0, 1.5):
+        w = [1.0 / (r + 1) ** s_exp for r in range(E_)]
+        def sample8():
+            chosen = set(); ws = w[:]
+            while len(chosen) < 8:
+                r = random.random() * sum(ws); acc = 0.0
+                for i, x in enumerate(ws):
+                    acc += x
+                    if acc >= r: chosen.add(i); ws[i] = 0.0; break
+            return chosen
+        perm = list(range(E_)); random.shuffle(perm)
+        res = {"rank round-robin": 0.0, "contiguous blocks": 0.0, "random": 0.0}
+        for _ in range(N):
+            ch = sample8()
+            for lab, place in (("rank round-robin", lambda e: e % 8), ("contiguous blocks", lambda e: e // 32), ("random", lambda e: perm[e] % 8)):
+                loads = [0] * 8
+                for e in ch: loads[place(e)] += 1
+                res[lab] += max(loads)
+        print(f"[FORK-EP-zipf-{s_exp}] E[max load] under Zipf({s_exp}) popularity, 8 of 256 distinct, 20 000 tokens, seed 0 (Monte Carlo, DERIVED): " +
+              ", ".join(f"{k} {v / N:.3f}" for k, v in res.items()) + " — rank round-robin placement (needs the H9 census) holds E[max] at the uniform value; contiguous placement doubles it")
+
+
+if __name__ == "__main__":
+    main_chk_b()

@@ -1,5 +1,12 @@
 # ERRATA-IMPACT — the errata #18–#31 audit of the five designs (PROMPT-6, 2026-11-08)
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `PROOF-COVERAGE-CHECK.md` §2).** SOUND for #18–#31: every moved cell re-derives (8 313 / 32 614 ns
+> merge, 836 / 883 ns pieces, 3.849 / 3.766 / 3.202 / 3.145, 17 600 ns, 190 µs, 2.058 / 2.367 / 4.291). Two readings are stale against the
+> later realized-launch row (C-6): the megakernel's "5.4× margin" to its line is 2.1× at the realized ≤ 36 µs launch (pays iff c_sync ≤ 42.4 µs
+> MoE / 41.2 µs dense) and §5's rejected 40 µs c_sync reading now sits at that line; the lazy-rescale VOID (#19) is tuple-conditional — on the
+> i8×i8→i32 PV of the KV-int8 route same-destination accumulation across barriers is the pattern E21 measured exact to depth 8 192.
+
+
 The attention-kernel sessions added fourteen silicon errata (#18–#31) to HW-MAP, corrected #3 (count-mode vector ops do not cap at 1 024
 lanes) and widened #25 (DDR → S1-A-slot staging: only offset-0 4-KiB blocks and 32-KiB-granular offsets are proven). Every design here
 except DESIGN-3's round-4/5 layers was written against errata #1–#17 only. This document sweeps DESIGN.md, DESIGN-2.md, DESIGN-3.md,
