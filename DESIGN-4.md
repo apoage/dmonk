@@ -24,7 +24,7 @@
 > (attention 18.6 % of the step), MoE 1M attention-bound (87.4 %). **The 32k rank question is answered — a tie on the line:** the realized
 > guard fusion (legacy → deferred) outranks E29 iff the cell is ≤ 947 079 ns = 141.7 GB/s (∀ T, T6r_tie32k, round 5's basis); the measured
 > band straddles it (fusion leads by 0.28 / 0.14 % at the trip-free / low-rate readings, E29 by 0.06 % at the high-rate one; on the
-> same-session legacy 1 514.9 µs the line is 948 379 ns = 141.5 GB/s and fusion leads at every reading by 0.17–0.51 %). **At 128k / 1M
+> same-session legacy 1 514.9 µs the line is 948 379 ns = 141.5 GB/s and fusion leads at every reading by 0.17–0.51 %) (**challenge:** `HW-MAP.md` line 116 reports real-model 32k trip rates $\tau = 8.0\%$ at `cap = 3 072` and $\tau = 5.5\%$ at `cap = 61 440`, moving 32k amortized attention to `1 015.31 / 993.49 µs` (`132.2 / 135.1 GB/s`, or `1 015.34 / 993.52 µs` at `R = 873 µs`) and MoE 32k to `1.725 / 1.734 tok/s/card`; this breaks the tie decisively in favor of E29 on both caps — `15.86 ms` vs `13.95–13.99 ms` at `cap = 3 072` and `14.56–14.60 ms` at `cap = 61 440`, `Chk.challenge_trip_rate_32k_flips_rank`). **At 128k / 1M
 > attention wins outright:** the tie lines are 101.6 / 93.9 GB/s, and the banked fusion is 62.55 / 493.34 ms per token against E29's 15.86
 > (3.9× / 31.1×). **Post-fusion ranking (§10‴, T6r_levers6):** the stage overlap (E40; a bound gated on φ) is the attention-side #1 on
 > every cell — above the bounce removal at both ends of its F1/F2 bracket; E29 stays the expert-side lever and the largest remaining lever
@@ -34,7 +34,7 @@
 > kernel's attention v (UNMEASURED on the deferred kernel at t ≥ 4) and at α = 0.7 beats t = 1 for every v ≤ 31.09 ms per layer (32.8×
 > the t = 1 cell); at the fragment-serial / ratio-scaled / legacy-verify readings of v the dense spec cell is 0.225 / 0.229 / 0.211 with
 > breakevens α ≥ 0.146 / 0.130 / 0.201. MoE B = 16 2.247; two instances (V3 with the erratum-#19 merge) MoE 3.576 / 3.504, dense 0.149 /
-> 0.140 — the instance verdict holds (c ≥ 0.978–0.998 of the measured 1.990). T_min_dies is untouched. The round-5 guarded column is now
+> 0.140 — the instance verdict holds (c ≥ 0.978–0.998 of the measured 1.990) (**challenge:** in Round 7's `proof/fleet.py` lines 1633–1635 and `proof/fleet.lean` `T7r_inst`, `main7()` computed `xs = [182, 170, 170, 182]` for the 4-die MoE instance's mandatory W4 cold tier, but called `tps_card_inst(1000, T1)` on the 8-die `x = 0` step `T1 = 129 743 539 ns` to print `3.853 tok/s/card`; applying `xs` with Erratum-#19 merged `cold = 206 157 / 230 458 ns` and `amort-cap3072 = 1 015 340 ns` yields `142 055 807 / 144 929 937 ns` → `3.519 / 3.449 tok/s/card` at `c = 2.000` (`3.502 / 3.432` at `c = 1.990`), overstating `T7r_inst` by `+0.334` to `+0.404 tok/s/card`, `Chk.challenge_r7_inst_missing_cold_tier`). T_min_dies is untouched. The round-5 guarded column is now
 > the legacy A/B control; the rounds-2…5 and PROMPT-6 banners and bodies are kept.
 
 > **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; `proof/fleet.py` `[PA-*]`,
@@ -47,10 +47,10 @@
 > 3.617 (chained), round-5 readings at c = 1.990: guarded 3.230 → 3.209 / 3.151, fused 3.567 / 3.495; dense 0.155 → 0.150 / 0.142
 > (T6f_cold_merge_*); V3 survives on every reading (it needs c ≥ 0.98–1.00 of the measured 1.99). (2) **Erratum #29 re-prices V2:** each
 > flag round ends in a crossing (10–20 µs), so the primary branch is 20 µs: V2 MoE **2.012 → 1.979**, V3 + V2 MoE 4.170 → **4.098**, dense
-> unchanged at 0.157 (T6f_mega_20us); the 2 / 5 µs branches assumed crossing-free polls. (3) **Erratum #31 on the dense 1M KV-int8 route:**
+> unchanged at 0.157 (T6f_mega_20us); the 2 / 5 µs branches assumed crossing-free polls (**challenge:** `T6f_mega_20us` still credits V2 with saving `91 µs` per launch; under `HW-MAP.md`'s realized launch bound `λ ≤ 36 µs` / `26.7 µs` at the measured 15-op stack and `c_sync = 20 µs`, V2's net per-step savings collapse to `2 320 / 856 µs` = `+1.8 % / +0.7 %` on MoE and `6 000 / 1 562 µs` = `+0.25 % / +0.06 %` on Dense, `Chk.challenge_mega_realized_launch`). (3) **Erratum #31 on the dense 1M KV-int8 route:**
 > the rowmax chain's cheaper crossing (a drain + 16 scalar reads of fresh maxima) is the racing composition; the deterministic one (16
 > scalar-destination reduces, 17 600 ns per block) tightens the bound **≤ 0.034 → ≤ 0.027** tokens/s/card (T6f_dense1M_det) — a route
-> that is shippable, deterministically, and still UNMEASURED. (4) Placements, no cell moves: x_q staging for rows ≥ 2 (#25: the production
+> that is shippable, deterministically, and still UNMEASURED (**challenge:** replacing `KV-int8` rowmax with `K-int8 / V-f16` + wide cap `61 440` and 8-die W4 cold tier `x = [605, 567, 517, 517, 517, 517, 517, 605]` eliminates all `7 813` per-block crossings and runs 8-die Dense 1M in `6 436.38 ms` → **`0.038 tok/s/card`, `+40.7 %` faster** than `0.027`, `DESIGN-FORK-1.md`, `Chk.Fork.dense_1M_fork_beats_kv_i8`). (4) Placements, no cell moves: x_q staging for rows ≥ 2 (#25: the production
 > 2 × 32 KiB legs, never one block — B = 16 and verify batches); the bounce-removal lever needs a proven US → S1 route that #20 rules out;
 > the V2 protocol's checksum compare and in-kernel top-k (#31), unbounded polls (#26), nest boundaries (#30 / #18 / #28); the quantizing-
 > epilogue fallback's Muls (#22); the router top-k (#31 / #26). (5) **Obsolescent by measurement:** the guarded column (the legacy scan)

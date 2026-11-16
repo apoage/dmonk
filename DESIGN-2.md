@@ -76,8 +76,8 @@ Per-core column slice N_c = N_e/8 = 512. Weight bytes per step = 8 × 16 MiB = 1
 | S1 | ~1 MB (976 KiB) | P |
 | US | 256 KB (≥ 208 evidenced) | P/M |
 | R_vendor | 24.6 GB/s, grouped quant op at the headline shape | M |
-| MMA shapes | n ≤ 16 per call; k ∈ {32, 128} correct, k = 64 wrong; **init/align flags ignored** | M |
-| dtypes | i8×i8→i32 verified; f16×i8 nonexistent (errata 13); no i4→f16 path (errata 12); i4×i4→i32 in the calibration table, unverified | M / U |
+| MMA shapes | n ≤ 16 per call; k ∈ {32, 128} correct, k = 64 wrong (**challenge:** RETRACTED on `i8×i8→i32` in [HW-MAP.md](file:///Users/lukas/dmonk2/HW-MAP.md#L193-L201) — `k = 64` i8 is fp64-exact; the earlier "wrong `k = 64`" verdict was a host dump-decode 16 KB vs 1 KB stride bug); **init/align flags ignored** | M |
+| dtypes | i8×i8→i32 verified; f16×i8 nonexistent (errata 13); no i4→f16 path (errata 12); i4×i4→i32 in the calibration table, unverified (**challenge:** `i4×i4→i32` is now **SILICON-DEAD** per [HW-MAP.md](file:///Users/lukas/dmonk2/HW-MAP.md#L157), closing §8.4's E19 conditional route; also per [HW-MAP.md](file:///Users/lukas/dmonk2/HW-MAP.md#L121-L122), P3's dynamic activation quantizer requires a `Min(., +65504)` / `Max(., -65504)` finite-clamp before `Tensor Max` because `Tensor Min/Max` propagate `±Inf` and `s8` cast maps `Inf/NaN → 0`, which otherwise zeroes an entire quantized row on a single `±Inf` lane) | M / U |
 | R_drain | L0C → US staged-read rate | U (demonstrated by the dense kernel's epilogue, rate unknown; E12) |
 | σ_d | scalar cost per dispatch iteration | U (E14); budget 100 ns |
 | F | fixed per-step cost 8 µs = 5 (pipeline fill) + 2 (exposed dispatch) + 1 (tail) | **A** (E14/E15) |
