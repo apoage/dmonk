@@ -259,3 +259,62 @@ m ≥ 24 at 81 / 59 / 43 GB/s on the realised kernel, so both are pre-measuremen
 number (#25 the A ring, #18 the operand addressing, #30 the nest-local parities and the slab bound, #22 / #29 the R3 dequant, #23 / #24 / #27
 the drain and copy forms, #28 the queue edges, #21 E1's pattern, #19 the record-only f16 routes, corrected #3) — ERRATA-IMPACT.md. The
 ledger rows above are unchanged (the m = 32 row keeps both theorems; its headline reading moves).
+
+## ROUND 4 — the three-arm adversarial round, ADJUDICATED (2026-11-16; arms archived on local branches `round-4-arm-{a,b,c}`; merged here by verdict)
+
+Three independent fresh-eyes arms ran PROMPT-7 against the corpus (arm C on the mid-round corrected base).
+Their re-derivation corpora (95 + 30 + 59+13 theorems, all kernel-decided, 0 sorry/axiom/native_decide) matched every
+printed PROVED cell they touched — the arithmetic layer held. What moved is the decision layer. Disposition
+(vocabulary: CONFIRMED / REFUTED / SUPERSEDED-BY-SILICON / PREMISE-MOVED / UNDECIDABLE-NEEDS-CELL):
+
+**Fixed on main mid-round (6b48151, both arms' arithmetic, verified reading in this merge):** C-15 the die-level
+ridge (102–103, free rows 51/25, measured unpack 24 %), C-16 the CRT restatement, C-17 the CHEATSHEET re-grades,
+C-1 the banked-E29 break-even (5.32 %; +2.7/+0.18 pt), C-3 the two-instance cell ([R7F] 3.519/3.449), C-2 the
+M0/M1 rows. **CONFIRMED and merged as in-place notes:** C-4 (dense V3 loses to chain batching at every equal
+demand), C-6 (the 91 µs serialized-launch reading; the megakernel demoted to +1.8/+0.7 % at the realized bound),
+C-7/C-8/C-9 (spec line, 1M amortization +7.6 %, the 128k margin at the banked anchor), C-11/C-13 (E40 scope),
+C-18/C-19 (extent-truncation marks; the three retry-share quotes; wide-cap prize −21.8 µs/layer), C-20/C-21/C-22/
+C-23/C-24/C-25 (banners, Z8-at-realized, c ≥ 1.095, the 4-of-8-core serving split, fit-margin labels, weak
+validations), arm B's P1/P2 notes (the k=64 i8 unlock at d ≤ 64; the ±Inf activation-clamp license), arm C's
+post-fix notes (E40 per-step intercept; the retired trip premise as current; the page-waste term; spec loss
+0.824; the shared-quantizer numerics-gate caveat — the gate certifies the quantized computation against the
+same quantizer, not against unquantized truth; f64-reference cells unaffected).
+
+**THE 3.853 SETTLEMENT (arms A+B vs C — both true):** the retired print's VALUE is the correct cell for a
+different question. `[ADJ-inst-32k-dual-baseline]`: two sequences STAGGERED on the unchanged 8-die chain =
+3.853 tok/s/card (per-sequence 129.74 ms) vs the V3 two-instance PLAN's 3.519/3.449 (per-sequence 142.05 ms) —
+at any equal aggregate concurrency the chain dominates the plan; V3's case is memory (half-resident), not
+throughput. The original label was wrong; both corrections stand. The measured fleet cell agrees: two
+independent instances deliver 15.75 tok/s/card on a card pair (`[ADJ-j4-measured]`), while the measured
+card-pair relay of ONE instance pays capacity and prefill only, not tok/s/card.
+
+**SUPERSEDED-BY-SILICON:** C-10 — the W4 re-probe ran: the int4-weight route is ALIVE through the 4-op int16
+unpack (251.9/176/167 GB/s own-i4; HW-MAP row added; the 42 GB/s cold-tier premise RETIRES, round-8 re-ground)
+while erratum 12 itself STANDS (the native i4×i4 cube product remains dead). C-17 row #4's "≈1× here until the
+cube path" — the path landed (dense 151.0, MoE 169.2, in-serve 167, arena −50 %).
+
+**REFUTED-BY-SILICON (the arms' K-int8 arithmetic vs the fused measurement):** the 2.13× K-half rate does NOT
+survive fusion — the score dequant lands on the vector pipe behind a no-longer-hidden softmax; the fused
+K-int8 cell measures 0.82–0.93× SLOWER at every span, and the 128k flip is NO (3 941.2 vs 2 687.9 µs). Arm B's
+rank-7 promotion and the archived KV-hybrid fork's fused attention cells are refuted for the fused path; what
+survives: the standalone K cells (87.6 GB/s own-K), the KV arena cut (−24.2 %), and the two named re-opening
+requirements (vector-compact scale broadcast; the V-side int8 path).
+
+**PREMISE-MOVED (erratum 11):** the cross-die family's dismissal quoted a vendor-runtime fault as a silicon law;
+the measured concurrency rows (one process, both dies of a card, 1.000–1.001 of solo-sum) displace it. The
+family is re-opened as ARCHIVED forks (expert-placement and sequence-pipelining variants, on the arm branches)
+— UNABSORBED until their host-relay cells run (the measured relay costs: pageable host relays beat pinned
+buffers 5–17× at small payloads; per-layer stream-drain sync is the real tax). The pipelining ladder prints as
+`[ADJ-pi-moe-32k]` (1.926/3.853/7.707/15.415 at Pi = 1/2/4/8 — UNMEASURED beyond die-pair concurrency).
+
+**UNDECIDABLE-NEEDS-CELL (rows marked; the cell that decides each):** the megakernel go/no-go (a measured
+launch-removal cell inside the 17–36 µs band vs the 19.1/17.3 µs thresholds); the 1M retry share τ(1M)
+(segment-independence is an assumption; the 64.48 % legacy-scan break-even); the region-difference saturation
+state (a region-at-kernel-start dump in the serving loop); E41's deferred cell at t = 4 (the spec-decode and
+E40-ordering questions); fleet-scale sequence pipelining (the archived fork's first experiment — two decode
+contexts, two host threads, half a step apart, bit-identical vs solo). Arm C's reviewer-only (7) and suspected
+(4) items are recorded on its branch, unmerged.
+
+**Provenance nit closed:** the [R7F] ns constants were proved from printed parts at the 101 186 ns slab
+constant; the model computes 101 189 — `[ADJ-r7f-precision]` prints both pairs (Δ 1 666/1 652 ns; three-decimal
+cells identical).
