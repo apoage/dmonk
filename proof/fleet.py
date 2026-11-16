@@ -1656,6 +1656,52 @@ def main7f():
           "-> cap 3072 clears +2.7 pt, cap 61440 +0.18 pt (measurement-resolution tie; the [R7-inputs] 0.19 % / 42x quoted the retired E29)")
 
 
+def pipe7(Pi, T, bmax, c=None):
+    """tokens/s per card (thousandths) with Pi staggered sequences at aggregate concurrency c (thousandths of one stream; default Pi)."""
+    c = 1000 * Pi if c is None else c
+    return min(1000 * c * 10 ** 6 // (4 * T), 10 ** 12 // (4 * bmax))
+
+
+def main_adj():
+    # ---- ROUND 4 ADJUDICATION (2026-11-16; the three-arm challenge round, archived on round-4-arm-{a,b,c}): [ADJ-*] cells.
+    # Settlement of the 3.853 three-way + the [R7F] precision nit + the pipelining ladder + the MEASURED two-instance fleet cell.
+    # Prior output is unchanged; these labels append.
+    D, M = DENSE, MOE
+    # (a) THE 3.853 SETTLEMENT: the retired print's VALUE is the correct cell for a DIFFERENT question --
+    #     two sequences STAGGERED on the unchanged 8-die int8 chain at equal demand (aggregate c = 2) -- while
+    #     3.519 / 3.449 ([R7F]) is the correct cell for the V3 two-instance PLAN. The original label ("two
+    #     instances") was wrong; the value belongs to "two sequences on the chain". Both arms' corrections stand.
+    Tm, _ = step7(M, 32768, "amort-cap3072")
+    print(f"[ADJ-inst-32k-dual-baseline] MoE 32k at equal demand (2 sequences): Pi = 2 STAGGERED ON THE CHAIN "
+          f"{t3(pipe7(2, Tm, 1))} tok/s/card (per-sequence step {ms2(Tm)} ms) vs V3 TWO-INSTANCE PLAN "
+          f"{t3(tps_card_inst(1000, 142_055_807))} / {t3(tps_card_inst(1000, 144_929_937))} (per-sequence {ms2(142_055_807)} ms) "
+          f"-- the retired 3.853 print is the CHAIN cell, not the plan cell; at any equal aggregate c the chain dominates "
+          f"the plan (T_step {Tm} < T_inst); V3's case is memory (half-resident) not throughput")
+    # (b) THE [R7F] PRECISION NIT: the arms' constants were proved from printed parts with a 101 186 ns slab constant;
+    #     the model computes with T_SLAB_M0 = 101 189 -> the model cells sit 1 666 / 1 652 ns OVER the printed constants;
+    #     three-decimal tok/s cells are identical. Provenance now stated; the printed constants stand as the
+    #     theorem-checked pair, the model cells as the in-model pair.
+    T_SLAB3["m0"] = T_SLAB_M0
+    a3m = attn3_seq(M, 32768, 1, 1692)[0]
+    xs_adj = [min_x(M, p, 32768) for p in range(4)]
+    v3m = [inst_step3c(M, 32768, xs=xs_adj, hot="m0", cold=T_SLAB_W4 + mg)[0] - M["nL"] * a3m + M["nL"] * a7(32768, "amort-cap3072") for mg in MERGE6F]
+    del T_SLAB3["m0"]
+    print(f"[ADJ-r7f-precision] the model-computed V3 instance steps: {v3m[0]} / {v3m[1]} ns -> "
+          f"{t3(tps_card_inst(1000, v3m[0]))} / {t3(tps_card_inst(1000, v3m[1]))} tok/s/card (the [R7F] constants "
+          f"{142_055_807} / {144_929_937} sit {v3m[0] - 142_055_807} / {v3m[1] - 144_929_937} ns under the model: they were "
+          f"proved from printed parts at the 101 186 ns slab constant vs the model's 101 189; three-decimal cells identical)")
+    # (c) THE PIPELINING LADDER at the same anchor (rides the MEASURED m <= 16 flat region + the MEASURED die-concurrency
+    #     rows; fleet-scale pipelining itself is the UNMEASURED H4-class premise -- the PIPE fork's first experiment decides it).
+    print(f"[ADJ-pi-moe-32k] sequences staggered on the unchanged 8-die chain (amort-3072 anchor): Pi = 1/2/4/8 -> "
+          f"{t3(pipe7(1, Tm, 1))} / {t3(pipe7(2, Tm, 1))} / {t3(pipe7(4, Tm, 1))} / {t3(pipe7(8, Tm, 1))} tok/s/card "
+          f"(stream-limited at this step; UNMEASURED beyond die-pair concurrency)")
+    # (d) THE MEASURED FLEET CELL: two independent instances on a disjoint card pair, real serving, MEASURED [fleet record].
+    print("[ADJ-j4-measured] two independent instances on a card pair (MEASURED, real serving): 31.50 t/s aggregate = "
+          "15.75 tok/s/card at c = 2.005 -- the two-instance route DELIVERS ~2x per card at equal model+context; "
+          "the MEASURED card-pair relay variant of one instance spanning two cards pays only capacity/prefill, not tok/s/card")
+
+
 if __name__ == "__main__":
     main7()
     main7f()
+    main_adj()
