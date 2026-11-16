@@ -29,6 +29,17 @@
 > inside F only if the vector pipe is empty there (E14 measures). Corrected #3 (8 × 1 024-lane Subs) and corrected #14 (the exactly-full
 > L0C works) are OBSOLESCENT — nothing in the cost model paid for the former; the latter frees W-dyn's single slab and the G = 8 knob.
 
+> **challenge: (PROMPT-7, 2026-11-15)** (1) **The region-difference exactness (§3.2 P2 / P3) is proved for the wrong accumulator.** P2
+> ("exact whatever the region held before") is a wrap-arithmetic statement and P3 bounds a running sum that starts at 0; HW-MAP
+> measures SILENT SATURATION at 2³¹ − 1 and no zero-init. On this part the difference is exact iff the launch state b leaves room for
+> the whole sum: |b| ≤ 2³¹ − 1 − uses·127²·K — 2 015 354 879 at D = 8, 694 067 199 at D = 128 (K = 4096); a region left holding the
+> f32 pattern of 1.0 has room for 16 worst-case chains, of +Inf for none, and −0.0 IS the negative rail (Chk.Q1_counterexample,
+> Q2_exact_iff, Q3_headroom). The serving loop alternates this kernel with an f32-writing attention kernel on the same L0C, and the
+> saturation probe behind "U_max = 32 holds" started within 391 167 of zero. Bound or reset the launch state, and measure it (dump
+> max |region| at kernel start inside the serving loop). (2) **The W4 half is void**: erratum #12 records the i4 × i4 → i32 tuple as
+> silicon-dead, which resolves E19 against — only "requantize to i8" remains of §8's W4 columns and of unlock 7. (3) The direct-path
+> kernel the SILICON NOTE below calls "not modelled here" is MEASURED: M0 = 165.8 GB/s at t = 1 (HW-MAP).
+
 > **ROUND-2 STATUS (proof session, commit after 81d5184)**: every derived number below is checked by
 > `proof/moe.lean` (189 core-Lean theorems, 0 axioms) and printed by `proof/moe.py`; the claim ledger is
 > `PROOF-COVERAGE-2.md`. Corrections the prover forced are applied in place and listed there (the W4

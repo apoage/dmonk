@@ -11,6 +11,20 @@
 > margin is 34.7 % at the banked anchor; C-23 §2.1's 8 ∤ H_kv split is unbuilt while the served 4-kv model streams on 4 of 8 cores (HW-MAP's
 > ~40 ms/step lever, larger than every ranked attention lever). Every round ≤ 6 number is kept as printed.
 
+> **CHALLENGE ROUND 4, ARM C (same round; post-fix base):** three things in the round-6 layer below are stale or overstated. (1) **The trip premise.**
+> "trips ≈ free: +0.8–1.9 µs", "the premise is ≥ 296× inside" and the amortized band 946.3–947.4 µs all stand on the 0.087–0.22 %
+> premise that HW-MAP has since replaced with a MEASURED retry share of 8.0 % / 5.5 % of launches (cap 3072 / 61440): the amortized
+> cell is 1 015.3 / 993.5 µs = 132.2 / 135.1 GB/s, the retries (69.8 µs per layer) now cost more than the fold + end read (42.6 µs),
+> and the margin to the 65.25 % break-even is 8.2× / 11.9× (Chk.B1_inputs, J1_breakeven, J2_rates). The retry share is measured at 32k,
+> t = 1, on one model; at 1M the deferred guard loses to the legacy scan above 64.48 % of launches, which an independent-per-segment
+> extrapolation of the measured rate already exceeds (Chk.T1_breakeven_1M, T2_independent_segments — an assumption, and the open
+> measurement). (2) **E40.** The bound subtracts the floor from the whole cell, but the three measured cells lie on 13 923 ns per block
+> + 54 428 ns per step (T6r_perblock's own chord) and cross-block overlap cannot recover a per-step cost: the reachable bound at 32k is
+> 69.3 / 46.9 µs (7.3 / 5.0 %), not 123.7 / 101.3 (13.1 / 10.7 %); the gate is φ ≤ 1 082 ns, not 1 687; on the F2 floor E40 is below the
+> bounce removal at φ = 0 (Chk.U1_bound, U2_gate). (3) **The lever ranking omits K-int8.** Its K-side silicon leg is MEASURED (87.6 GB/s,
+> 2.13× same-extent, exact ×20): on the measured stream phase it is worth 192.7–204.5 µs per layer at 32k — 2.8× the corrected E40 bound,
+> with no φ gate; gated on E36 (accuracy) and a d = 128 production-tile timing (Chk.V1_kint8).
+
 
 > **ROUND-6 STATUS (2026-11-08 — the deferred-guard kernel MEASURED end-to-end, kernel session 5; HW-MAP 3928d0e, the DEFERRED GUARD row;
 > `proof/attn.py` `[R6-*]`, `proof/attn.lean` `T6r_*` (16 new theorems, 366 total, 0 axioms / sorry / native_decide; `lake build` clean),
@@ -782,7 +796,7 @@ the per-add bound is the INPUT): **123 + 123 = 246 ppm at 1M, 10 ppm at 32k, und
 (T4r_drift_online); 490 ppm at 256-token blocks (4 098 / 4 106 adds), 125 ppm at 1 024-token blocks; a single-level O chain of L/128 =
 8 192 adds would be 489 ppm and S summed straight into one accumulator (16 383 adds) 977 ppm — the two-level order of §3.1 is what buys
 the margin, at no extra op. For O the bound is relative to Σ p|v| (cancellation across signed v makes it looser relative to |O|); the
-random-walk figure is √2 052 · 2⁻²⁴ ≈ 2.7 ppb. E26′ measures the realised error against f64 on the online chain (not the region content).
+random-walk figure is √2 052 · 2⁻²⁴ ≈ 2.7 ppb [**challenge:** ppm — 45.3 × 5.96·10⁻⁸ = 2.70·10⁻⁶; the measured 1.2 / 1.8 ppm is 0.44× / 0.47× of it, i.e. ordinary random-walk behaviour on a random profile, not evidence against the 246 ppm worst case]. E26′ measures the realised error against f64 on the online chain (not the region content).
 (iii) *The planted sink (item 7).* The f16 cast flushes p below 2⁻²⁴ ≈ 6·10⁻⁸ (the smallest f16 subnormal), i.e. tokens with
 s − m < −16.6 nats (e¹⁶ < 2²⁴ < e¹⁷, host arithmetic) — one-sided: mass is only lost. A row with one sink at p = 1 and L − 1 tokens just
 under the line (p = 2⁻²⁵) loses **122 / 976 / 3 906 / 31 249 ppm at 4k / 32k / 128k / 1M** of its mass (T4r_sink) — several % at 1M on

@@ -195,6 +195,21 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 > c ≥ ~1.1 — see `[R7F-inst-moe-32k]`).
 > All round ≤ 6 cells keep their printed values as history.
 
+> **challenge: (PROMPT-7, 2026-11-15; PROOF-COVERAGE-CHECK.md, `proof/check.lean`)** (1) **V3 is ranked against the wrong baseline.**
+> §10's "1st: V3" compares V3's two sequences with the chain's one. Two sequences staggered on the UNCHANGED full-int8 chain give MoE
+> 3.853 — the cell `[R7-inst-moe-32k]` printed and `T7r_inst` proves, retired as an error for V3 but correct for that plan — against V3's
+> 3.519 / 3.449, at any equal concurrency (Fork.P4_dominates_v3); dense V3 (0.149 / 0.140) loses to two rows batched on the chain (0.198)
+> at every c ≤ 2 (Chk.S1_dense_batching). H4 as posed is answered by HW-MAP (the stock runtime batches; the dies run concurrently at
+> 1.000–1.001 from one process): pipelining is host scheduling on V3's own measured premise — **DESIGN-FORK-PIPE.md**, gate P1.
+> (2) The round-4 C-3 / C-1 corrections lived as hard-coded prints: they are now Chk.C2–C4 and D3; the printed 142 055 807 / 144 929 937 ns
+> are 1 666 / 1 652 ns under the model's own step (a 101 186 ns slab, the stale comment value — Chk.C3_printed_ns); `T7r_inst` and ledger row
+> R7.4 still file 3.853 under V3. (3) The instance shares 182 / 170 omit round 4's page-waste term (29.3 MB per die > the 24.5 MB margin):
+> 182 / 171 (Chk.C5_page_waste). (4) The MoE spec loss line is 0.824 on these anchors, not 0.854 (Chk.H4_round7_line). (5) 128k / 1M are
+> quoted trip-free beside an amortized 32k cell; the retry share is unmeasured off 32k (Chk.T2). (6) "E29 #1" ranks a measured delta
+> against DESIGN-2's derived serial slab; against its other derived baselines the same lever is negative, and both levers are banked
+> (Chk.D4_baseline). (7) No cell here is validated against an end-to-end measurement; on the one measured serving accounting the launch +
+> quant terms are 2.1×–4.2× the measured non-GEMM share (Chk.W1_overhead).
+
 ## Constants used
 
 | Symbol | Value | Status / origin |
@@ -1408,7 +1423,7 @@ witness that both dies of a card are streaming at once.
 | **two 4-die instances, minimal int4 tier, direct-path hot tier (V3)** | **H10** (GREEN at card scale, 1.99× → 3.702 / 0.154; 2-card pairs pending) — **challenge (C-3 / C-4 / C-22):** round 7's "3.853" doubles the 8-die CHAIN step (a 16-die configuration; `fleet.py` computes the int4 shares and never uses them); the 4-die instance at round-7 anchors is 3.52 for two sequences and needs c ≥ 1.095 (not 0.978); the dense cell is dominated by chain batching at every N ≥ 2; the split family of `DESIGN-FORK-EP8.md` beats both without the int4 tier + H11 | **0.155** (+49.0 %) | **3.720** (+106.4 %) | **1st: an afternoon on the host; the largest gain that needs no runtime change** |
 | V3 with the anchored kernel (no E29) | H10 | 0.155 | 3.391 (+88.1 %) | |
 | V3 + V2 | H10 + E31 | 0.157 (+50.9 %) | **4.170** (+131.4 %) | |
-| Π = 8 pipelining of one 8-die chain (runtime capability) | **H4** | **0.808** (7.7×) | **12.918** (7.1×) | the only lever above V3 — and it undoes V3 |
+| Π = 8 pipelining of one 8-die chain (runtime capability) [**challenge:** host scheduling on the measured multi-die concurrency, not a runtime capability — DESIGN-FORK-PIPE.md; at Π = 2 it already beats V3] | **H4** | **0.808** (7.7×) | **12.918** (7.1×) | the only lever above V3 — and it undoes V3 |
 
 **Given H4 and H10 both pending (proof session: H10 is now GREEN at card scale — the 2-card-pair run is what remains of it), the order is H10 → E29 → E31 / E35 → H4**, because H10 and H4 are cheap and decide the
 *shape* of the plan (one chain or two instances) while E29 / E31 / E35 only scale it: if H10 passes and H4 fails, ship the
