@@ -1,5 +1,17 @@
 # DESIGN-3 — decode attention over the KV cache (gather → softmax → reduce), one die, 8 cores
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `proof/check.lean` `Chk.*`, `PROOF-COVERAGE-CHECK.md` §2).** The shipped kernel and its
+> measured cells stand (every re-derived cell matched to the digit). What is marked: C-12 E40's vector input (1.4–2.1 µs/block) contradicts
+> HW-MAP's own 565 µs softmax phase (8.8 µs/block) — at that frame E40 is dead for k ≤ 2 at any φ and E41 must precede E40a; C-11 the f16
+> cast of P carries 488 ppm per weight, outside the drift theorems and 2.0× inside the 1e-3 line (the "833× inside" is the f32 chain only);
+> C-13 E40's prologue page-table fetch is O(L) (16 KiB at 1M; US 208 KiB + 64 B at mt = 4); C-18 the session-5 cells were timed on the
+> extent-truncating kernel (bytes identical at the sweep L, timing stands) and the "causal-exact" rows R5-20 / E27′ are the double-blind
+> cells of erratum 32 — closed by the post-fix serving-loop compares, not by session 3; C-19 the three retry-share quotes (7–10 %, 10–15 %,
+> 6.9 %) disagree and the wide-cap prize is −21.8 µs/layer, not −50; C-8 the 1M amortization at the measured τ is +7.6 %; C-9 the 128k
+> margin is 34.7 % at the banked anchor; C-23 §2.1's 8 ∤ H_kv split is unbuilt while the served 4-kv model streams on 4 of 8 cores (HW-MAP's
+> ~40 ms/step lever, larger than every ranked attention lever). Every round ≤ 6 number is kept as printed.
+
+
 > **ROUND-6 STATUS (2026-11-08 — the deferred-guard kernel MEASURED end-to-end, kernel session 5; HW-MAP 3928d0e, the DEFERRED GUARD row;
 > `proof/attn.py` `[R6-*]`, `proof/attn.lean` `T6r_*` (16 new theorems, 366 total, 0 axioms / sorry / native_decide; `lake build` clean),
 > `proof/fleet.py` `[R6-*]`, PROOF-COVERAGE-3 rows R6-1 … R6-20).** The round-5 "inferred ≈ 950 µs" fused reading is replaced by the
@@ -1149,7 +1161,7 @@ T40_floor, T40_prize_*, T40_phases, T40_phi_*).
 
 | # | Settles | Setup | Observable failure | Decides |
 |---|---|---|---|---|
-| **E40a — the gate** | φ: the cost of a full barrier issued with vector work in flight (no scalar read after it) | the stream rung (K + V tiles, per-tile full barrier, the production page-table reads) with one 1 024-lane binary vector op on a dummy US reel (consumed at the end so it is not deleted, #17) issued before k ∈ {0, 1, 2, 8} of the 8 tile barriers per block; the per-block time against k gives φ; control: the same with a scalar read of the op's output after the barrier must reproduce erratum #29's 10–20 µs; 20 reps, reps-scaling check | φ above the k-line of (e) → E40 is unreachable at that k; a control that does not reproduce #29 = the probe is not exercising the crossing | φ ≤ 0.6–1.7 µs → E40b; φ ≥ 2 µs → E40 dead (record) |
+| **E40a — the gate** (**challenge (C-12):** E41's re-timing of the deferred kernel's phases must precede E40a's interpretation — at HW-MAP's 565 µs softmax phase V = 8 828 ns/block and E40 cannot beat the deferred kernel at k ≤ 2 for any φ; only k = 8 at φ ≤ 241 ns remains, `Chk.challenge_e40_V565`) | φ: the cost of a full barrier issued with vector work in flight (no scalar read after it) | the stream rung (K + V tiles, per-tile full barrier, the production page-table reads) with one 1 024-lane binary vector op on a dummy US reel (consumed at the end so it is not deleted, #17) issued before k ∈ {0, 1, 2, 8} of the 8 tile barriers per block; the per-block time against k gives φ; control: the same with a scalar read of the op's output after the barrier must reproduce erratum #29's 10–20 µs; 20 reps, reps-scaling check | φ above the k-line of (e) → E40 is unreachable at that k; a control that does not reproduce #29 = the probe is not exercising the crossing | φ ≤ 0.6–1.7 µs → E40b; φ ≥ 2 µs → E40 dead (record) |
 | **E40b — the pipelined kernel** | the macro-step schedule of (c) at 32k / 128k / 1M, t = 1 | the deferred kernel restructured per (c)–(d); timed against F1 / F2 + τ + cx and against the deferred cell (945.5 µs at 32k) | no gain = a hidden crossing (#29) or φ; any rep-to-rep difference or any bit difference from the serial kernel's output = a race (#8 / #31) or a broken merge order (positive control: one tile barrier removed); a hang = a surplus arm (#28); stale P rows = a #25 staging or a #30 ping-pong state after the trip re-run (a planted trip must re-run exactly) | the attention-side lever after fusion (PROMPT-3R6 ranks it); the planner's per-layer attention |
 
 Order: E40a first (an afternoon on the existing stream rung; it can kill E40 before any restructuring), then E40b.
@@ -1160,7 +1172,7 @@ Order: E40a first (an afternoon on the existing stream rung; it can kill E40 bef
 | The deferred kernel's own phases differ from session 3's | the next kernel session | the bound's floor and V move (the cells above are a mixed-session reading) | re-instantiate T40_* (every cell is a function of c, v, p, s, b) |
 | A per-block scalar read reappears (a new guard, a per-block scale) | design review | E40's gain vanishes (T40_crossing_serial) | batch it into the end-of-step read with a re-run |
 
-**Round 6 (PROMPT-3R6) — E40 is the attention-side #1 after fusion (`[R6-e40]`; T6r_e40_amort).** The pre-design above already priced E40 on
+**challenge (round 4, Mission B):** K-int8 on the K half — MEASURED 2.13× same-extent, exact ×20 — lowers the stream floor 821.8 → 617 µs and the cell to ≈ 741 µs at 32k (−204 µs/layer; −818 at 128k; −6.5 ms at 1M), more than E40's whole prize at every L and composable with it (`Chk.MissionB.ki8_lever`): the attention-side #1 after fusion is K-i8, then E40. **Round 6 (PROMPT-3R6) — E40 is the attention-side #1 after fusion (`[R6-e40]`; T6r_e40_amort).** The pre-design above already priced E40 on
 the session-5 deferred cells, which round 6 folds as the fleet's attention term, so no cell of (e) moves: the reachable-overlap bound stays
 123.7 / 101.3 µs at 32k (F1 / F2, free end read), 331.6 / 241.9 µs at 128k and 2 396.4 / 1 679.1 µs at 1M, and on the amortized 32k cell it
 is 0.8–1.9 µs larger (the re-run is serial — E40 does not overlap it). With guard fusion banked, DESIGN-4 round 6 ranks the remaining levers

@@ -1,5 +1,17 @@
 # DESIGN-4 — fleet partition planner (4 cards × 2 dies, no P2P, layer-split-only runtime)
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `proof/check.lean` `Chk.*`, `PROOF-COVERAGE-CHECK.md` §2).** Nothing MEASURED moved.
+> Marked in place below (**challenge:**): C-1 the "32k tie settled" headline quotes the retired line's break-even (0.19 %) — 5.32 % at the
+> banked E29, the wide cap clears by 0.18 points; C-3 the "two instances 3.853" cell doubles the 8-die chain (the 4-die instance is 3.52 and
+> needs c ≥ 1.095); C-4 dense V3 is dominated by chain batching at every N ≥ 2; C-5 the cross-die split family (§5 "tensor-split worked",
+> ALTERNATIVES §4) is dismissed on erratum 11, a vendor-runtime property the season-h concurrency rows no longer support — re-priced in
+> `DESIGN-FORK-EP8.md`; C-2 the expert anchor M0 = 165.8 / 170.2 has no HW-MAP row; C-6 every primary MoE cell carries 18.0 ms of 91 µs
+> serialized launches HW-MAP's realized row calls incompatible (V2 pays iff c_sync ≤ 42 µs there); C-7 the MoE spec line is 0.823 with E29
+> banked on both sides and prices the verify step's attention at the t = 1 cell; C-8 the 1M cell at the measured trip rate is +7.6 %; C-9
+> MoE-128k is attention-bound by 34.7 % at the banked anchor (12.8 % was the retired one); C-10 T_min_dies and the int4 tier stand on
+> erratum 12, measured once before #18 / #25 by the probe family whose k = 64 verdict was retracted. Every round ≤ 7 number is kept as printed.
+
+
 > **ROUND-6 STATUS (2026-11-08 — the MEASURED deferred-guard cells are the attention term; kernel session 5, HW-MAP 3928d0e; `proof/fleet.py`
 > `[R6-*]`, `proof/fleet.lean` `T6r_*` (20 new theorems, 334 total, 0 axioms / sorry / native_decide; `lake build` clean), PROOF-COVERAGE-4
 > rows F6-1 … F6-14).** fleet.py's first 676 output lines are byte-identical (alt.py's output unchanged). The per-layer attention at t = 1
@@ -172,8 +184,9 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 > target) — the D2-derived serial anchor retires and **E29 is BANKED at 14.64 ms per MoE token** (7.7 %
 > under the derived promise). The deferred-guard cell amortizes at the MEASURED retry share (τ = 8 % /
 > 5.5 % of launches at cap 3072 / 61440 vs the BANKED-E29 break-even 5.32 % — margins +2.7 pt / +0.18 pt
-> of launch share, the wide cap a measurement-resolution tie; round-4 C-1: the 0.19 % quoted the retired
-> pre-M0 E29),
+> of launch share; round-4 C-1 adjudicated CONFIRMED: the 0.19 % quoted the retired pre-M0 E29; the wide
+> cap sits a measurement-resolution tie inside the 3.8 % session-to-session base drift and M0's ±0.06 %
+> flip point),
 > and **the 32k tie is settled at the measured rates: E29 #1 on both caps** (the wide cap misses the line by 1 576 ns/layer).
 > Headline MoE 32k t = 1: 1.755 → **1.956 trip-free / 1.926 measured-amortized / 2.103 at the realized
 > launch bound (≤ 36 µs)**; 128k 1.233; 1M 0.276; two instances at the measured card-scale 2.0× ≈ **3.52**
@@ -1048,12 +1061,15 @@ table. The three variants that need **no runtime change** (each a measured-rate 
 |---|---|---|---|
 | **V1 — MoE expert kernel on the DDR→L0B direct path** (ALT-1): T_slab 122 979 → 99 374 (A lift serialised with the barrier cadence) / 96 089 (overlapped); every rate measured, the A-L0LOAD interleave is the one unmeasured choreography (**audit, #25:** x_q rides the production 2 × 32 KiB legs at 32-KiB-granular offsets, never one 64 KiB block — a single large block zeroes A rows ≥ 2, silent at t = 1 and wrong at B = 16 / verify t = 4; E29 checks rows 0–15 with prime-period patterns) | E29 | – | **2.035 (+12.9 %)** / 2.072 (+15.0 %) |
 | **V2 — per-layer persistent megakernel** (ALT-3): one launch per layer instead of 6 / 7 (saves 54.60 / 15.28 ms per token), two DDR K-split reductions per layer (+1.84 / +0.10 ms) and 480 / 140 flag rounds at c_sync each; **pays iff c_sync ≤ 109.9 µs (dense) / 108.4 µs (MoE)** [**audit (#29): the primary reading is c_sync = 20 µs — V2 MoE 1.979, V3 + V2 4.098 (`[PA-mega-*]`, T6f_mega_20us); (#31 / #26 / #30 / #22): the consumer's checksum compare and an in-kernel top-k are fresh-reduction readbacks — compare on the vector side, read once per layer, re-run on a mismatch, keep the router behind a launch boundary or route through the deterministic dispatch; polls in bounded nests; every nest resets the B ping-pong; the quantizer uses Duplicate + Mul or the measured pass**] (T3r_mega_threshold, an iff; proof: the dense line is a tie — at 109 903 ns the step is unchanged, strictly better iff ≤ 109 902) | E31 (c_sync), E32 (watchdog) | 0.107 / 0.106 / 0.106 at c_sync 2 / 5 / 20 µs (+2.8 / +1.9 / +1.9 %) | 2.019 / 2.012 / 1.979 (+12.0 / +11.6 / +9.8 %); with V1: **2.307 (+28.0 %)** |
-| **V3 — two 4-die instances with the minimal int4 tier** (§1.8) | H10, H11 (+ E29 for the hot tier) | **0.155 (+49.0 %)**; spec 0.349 / 0.374 | **3.720 (+106.4 %)** (3.391 on the anchored kernel); with V2 4.170 (+131 %), with V1-overlapped and V2 4.234 |
+| **V3 — two 4-die instances with the minimal int4 tier** (§1.8) | H10, H11 (+ E29 for the hot tier) | **0.155 (+49.0 %)**; spec 0.349 / 0.374 — **challenge (C-4):** two instances serve two sequences; the chain at B = 2 gives 0.199 vs 0.150 and wins for every B < 16.5 — the dense V3 is dominated by batching on the planner's own model | **3.720 (+106.4 %)** (3.391 on the anchored kernel); with V2 4.170 (+131 %), with V1-overlapped and V2 4.234 |
 
 Reading: on this runtime the only upgrade that still pays is Π = 8 (×7–8, zero link bandwidth, zero kernel change); V3 is its
 Π = 1 substitute (×1.5 / ×2.1) and is undone if H4 passes (Π = 8 of a single instance is 5.2× / 3.4× the two-instance cells,
 `[R3-inst-combo-*]`); V1 and V2 compose with either (they shorten every die's block). Tensor-split would be the latency
-lever (6.2× for one dense sequence) but the runtime faults on it. D2D is irrelevant to steady-state decode.
+lever (6.2× for one dense sequence) but the runtime faults on it. D2D is irrelevant to steady-state decode. **challenge (C-5):** the fault is the
+vendor runtime's split op; one process driving both dies of a card with custom kernels streams at 1.000–1.001 of the solo sum and two cards at
+2.0× (HW-MAP, season h) — the family is buildable as per-die launches plus a host all-reduce, gated on the UNMEASURED 8-die case:
+`DESIGN-FORK-EP8.md` (MoE 32k 2.93 / 4.67 tok/s/card at one sequence vs the chain's 1.96; dense 0.52 under the 8-way split).
 
 ---
 
@@ -1389,7 +1405,7 @@ witness that both dies of a card are streaming at once.
 | + MoE expert kernel on the direct path (V1) | E29 | 0.104 | **2.035** (+12.9 %) | 2nd: a kernel probe on a measured path, +13 % for every MoE cell and +10 % on the instance cell |
 | + per-layer megakernel, c_sync = 5 µs (V2) | E31 / E32 | 0.106 (+1.9 %) | 2.012 (+11.6 %) | 3rd: iff c_sync ≤ 108 µs; composes with everything |
 | V1 + V2 | E29 + E31 | 0.106 | **2.307** (+28.0 %) | |
-| **two 4-die instances, minimal int4 tier, direct-path hot tier (V3)** | **H10** (GREEN at card scale, 1.99× → 3.702 / 0.154; 2-card pairs pending) + H11 | **0.155** (+49.0 %) | **3.720** (+106.4 %) | **1st: an afternoon on the host; the largest gain that needs no runtime change** |
+| **two 4-die instances, minimal int4 tier, direct-path hot tier (V3)** | **H10** (GREEN at card scale, 1.99× → 3.702 / 0.154; 2-card pairs pending) — **challenge (C-3 / C-4 / C-22):** round 7's "3.853" doubles the 8-die CHAIN step (a 16-die configuration; `fleet.py` computes the int4 shares and never uses them); the 4-die instance at round-7 anchors is 3.52 for two sequences and needs c ≥ 1.095 (not 0.978); the dense cell is dominated by chain batching at every N ≥ 2; the split family of `DESIGN-FORK-EP8.md` beats both without the int4 tier + H11 | **0.155** (+49.0 %) | **3.720** (+106.4 %) | **1st: an afternoon on the host; the largest gain that needs no runtime change** |
 | V3 with the anchored kernel (no E29) | H10 | 0.155 | 3.391 (+88.1 %) | |
 | V3 + V2 | H10 + E31 | 0.157 (+50.9 %) | **4.170** (+131.4 %) | |
 | Π = 8 pipelining of one 8-die chain (runtime capability) | **H4** | **0.808** (7.7×) | **12.918** (7.1×) | the only lever above V3 — and it undoes V3 |
@@ -1483,7 +1499,7 @@ L-independent):
 | dense 32k | **E40 ≤ 14.84** | bounce 6.12 | — | 9.75 – 14.84 | 3.63 ms |
 | dense 128k | **E40 ≤ 39.79** | bounce 24.48 | — | 26.63 – 39.79 | 2.15 ms |
 
-**The order, as theorems:** every row holds at both ends of the E40 bracket (T6r_levers6). So **E40 is the attention-side #1 on every
+**challenge (round 4, Mission B):** the ranking below forgot the one attention lever with a MEASURED premise — K-int8 on the K half (2.13× same-extent, exact ×20, HW-MAP) saves 5.72 / 22.9 / 183 ms per MoE token at 32k / 128k / 1M against E40's bounds 3.46 / 9.28 / 67.1 and composes with E40 (`Chk.MissionB.ki8_lever`): K-i8 first, E40 second on every cell; at 128k it also passes E29 (14.64), and fusion + K-i8 (19.7 ms) beats E29 at 32k on both caps (`ki8_tie`). Under the EP fork the MoE spec verdict of §6 flips to a gain iff α ≥ 0.610 / 0.762 (`eps_flip`; E41 decides). **The order, as theorems:** every row holds at both ends of the E40 bracket (T6r_levers6). So **E40 is the attention-side #1 on every
 cell** — even at its pessimistic end it beats the bounce removal, by 0.50 ms per token at MoE 128k and 0.75 ms at MoE 1M, the two closest
 cells; **E29 remains the expert-side lever, and the largest remaining lever on MoE at 32k and 128k** (15.86 ms against E40 ≤ 3.46 / 9.28);
 **at MoE 1M E40 ≤ 67.09 > bounce 45.69 > E29 15.86**. The bounce removal is last on every cell except MoE 1M, where it is second — the same

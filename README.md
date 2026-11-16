@@ -36,6 +36,13 @@ spec sheets; every claim stands on its own measurement or proof.
 measured constants; `CHEAT-MATH.md` is its arithmetic layer — condensed, source-free statements, machine-checked
 in `proof/cheat.lean`.
 
+| challenge round | re-derivations | ledger | fork |
+|---|---|---|---|
+| 4 (2026-11-15, `PROMPT-7.md`) | `proof/check.lean` (`Chk.*`, 95 theorems), `proof/fleet.py` `[CHK-*]` / `[FORK-EP-*]` | `PROOF-COVERAGE-CHECK.md` (verdicts, the `Chk` ledger, findings, taint ranking, flip-list, re-scored alternatives) | `DESIGN-FORK-EP8.md` (expert / head placement across the 8 dies with a host all-reduce) |
+
+Corrections the challenge round applied to design text are marked **challenge:** in place; the rounds 1–3 of the same prompt
+are kept as unverified snapshot branches (`challenge-round`, `challenge-round-2`, `challenge-round-3`).
+
 `PROBLEM*.md` state each problem. Each design and proof round was handed to an external AI assistant
 session for adversarial review — the `PROMPT*.md` files are those briefs, and the round sections in
 the ledgers record what the reviews corrected. Designs carry status banners at the top. When later
@@ -56,7 +63,7 @@ The Lean files use **core Lean 4 only** (no Mathlib, no Batteries; closed by `de
 ```sh
 # toolchain: leanprover/lean4:v4.35.0 (via elan)
 cd proof
-lake build                 # all targets: Model, Smoke, Moe, Fleet, Attn, Alt
+lake build                 # all targets: Model, Smoke, Moe, Fleet, Attn, Alt, Cheat, Check
 lean alt.lean              # or any single file, standalone
 
 python3 alt.py             # print the labelled numbers a design quotes

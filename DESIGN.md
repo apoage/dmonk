@@ -1,5 +1,14 @@
 # DESIGN — execution layer for quantized-LLM decode matmul (one die, 8 cores)
 
+> **CHALLENGE ROUND 4 (2026-11-15 — fresh-eyes re-review; `proof/check.lean` `Chk.*`, `PROOF-COVERAGE-CHECK.md` §2).** Every PROVED row re-derives;
+> the live route (i8×i8→i32 on the DDR→L0B direct path, 174.6 flat m = 1..16) is MEASURED end to end and no P1 number steers a decision
+> wrongly today. Marked for the record (C-20): the SILICON banner below is two rounds stale ("has since run at 137.8" → 174.6; "k = 64 is
+> anomalous" → RETRACTED, a host dump-reader bug); HW-MAP:26 / ISA still list the i4→f16 dequant instruction as live against erratum 12;
+> the m ≥ 24 cliff 81 / 59 / 43 equals the flat rate ÷ strips (87.3 / 58.2 / 43.6 — this design's own dominated M-split, `T9_msplit`, to
+> 0.2 %): the "unresolved wedge" is weights re-streamed per 16-row strip, E37's expected signature; the 168.5 ceiling stood on the read+write
+> roof (pure-read ceiling 178.5, the measured 174.6 = 97.8 % of it).
+
+
 > **PROMPT-6 AUDIT (2026-11-08 — errata #18–#31, the corrected #3 and the widened #25 against this design; all five designs in
 > ERRATA-IMPACT.md).** No new silicon, no new theorem: model.py's output is unchanged (byte-identical), and the one cell this audit
 > re-designates is already proved. Every correction is marked **audit** in place. The live structure is the R3 route (i8 × i8 → i32 —
