@@ -1754,12 +1754,9 @@ def main8():
     print("[R8-bridge-eg] bridge overhead MEASURED span-invariant 64-73 us/L (was 330 us/L at the (i) era; HQPACK arm 1,905 us/L): engage-gate break-even ~600 tokens (default 2 pages = len >= 1,024); "
           "the A3B both-kernel ladder at K8=0: 18.7 / 15.8 / 11.1 t/s at 2.5k / 10.2k / 31.7k = 1.056x / 1.816x / 3.469x vs moe-only -- every span wins")
     print("[R8-ub-rule] serving constant MEASURED: -ub 128/256 beats the 512 default (+3.4..4.1% prefill, -2.02 GiB/die HBM at 32k) -- the 1-card 32k HBM wall (95.7%) recovers")
-    print("[R8-tp2-relay] card-pair relay MEASURED: pageable host relays beat SVM-pinned 5-17x for small payloads; per-crossing aclrtSynchronizeStream stream-drain is the tax (48-96/step); "
+    print("[R8-tp2-relay] card-pair relay MEASURED: pageable host relays beat runtime-pinned host buffers 5-17x for small payloads; the per-crossing stream-synchronize drain is the tax (48-96/step); "
           "TP2 pays capacity (-8.56 GiB/die owner) + prefill (+3.4..8.2%), never tok/s/card")
 
 
 if __name__ == "__main__":
-    main7()
-    main7f()
-    main_adj()
     main8()
