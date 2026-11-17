@@ -195,6 +195,20 @@ L = 4k/32k/128k/1M means 4096 / 32 768 / 131 072 / 1 048 576 tokens.
 > c ≥ ~1.1 — see `[R7F-inst-moe-32k]`).
 > All round ≤ 6 cells keep their printed values as history.
 
+> **ROUND-8 STATUS (2026-11-17 — the consolidation regen, `[R8-*]` / `R8r_*`)**: the W4 tier is
+> MEASURED (unpack 251.9 / stream 176.8 / MoE 169.2 / dense 151.0 gate-PASSED / in-serve 167.0
+> GB/s own-i4) and **re-grounds the int4 cold tier the whole instance-plan family stood on:
+> core rate 5.3 → 21.2 GB/s/core, slab 197 844 → 49 461 ns (exactly 4.0×)** — erratum 12
+> stands (NZ-i8 route). **The V3 two-instance plan re-prices 3.544 → 4.047 tok/s/card at the
+> measured tier, OVERTAKING the staggered-chain cell 3.852** — the round-4 "chain dominates"
+> settlement was premise-bound (DERIVED cell; the plan-with-W4-cold configuration is
+> UNMEASURED — its first experiment = the PIPE fork's two-threads protocol on the plan).
+> CLOSED on silicon: KV-int8 fused (0.82–0.93× slower; survivor = the SK3-parity cell
+> 3,567.7 µs = parity keeping −24.2% arena), V-i8 + the whole 128k-flip family (the drain
+> wall: ~2,096.9 µs serialized regardless of precision), lossless packing (H(q8) 6.84–7.17
+> bpw; all seats dead). Serving measured: bridge 64–73 µs/L, break-even ~600 tokens, ladder
+> 1.056×/1.816×/3.469×, multi-slot 18.77×/9.62× post-B-03, the −ub 128/256 rule.
+
 > **challenge: (PROMPT-7, 2026-11-15; PROOF-COVERAGE-CHECK.md, `proof/check.lean`)** (1) **V3 is ranked against the wrong baseline.**
 > §10's "1st: V3" compares V3's two sequences with the chain's one. Two sequences staggered on the UNCHANGED full-int8 chain give MoE
 > 3.853 — the cell `[R7-inst-moe-32k]` printed and `T7r_inst` proves, retired as an error for V3 but correct for that plan — against V3's

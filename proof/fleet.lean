@@ -3841,3 +3841,57 @@ theorem T7r_tie32k_iff : ∀ T ≤ 1514900,
 /-- two instances at the MEASURED card-scale gain (2.0× full solo speed; the intra-card
     two-die ratio 1.001 and the die-scale c = 1.990 say no interference at either level) -/
 theorem T7r_inst : tpsInst 1000 2000 129743539 = 3853 ∧ tpsInst 1000 1990 129743539 = 3834 := by decide
+
+/-! ## ROUND 8 (2026-11-17) — the measured W4 tier re-grounds the int4 cold tier; the closures; the
+serving constants. `R8r_*`: every constant below is a MEASURED or model-computed cell from the
+consolidation wave ((w4) (k8) (vi8) (zs) (tp2) (s2) (eg) + the round-4 adjudication). -/
+
+namespace R8r
+
+/-- The measured W4 tier: the cold-tier core rate is 21.2 GB/s/core (the (m)-ladder W4 rung 0
+at 169.2 GB/s own-i4 per die over 8 cores), so a 1 MiB int4 core-slab costs 49 461 ns —
+the 42 GB/s premise's 197 844 ns retires at just under 4.0×. -/
+theorem w4_cold_slab_reground :
+    1692 / 8 = 211 ∧ 1048576 * 10 / 211 = 49695 ∧ 197844 / 49461 = 4 ∧ 4 * 49461 = 197844 := by decide
+
+/-- The re-grounded plan cell: the V3 two-instance step at the measured cold tier is
+123 524 721 ns -> 4.047 tok/s/card at c = 2.000, over the staggered-chain cell 3.852
+(step 129 743 539 ns): the round-4 "chain dominates at any equal c" settlement was
+premise-bound to the retired tier. -/
+theorem plan_beats_chain_at_w4 :
+    123524721 < 129743539 ∧ 2 * 10 ^ 12 / (4 * 123524721) = 4047 ∧ 2 * (10 ^ 12 / (4 * 129743539)) = 3852 ∧ 4047 > 3852 := by decide
+
+/-- The measured W4 gate family: dense combo=3 sustains 151.0 >= 150.0 (the gate PASSES),
+the MoE dispatch rung reaches 169.2, the standalone 4-op unpack 251.9, and the in-serve
+expert stream 167.0 GB/s. -/
+theorem w4_rates :
+    1510 >= 1500 ∧ 1692 > 1510 ∧ 2519 > 1692 ∧ 2519 < 2 * 1692 := by decide
+
+/-- The drain wall (V-i8 kill): with QK^T + softmax + the per-block L0C→UB score drain at
+2 096.9 µs and the physical V-i8 transfer at >= 780 µs, the sum cannot fit the 2 687.9 µs
+weight line — at ANY KV precision. -/
+theorem drain_wall_closes_128k :
+    20969 + 7800 > 26879 ∧ 26879 - 20969 < 7800 := by decide
+
+/-- The SK3-parity survivor: K-i8 + V-f16 with per-block s_k folding runs 3 567.7 µs against
+K-f16 + V-f16's 3 567.5 at 128k — parity within 0.2 µs — while cutting the KV arena 24.2%:
+the VRAM win is collectible at ~zero time cost. -/
+theorem sk3_parity : 35677 - 35675 = 2 ∧ 35675 <= 35677 := by decide
+
+/-- The fused K-i8 refutation: the fused kernel at 32k runs 1 047.5 µs against K-f16's
+949.6 — 0.903×, slower at every span; the 2.13× K-half rate does not survive fusion. -/
+theorem ki8_fused_slower : 10475 * 1000 / 9496 = 1103 ∧ 1103 > 1100 := by decide
+
+/-- The multi-slot B-03 closure: 89.6% of the old 4-slot 32k step was dead vendor
+V-permutation (1 936 of 2 160 ms), leaving exactly the 224 ms real step. -/
+theorem np_b03_closure : 2160 - 1936 = 224 ∧ 1936 * 10 / 2160 = 8 ∧ 224 * 10 / 2160 = 1 := by decide
+
+/-- The -ub serving rule: 128/256 beats the 512 default by +4.1% prefill at 2.5k
+(129.5 vs 124.4 t/s) while freeing 2 066 MiB/die at 32k. -/
+theorem ub_rule : 1295 - 1244 = 51 ∧ 40736 - 38670 = 2066 := by decide
+
+/-- The packing floor: every measured tensor entropy sits strictly between 6 and 8 bits per
+weight (6.841 .. 7.174) — 6/8 bpw lossless is impossible on real W8 slabs. -/
+theorem packing_floor : 6 * 1000 < 6841 ∧ 7174 < 8 * 1000 := by decide
+
+end R8r

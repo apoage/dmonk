@@ -1705,3 +1705,61 @@ if __name__ == "__main__":
     main7()
     main7f()
     main_adj()
+
+
+# ============================================================ ROUND 8 (2026-11-17)
+# The consolidation regen: the W4 tier is MEASURED ((w4) season) and re-grounds the int4 cold tier
+# the whole instance-plan family stood on; the KV-int8 fused family and the lossless-packing family are
+# CLOSED on silicon ((k8)/(vi8)/(zs)); the serving layer is measured ((s2)/(eg)/(tp2)). Labels stay
+# MEASURED / DERIVED / UNMEASURED per the frame discipline.
+
+R_W4_UNPACK = 2519     # [tenth GB/s own-i4/die] the 4-op int16 NZ-i8 unpack, standalone probe ((w4) W4P1)
+R_W4_PACKED = 1768     # [tenth GB/s own-i4/die] GM->UB->4-op->B1 no-MMA, 0.0 us DMA exposure ((w4) W4S11)
+R_W4_MOE    = 1692     # [tenth GB/s own-i4/die] (m)-ladder W4 rung 0 full dispatch, 2.165x vs W8 ((w4) step4)
+R_W4_DENSE  = 1510     # [tenth GB/s own-i4/die] dense combo=3 M=1 full kernel, 1.973x vs W8, GATE PASSED
+R_W4_CORE   = 212      # [tenth GB/s own-i4/core] R_W4_MOE/8 -> the re-grounded cold-tier core rate
+T_SLAB_W4_R8 = tn(MiB, R_W4_CORE)   # 49 461 ns per 1 MiB int4 core-slab at the MEASURED W4 tier (was 197 844)
+
+
+def main8():
+    D, M = DENSE, MOE
+    print("\n# ---- ROUND 8 (2026-11-17; the measured W4 tier re-grounds the int4 cold tier; KV-int8 fused + lossless packing closed; serving measured). [R8-*] cells. Every label above is unchanged ----")
+    print(f"[R8-inputs] W4 tier MEASURED: unpack {t10(R_W4_UNPACK)} standalone / {t10(R_W4_PACKED)} packed-stream / {t10(R_W4_MOE)} MoE dispatch / {t10(R_W4_DENSE)} dense gate-pass own-i4 GB/s/die; in-serve T(B) = 0.120 ms/L + B/(167.0 GB/s); "
+          f"cold-tier core rate {t10(R_W4_CORE)}/core -> slab {T_SLAB_W4_R8} ns (was {T_SLAB_W4} at the 42 GB/s premise, {T_SLAB_W4 / T_SLAB_W4_R8:.1f}x); erratum 12 STANDS (the route is NZ-i8 = 16*q4 through the i8 MMA, native i4 dead)")
+    # ---- THE RE-GROUND: the V3 two-instance plan at the measured cold tier
+    xs = [min_x(M, p, 32768) for p in range(4)]
+    a3m = attn3_seq(M, 32768, 1, 1692)[0]
+    T_SLAB3["m0"] = T_SLAB_M0
+    try:
+        v3_old = inst_step3c(M, 32768, xs=xs, hot="m0", cold=T_SLAB_W4)[0] - M["nL"] * a3m + M["nL"] * a7(32768, "amort-cap3072")
+        v3_r8  = inst_step3c(M, 32768, xs=xs, hot="m0", cold=T_SLAB_W4_R8)[0] - M["nL"] * a3m + M["nL"] * a7(32768, "amort-cap3072")
+    finally:
+        del T_SLAB3["m0"]
+    Tm = step7(M, 32768, "amort-cap3072")[0]
+    print(f"[R8-inst-plan-w4] THE RE-GROUND: the V3 two-instance plan at the MEASURED W4 cold tier = {v3_r8} ns -> {t3(tps_card_inst(1000, v3_r8))} tok/s/card "
+          f"(was {v3_old} ns -> {t3(tps_card_inst(1000, v3_old))} at the 42 GB/s premise) -- it now BEATS the staggered chain cell {t3(2 * tps_card(1000, Tm))} "
+          f"(chain step {Tm} ns = the [ADJ-inst-32k-dual-baseline] 3.853 cell): the round-4 settlement 'the chain dominates at any equal c' was PREMISE-BOUND to the old tier. "
+          f"DERIVED from MEASURED rates; the plan-with-W4-cold configuration itself is UNMEASURED on silicon (its first experiment = the PIPE fork's two-threads protocol on the plan instead of the chain)")
+    print(f"[R8-chain-j4] the measured anchors stand: staggered chain 3.853 (dual baseline), J4 two instances 15.75 tok/s/card MEASURED on a card pair at c = 2.005")
+    # ---- closures on silicon
+    print("[R8-ki8-verdict] KV-int8 FUSED family REFUTED: fused K-i8 0.82-0.93x SLOWER at every span (the 2.13x K-half rate does not survive fusion -- the score dequant lands on PIPE_V behind a no-longer-hidden SoftmaxStrip); "
+          "SURVIVORS: -24.2% KV arena, 87.6 GB/s own-K standalone, and the SK3-parity cell -- K-i8 + V-f16 + per-block s_k fold = 3,567.7 us = parity with K-f16 (3,567.5) at 128k keeping the VRAM cut")
+    print("[R8-vi8-wall] V-i8 DEAD and the 128k-flip family CLOSED by the drain wall: per-block L0C->UB score drain serializes QK^T+softmax at ~2,096.9 us @128k REGARDLESS of KV precision; the remaining 591.0 us budget "
+          "< the ~780-990 us physical V transfer; even the unrealizable 0-scalar floor misses the 2,687.9 us weight line by +464.9. Flipping 128k requires drain-architecture changes, not precision changes")
+    print("[R8-zs-kill] lossless int8 packing CLOSED: H(q8) = 6.84-7.17 bpw on 12 real tensors (6/8 bpw impossible), ZipServ 3-bmp lands 1.04-1.07x, W4 stacking net-expands 10/12 tensors; all three unpack seats measured dead; "
+          "(w4)'s 4-op path is a unique boundary point (|q4|<=8 left-shift headroom + deterministic 4.0 bpw)")
+    # ---- the serving layer, measured
+    print("[R8-np-b03] multi-slot MEASURED post-B-03: np4x32k 1.148 pmax = 2.13x vendor / 17.927 t/s post-prefill = 18.77x (step 2,160 -> 224.0 ms; 89.6% of the old step was dead vendor V-permute); "
+          "np8x8k 6.951 pmax = 2.37x paired / 42.835 post-prefill = 9.62x (89.2% of (h) np8x2k at 4x depth)")
+    print("[R8-bridge-eg] bridge overhead MEASURED span-invariant 64-73 us/L (was 330 us/L at the (i) era; HQPACK arm 1,905 us/L): engage-gate break-even ~600 tokens (default 2 pages = len >= 1,024); "
+          "the A3B both-kernel ladder at K8=0: 18.7 / 15.8 / 11.1 t/s at 2.5k / 10.2k / 31.7k = 1.056x / 1.816x / 3.469x vs moe-only -- every span wins")
+    print("[R8-ub-rule] serving constant MEASURED: -ub 128/256 beats the 512 default (+3.4..4.1% prefill, -2.02 GiB/die HBM at 32k) -- the 1-card 32k HBM wall (95.7%) recovers")
+    print("[R8-tp2-relay] card-pair relay MEASURED: pageable host relays beat SVM-pinned 5-17x for small payloads; per-crossing aclrtSynchronizeStream stream-drain is the tax (48-96/step); "
+          "TP2 pays capacity (-8.56 GiB/die owner) + prefill (+3.4..8.2%), never tok/s/card")
+
+
+if __name__ == "__main__":
+    main7()
+    main7f()
+    main_adj()
+    main8()
